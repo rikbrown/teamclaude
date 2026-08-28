@@ -1,6 +1,6 @@
 name: Publish
 
-# Publish to npm whenever a version bump lands on master. The job compares the
+# Publish to npm whenever a version bump lands on this fork's default branch. The job compares the
 # package.json version against what is already on npm, so it only publishes when
 # the version is new — merging any other PR is a no-op. Publishing is idempotent:
 # re-running on the same version simply skips.
@@ -9,13 +9,13 @@ name: Publish
 # npm mints a short-lived credential from the GitHub OIDC token at publish time,
 # and provenance is attached automatically. This requires a one-time setup on
 # npmjs.com: on the package's Settings → Trusted Publisher, add a GitHub Actions
-# publisher for owner KarpelesLab, repo teamclaude, workflow "publish.yml".
+# publisher for owner rikbrown, repo teamclaude, workflow "publish.yml".
 on:
   push:
-    branches: [master]
+    branches: [rik/soonest-weekly-pool]
     paths:
       - 'package.json'
-  # Manual trigger: publish the version currently on master on demand. Useful to
+  # Manual trigger: publish the version currently on the default branch on demand. Useful to
   # backfill a version that was bumped before this workflow existed, or to re-run
   # after fixing the npm Trusted Publisher setup. The npm-view check below still
   # gates it, so a manual run on an already-published version is a safe no-op.
@@ -74,7 +74,9 @@ jobs:
         if: steps.check.outputs.publish == 'true'
         # No NODE_AUTH_TOKEN: npm exchanges the OIDC token (id-token: write) for a
         # short-lived publish credential, and attaches provenance automatically.
-        run: npm publish --access public
+        # A prerelease version (1.1.13-rik.N) is rejected without an explicit dist-tag;
+        # `latest` is the tag the self-updater reads.
+        run: npm publish --access public --tag latest
 
       - name: Tag the release and create a GitHub release
         if: steps.check.outputs.publish == 'true'

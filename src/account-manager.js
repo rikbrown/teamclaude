@@ -668,6 +668,13 @@ export class AccountManager {
     return { eligible: true };
   }
 
+  /** Session-distribution toggle (issue #109), applied live on config reload.
+   *  Existing session pins survive a toggle: the flag gates only how NEW
+   *  sessions are routed. */
+  setDistributeSessions(enabled) {
+    this.distributeSessions = !!enabled;
+  }
+
   /**
    * Soonest-weekly preference: treat the governing weekly reset as a dynamic
    * priority tier, so the account whose window refreshes soonest is spent

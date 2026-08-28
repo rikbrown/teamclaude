@@ -17,7 +17,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import { getConfigPath } from './config.js';
 
-export const PKG_NAME = '@karpeleslab/teamclaude';
+export const PKG_NAME = '@rikcodes/teamclaude'; // fork: self-updates track this scope, never upstream's
 const REGISTRY = 'https://registry.npmjs.org';
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -35,12 +35,29 @@ export function currentVersion(root = packageRoot()) {
   }
 }
 
-/** Numeric compare of x.y.z (prerelease/build suffix ignored). >0 if a is newer. */
+/** Numeric compare of x.y.z, then the pre-release tail. >0 if a is newer.
+ *  The tail matters here: this fork versions releases as X.Y.Z-rik.N on the
+ *  same upstream base, so ignoring it would make every -rik.N publish compare
+ *  equal and never trigger an update. Ordering follows semver: base segments
+ *  first, a release outranks any pre-release of the same base, and two
+ *  pre-releases compare segment-wise (numerically where both are numbers). */
 export function compareVersions(a, b) {
-  const nums = (v) => String(v).split('+')[0].split('-')[0].split('.').map((n) => parseInt(n, 10) || 0);
-  const pa = nums(a), pb = nums(b);
+  const parse = (v) => {
+    const [base, ...pre] = String(v).split('+')[0].split('-');
+    return { nums: base.split('.').map((n) => parseInt(n, 10) || 0), pre: pre.join('-') };
+  };
+  const pa = parse(a), pb = parse(b);
   for (let i = 0; i < 3; i++) {
-    const d = (pa[i] || 0) - (pb[i] || 0);
+    const d = (pa.nums[i] || 0) - (pb.nums[i] || 0);
+    if (d) return d;
+  }
+  if (!pa.pre || !pb.pre) return (pa.pre ? 0 : 1) - (pb.pre ? 0 : 1);
+  const sa = pa.pre.split('.'), sb = pb.pre.split('.');
+  for (let i = 0; i < Math.max(sa.length, sb.length); i++) {
+    if (sa[i] === undefined) return -1;
+    if (sb[i] === undefined) return 1;
+    const na = Number(sa[i]), nb = Number(sb[i]);
+    const d = Number.isFinite(na) && Number.isFinite(nb) ? na - nb : sa[i].localeCompare(sb[i]);
     if (d) return d;
   }
   return 0;

@@ -5,6 +5,7 @@ import { chmod, cp, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { PKG_NAME } from '../src/updater.js';
 
 // `teamclaude update` as a subprocess, run from a copy of the package laid out
 // where an installer puts it: the command reads the install kind off the
@@ -83,7 +84,7 @@ test('update from a pnpm copy names the pnpm command and never runs npm', { skip
     npmRoot: 'lib/node_modules',
   });
   assert.equal(result.code, 0, result.stderr);
-  assert.match(result.stdout, /^This copy was installed with pnpm, which npm cannot update\. Run: pnpm add -g @karpeleslab\/teamclaude@latest$/m);
+  assert.ok(result.stdout.split('\n').includes(`This copy was installed with pnpm, which npm cannot update. Run: pnpm add -g ${PKG_NAME}@latest`), result.stdout);
   assert.doesNotMatch(result.stdout, /Updat(?:ing|ed) /);
   assert.equal(result.npmCalls, '');
 });
@@ -97,5 +98,5 @@ test('update from an npm global copy still installs with npm', { skip: process.p
   });
   assert.equal(result.code, 0, result.stderr);
   assert.match(result.stdout, /^Updated to 999\.0\.0\./m);
-  assert.match(result.npmCalls, /^install -g @karpeleslab\/teamclaude@999\.0\.0$/m);
+  assert.ok(result.npmCalls.split('\n').includes(`install -g ${PKG_NAME}@999.0.0`), result.npmCalls);
 });

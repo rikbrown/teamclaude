@@ -1,6 +1,6 @@
 {
-  "name": "@karpeleslab/teamclaude",
-  "version": "1.1.19",
+  "name": "@rikcodes/teamclaude",
+  "version": "1.1.19-rik.1",
   "description": "Multi-account proxy for Claude Code and Codex: pools Claude Max, ChatGPT/Codex, API-key and third-party backend accounts, and rotates on quota",
   "type": "module",
   "main": "src/index.js",
@@ -33,16 +33,19 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/KarpelesLab/teamclaude.git"
+    "url": "git+https://github.com/rikbrown/teamclaude.git"
   },
   "bugs": {
-    "url": "https://github.com/KarpelesLab/teamclaude/issues"
+    "url": "https://github.com/rikbrown/teamclaude/issues"
   },
-  "homepage": "https://github.com/KarpelesLab/teamclaude#readme",
+  "homepage": "https://github.com/rikbrown/teamclaude#readme",
   "engines": {
     "node": ">=20.0.0"
   },
   "devDependencies": {
     "eslint": "^9.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

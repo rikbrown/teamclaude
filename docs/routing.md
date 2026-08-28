@@ -56,6 +56,23 @@ On by default. Tune or disable via `stormRamp` in the config:
 
 The same gate handles rate-limit 429s: TeamClaude pauses the account for the `retry-after` window so new queries wait instead of piling on, then releases the held queries through a fresh ramp (staggered, not all at once).
 
+## Soonest-weekly rotation
+
+Default selection is sticky: the reset-order ranking only runs when the current account exhausts, so an account whose weekly window is about to roll can expire with quota unspent. `soonestWeekly` makes the ranking continuous:
+
+```json
+"soonestWeekly": { "enabled": true, "poolHours": 12 }
+```
+
+Among equal-`priority` accounts, those whose governing weekly reset is within `poolHours` of the soonest known reset form a pool. Selection prefers the pool, and the current account is preempted when an available equal-priority account resets more than `poolHours` sooner — so the quota closest to refreshing is spent first even while the current account is still healthy. The pool width doubles as the anti-flip-flop margin: accounts inside it never preempt each other, so a preemption costs at most one prompt-cache miss per `poolHours` narrowing.
+
+Interactions:
+
+- **`priority` still wins.** A lower `priority` number outranks any reset time, and reset-preemption never crosses priority tiers.
+- **Model-aware.** The ranking uses the weekly bucket that governs the request's model (Fable and Sonnet have their own), so a Fable request can prefer a different account than an Opus one.
+- **`distributeSessions` composes.** New sessions balance across the pool instead of across all equal-priority accounts, and a session pinned outside the pool re-routes into it.
+- **Unknown quota is safe.** An account whose weekly reset is not yet known never preempts, and is never preempted while it is being probed; a request still reaches it through normal selection and learns its quota.
+
 ## Model-aware routing
 
 The per-model weekly cap (e.g. Fable) is tracked separately, so an account whose Fable quota is spent is skipped **only** for Fable requests and still serves Opus/Sonnet. **Eligibility for a family model takes the higher of that family's bucket and the shared weekly one**, because family spend meters twice, once in the family bucket and once in the shared one. An account already past its shared weekly cap is therefore unavailable for family traffic too, rather than continuing to serve it and pushing the shared bucket further past the cap. The reverse still holds: a spent *family* bucket bars only that family. One consequence worth knowing: on the weekly buckets the family gate is the stricter of the two, so an account whose weekly quota lets it serve Fable can also serve Opus. That is a statement about quota only, since a `routes` pin or a blocklist can still make an account ineligible for one model and not the other. Requests are routed by their `model`, read exactly from the request body in both base-URL and MITM modes. `teamclaude status` shows this per account (a `Models` line) and any families it detects appear as **auto** routes.

@@ -1,5 +1,18 @@
 # TeamClaude
 
+> **Fork notice (rikbrown).** This fork adds one feature and two reload fixes on top of
+> [KarpelesLab/teamclaude](https://github.com/KarpelesLab/teamclaude):
+>
+> - **[Soonest-weekly rotation](docs/routing.md#soonest-weekly-rotation)** (`soonestWeekly`, opt-in): rank
+>   equal-priority accounts by the weekly window that governs the requested model, continuously — preempt the
+>   current account when another resets more than `poolHours` sooner, and balance `distributeSessions` within
+>   that pool instead of across all accounts. Spends the quota closest to refreshing first, so a window no
+>   longer rolls over with quota unspent.
+> - `soonestWeekly` and `distributeSessions` changes now apply on config reload; upstream applies
+>   `distributeSessions` only at startup.
+>
+> Branch: `rik/soonest-weekly-pool`. Everything else matches upstream.
+
 [![CI](https://github.com/KarpelesLab/teamclaude/actions/workflows/ci.yml/badge.svg)](https://github.com/KarpelesLab/teamclaude/actions/workflows/ci.yml)
 [![npm version](https://img.shields.io/npm/v/@karpeleslab/teamclaude.svg)](https://www.npmjs.com/package/@karpeleslab/teamclaude)
 [![node](https://img.shields.io/node/v/@karpeleslab/teamclaude.svg)](https://nodejs.org)

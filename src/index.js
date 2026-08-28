@@ -265,6 +265,7 @@ async function serverCommand() {
     // Pick up route table edits (teamclaude route …, TUI editor, or a hand edit).
     config.routes = diskConfig.routes || [];
     accountManager.setRoutes(config.routes);
+    config.soonestWeekly = diskConfig.soonestWeekly;
     accountManager.setSoonestWeekly(config.soonestWeekly);
     // Apply an sx.org key/mode change made on disk (e.g. via POST /teamclaude/reload).
     const diskSxKey = diskConfig.sx?.apiKey || null;

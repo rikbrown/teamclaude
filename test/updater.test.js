@@ -16,8 +16,16 @@ test('compareVersions orders x.y.z numerically and ignores pre-release', () => {
   assert.ok(compareVersions('1.10.0', '1.9.0') > 0);   // numeric, not lexical
   assert.ok(compareVersions('2.0.0', '1.9.9') > 0);
   assert.equal(compareVersions('1.1.1', '1.1.1'), 0);
-  assert.equal(compareVersions('1.1.1', '1.1.1-beta.2'), 0); // suffix ignored
+  assert.ok(compareVersions('1.1.1', '1.1.1-beta.2') > 0); // release outranks pre-release (semver §11)
   assert.ok(compareVersions('1.0.0', '1.0.1') < 0);
+});
+
+test('compareVersions orders fork pre-release tails so -rik.N publishes trigger updates', () => {
+  assert.ok(compareVersions('1.1.13-rik.2', '1.1.13-rik.1') > 0);
+  assert.ok(compareVersions('1.1.13-rik.10', '1.1.13-rik.9') > 0); // numeric, not lexical
+  assert.ok(compareVersions('1.1.14-rik.1', '1.1.13-rik.9') > 0);  // base wins first
+  assert.ok(compareVersions('1.1.13-rik.1', '1.1.13') < 0);
+  assert.equal(compareVersions('1.1.13-rik.1', '1.1.13-rik.1'), 0);
 });
 
 // ── installKind ──────────────────────────────────────────────
@@ -150,9 +158,12 @@ test('runUpdate does not block the event loop while npm runs', async () => {
 
 // compareVersions parses what it can, so "99.0.0 || npm:evil" reads as newer
 // than anything installed and used to go straight into `npm install -g`.
-test('isReleaseVersion accepts only x.y.z', () => {
-  for (const v of ['1.2.3', '0.0.1', '10.20.30']) assert.equal(isReleaseVersion(v), true, v);
-  for (const v of ['99.0.0 || npm:evil', '1.2', '1.2.3-beta.1', 'latest', ' 1.2.3', '1.2.3\n', '', null, undefined, 'v1.2.3']) {
+// Fork: the `-rik.N` tail is admitted, since that is the shape every release
+// of this package has; any other pre-release and the injected shapes stay
+// refused.
+test('isReleaseVersion accepts only x.y.z or x.y.z-rik.N', () => {
+  for (const v of ['1.2.3', '0.0.1', '10.20.30', '1.1.19-rik.1', '1.1.19-rik.12']) assert.equal(isReleaseVersion(v), true, v);
+  for (const v of ['99.0.0 || npm:evil', '1.2', '1.2.3-beta.1', '1.2.3-', '1.2.3-rik', '1.2.3-rik.', '1.2.3-rik.1.2', '1.2.3-rik.x', '1.2.3-npm:evil', '1.2.3-rik.1 || npm:evil', 'latest', ' 1.2.3', '1.2.3\n', '', null, undefined, 'v1.2.3']) {
     assert.equal(isReleaseVersion(v), false, String(v));
   }
 });
@@ -162,7 +173,11 @@ test('runUpdate spawns nothing for a version that is not a release version', asy
   const spawnImpl = fakeSpawn(calls);
   assert.equal(await runUpdate('99.0.0 || npm:evil', { spawnImpl }), false);
   assert.equal(await runUpdate('1.2.3-beta.1', { spawnImpl }), false);
+  assert.equal(await runUpdate('1.2.3-rik.1 || npm:evil', { spawnImpl }), false);
   assert.equal(calls.length, 0);
+  // Fork: its own -rik.N releases must install.
+  assert.equal(await runUpdate('1.1.19-rik.1', { spawnImpl }), true);
+  assert.deepEqual(calls.at(-1)[1], ['install', '-g', `${PKG_NAME}@1.1.19-rik.1`]);
   // The literal tag the manual fallback uses is still fine.
   assert.equal(await runUpdate('latest', { spawnImpl }), true);
 });

@@ -18,11 +18,14 @@
 > npm install -g @rikcodes/teamclaude
 > ```
 >
+> Already have upstream installed globally? Run `npm uninstall -g @karpeleslab/teamclaude` first —
+> both packages provide the `teamclaude` command.
+>
 > Branch: `rik/soonest-weekly-pool`. Everything else matches upstream.
 
-[![CI](https://github.com/KarpelesLab/teamclaude/actions/workflows/ci.yml/badge.svg)](https://github.com/KarpelesLab/teamclaude/actions/workflows/ci.yml)
-[![npm version](https://img.shields.io/npm/v/@karpeleslab/teamclaude.svg)](https://www.npmjs.com/package/@karpeleslab/teamclaude)
-[![node](https://img.shields.io/node/v/@karpeleslab/teamclaude.svg)](https://nodejs.org)
+[![CI](https://github.com/rikbrown/teamclaude/actions/workflows/ci.yml/badge.svg?branch=rik/soonest-weekly-pool)](https://github.com/rikbrown/teamclaude/actions/workflows/ci.yml)
+[![npm version](https://img.shields.io/npm/v/@rikcodes/teamclaude.svg)](https://www.npmjs.com/package/@rikcodes/teamclaude)
+[![node](https://img.shields.io/node/v/@rikcodes/teamclaude.svg)](https://nodejs.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Multi-account Claude proxy with automatic quota-based rotation for [Claude Code](https://claude.ai/claude-code).
@@ -48,6 +51,7 @@ Already logged into Claude Code? `teamclaude import` takes its credentials inste
 ## What it does
 
 - Rotates to the next account when the 5h session or 7d weekly bucket reaches the threshold (98% by default), preferring the account whose weekly quota resets soonest.
+- Optionally spends the account whose weekly window resets soonest **first**, preempting the current account when another resets more than `poolHours` sooner, so a window stops rolling over with quota unspent (`soonestWeekly`, this fork).
 - Tracks the per-model weekly cap separately, so an account out of Fable quota is skipped for Fable requests and still serves Opus and Sonnet.
 - Tells a spent quota bucket apart from a per-minute rate limit and only rotates on the first one. Rotating on a rate limit would just move the burst to the next account and drop the warm cache, so it paces the same account instead.
 - Paces requests onto a freshly switched account, so a herd of agents failing over at the same instant doesn't throttle it and cascade down the fleet.
@@ -99,23 +103,33 @@ Step-by-step lifecycle: [docs/routing.md](docs/routing.md#request-lifecycle).
 | [Proxy modes](docs/proxy-modes.md) | MITM forward proxy, sx.org residential egress |
 | [Compliance](docs/compliance.md) | Terms of service notes |
 
+## Releasing this fork
+
+Versions are `<upstream base>-rik.<n>`, e.g. `1.1.13-rik.1`. The self-updater orders that tail, so every publish reaches existing installs within a day.
+
+1. Rebase onto the upstream release you want as the base, if any.
+2. Bump `version` in `package.json` and commit.
+3. Push to `rik/soonest-weekly-pool` — the Publish workflow runs the tests, publishes to npm, and cuts a GitHub release.
+
+The workflow authenticates with npm Trusted Publishing (OIDC), which needs a one-time setup on npmjs.com: `@rikcodes/teamclaude` → Settings → Trusted Publisher → GitHub Actions, owner `rikbrown`, repo `teamclaude`, workflow `publish.yml`. Until that exists, publish by hand:
+
+```bash
+pnpm publish --publish-branch rik/soonest-weekly-pool --tag latest --otp=<code>
+```
+
+A prerelease version always needs an explicit `--tag`, and `latest` is the tag the self-updater reads.
+
 ## Security
 
-The only canonical sources for TeamClaude are this repository (https://github.com/KarpelesLab/teamclaude) and the [`@karpeleslab/teamclaude`](https://www.npmjs.com/package/@karpeleslab/teamclaude) npm package. TeamClaude is **never** distributed as a downloadable binary archive, so be wary of soft-forks that bundle a `.zip` and tell you to extract and run it. See [SECURITY.md](SECURITY.md) for details and how to report issues.
+This repository is a personal fork and is **not** the canonical project. Upstream's canonical sources are unchanged: the [KarpelesLab repository](https://github.com/KarpelesLab/teamclaude) and the [`@karpeleslab/teamclaude`](https://www.npmjs.com/package/@karpeleslab/teamclaude) npm package.
+
+This fork is distributed as this repository and the [`@rikcodes/teamclaude`](https://www.npmjs.com/package/@rikcodes/teamclaude) npm package, published by `rikbrown`. The separate package name means it can never be installed over the canonical one.
+
+Neither is **ever** distributed as a downloadable binary archive, so be wary of any copy that bundles a `.zip` and tells you to extract and run it. See [SECURITY.md](SECURITY.md) for details and how to report issues.
 
 ## Compliance
 
 TeamClaude is a local proxy holding your own credentials and driving your own Claude Code CLI. How that lines up with Anthropic's terms, including the multi-subscription question people ask most, is written up in [docs/compliance.md](docs/compliance.md). Not legal advice.
-
-## Star history
-
-<a href="https://www.star-history.com/?repos=KarpelesLab%2Fteamclaude&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=KarpelesLab/teamclaude&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=KarpelesLab/teamclaude&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=KarpelesLab/teamclaude&type=date&legend=top-left" />
- </picture>
-</a>
 
 ## License
 

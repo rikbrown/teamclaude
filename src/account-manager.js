@@ -108,7 +108,7 @@ function sampleModelFor(route) {
 }
 
 export class AccountManager {
-  constructor(accounts, switchThreshold = 0.98, { refreshFn = refreshAccessToken, throttleProbeFloorMs, forcedRefreshFloorMs = FORCED_REFRESH_FLOOR_MS, routes, ramp, distributeSessions = false, sessionTracker } = {}) {
+  constructor(accounts, switchThreshold = 0.98, { refreshFn = refreshAccessToken, throttleProbeFloorMs, forcedRefreshFloorMs = FORCED_REFRESH_FLOOR_MS, routes, ramp, distributeSessions = false, soonestWeekly, sessionTracker } = {}) {
     // How long a just-minted token is trusted against a forced refresh.
     this._forcedRefreshFloorMs = forcedRefreshFloorMs;
     // Injectable for tests (mirrors Prober's probeFn); defaults to the real
@@ -130,6 +130,7 @@ export class AccountManager {
     this.routePins = new Map();
     this.switchThreshold = switchThreshold;
     this.setRoutes(routes);
+    this.setSoonestWeekly(soonestWeekly);
     // Storm control: when rotation switches to a fresh account, a burst of
     // in-flight requests (e.g. dozens of agents failing over together) would all
     // hit it at once and instantly throttle it — cascading down the fleet
@@ -319,11 +320,10 @@ export class AccountManager {
     if (pinIdx != null) {
       const pinned = this.accounts[pinIdx];
       if (pinned && this._isAvailable(pinned, model, advisorModel) && !exclude?.has(pinIdx)) {
-        // Mirror _select's priority preemption so an operator's priority order
-        // still wins over a session's stickiness.
-        const betterExists = this.accounts.some(a =>
-          this._isAvailable(a, model, advisorModel) && !exclude?.has(a.index) && (a.priority || 0) < (pinned.priority || 0));
-        if (!betterExists) return pinned;
+        // Mirror _select's preemption (priority, and soonest-weekly when
+        // enabled) so an operator's priority order — and a strictly sooner
+        // weekly pool — still win over a session's stickiness.
+        if (!this._preemptedBy(pinned, model, advisorModel, exclude)) return pinned;
       }
     }
     return this._pickLeastLoaded(exclude, model, advisorModel);
@@ -335,24 +335,48 @@ export class AccountManager {
    * (the existing tiebreak). */
   _pickLeastLoaded(exclude = null, model = null, advisorModel = null) {
     const now = Date.now();
-    let best = null;
-    let bestPriority = Infinity;
-    let bestSessions = Infinity;
-    let bestInFlight = Infinity;
-    let bestReset = Infinity;
+    const candidates = [];
     for (const account of this.accounts) {
       if (exclude?.has(account.index)) continue;
       if (!this._isAvailable(account, model, advisorModel)) continue;
+      candidates.push(account);
+    }
+    // Soonest-weekly pool: within the winning priority tier, only accounts
+    // whose governing weekly reset is within poolHours of the soonest known
+    // reset receive new sessions. An unknown reset counts as in-pool so a
+    // request still reaches it and learns its quota (the same probe-first
+    // convention as _pickBestAvailable).
+    const sw = this.soonestWeekly;
+    let poolEdge = Infinity;
+    if (sw.enabled && candidates.length) {
+      const tier = Math.min(...candidates.map(a => a.priority || 0));
+      for (const a of candidates) {
+        if ((a.priority || 0) !== tier) continue;
+        const reset = this._governingWeeklyReset(a, model);
+        if (reset != null && reset < poolEdge) poolEdge = reset;
+      }
+      poolEdge += sw.poolHours * 3600_000;
+    }
+    let best = null;
+    let bestPriority = Infinity;
+    let bestInPool = false;
+    let bestSessions = Infinity;
+    let bestInFlight = Infinity;
+    let bestReset = Infinity;
+    for (const account of candidates) {
       const priority = account.priority || 0;
+      const reset = this._governingWeeklyReset(account, model) || -Infinity;
+      const inPool = reset <= poolEdge;
       const sessions = this.sessionTracker.activeCountFor(account.index, now);
       const inFlight = account.inFlight || 0;
-      const reset = this._governingWeeklyReset(account, model) || -Infinity;
       if (priority < bestPriority
-        || (priority === bestPriority && sessions < bestSessions)
-        || (priority === bestPriority && sessions === bestSessions && inFlight < bestInFlight)
-        || (priority === bestPriority && sessions === bestSessions && inFlight === bestInFlight && reset < bestReset)) {
+        || (priority === bestPriority && inPool > bestInPool)
+        || (priority === bestPriority && inPool === bestInPool && sessions < bestSessions)
+        || (priority === bestPriority && inPool === bestInPool && sessions === bestSessions && inFlight < bestInFlight)
+        || (priority === bestPriority && inPool === bestInPool && sessions === bestSessions && inFlight === bestInFlight && reset < bestReset)) {
         best = account;
         bestPriority = priority;
+        bestInPool = inPool;
         bestSessions = sessions;
         bestInFlight = inFlight;
         bestReset = reset;
@@ -588,9 +612,25 @@ export class AccountManager {
    * reports it — one predicate so the answer cannot drift from the behaviour.
    */
   _preemptedBy(account, model = null, advisorModel = null, exclude = null) {
-    return this.accounts.find(a => this._isAvailable(a, model, advisorModel)
-      && !exclude?.has(a.index)
-      && (a.priority || 0) < (account.priority || 0)) || null;
+    const pri = account.priority || 0;
+    const sw = this.soonestWeekly;
+    // Reset-preemption needs both windows known: an unknown candidate must not
+    // preempt (it sorts first in _pickBestAvailable purely so a request probes
+    // it), and an unknown current account is itself still being probed, so
+    // yanking traffic off it would prevent learning its quota (mirrors
+    // _switchOnSessionReset's guard).
+    const currentReset = sw.enabled ? this._governingWeeklyReset(account, model) : null;
+    const poolMs = sw.poolHours * 3600_000;
+    return this.accounts.find(a => {
+      if (a.index === account.index) return false;
+      if (exclude?.has(a.index)) return false;
+      if (!this._isAvailable(a, model, advisorModel)) return false;
+      const p = a.priority || 0;
+      if (p < pri) return true;
+      if (p !== pri || currentReset == null) return false;
+      const reset = this._governingWeeklyReset(a, model);
+      return reset != null && reset < currentReset - poolMs;
+    }) || null;
   }
 
   /**
@@ -620,9 +660,30 @@ export class AccountManager {
     // Phrased to read correctly after "<name> is ..." in the caller's message.
     const preemptor = this._preemptedBy(account);
     if (preemptor) {
-      return { eligible: false, reason: `outranked by higher-priority account "${preemptor.name}"` };
+      const reason = (preemptor.priority || 0) < (account.priority || 0)
+        ? `outranked by higher-priority account "${preemptor.name}"`
+        : `account "${preemptor.name}"'s weekly window resets sooner`;
+      return { eligible: false, reason };
     }
     return { eligible: true };
+  }
+
+  /**
+   * Soonest-weekly preference: treat the governing weekly reset as a dynamic
+   * priority tier, so the account whose window refreshes soonest is spent
+   * first even while the current account is still healthy. Accounts within
+   * `poolHours` of the soonest known reset form a pool: selection prefers and
+   * (with distributeSessions) balances within it, and the current account is
+   * preempted only by one that resets more than `poolHours` sooner — the pool
+   * width doubles as the anti-flip-flop epsilon. Called from the constructor
+   * and on config reload; passing undefined disables it.
+   */
+  setSoonestWeekly(cfg) {
+    const c = cfg || {};
+    this.soonestWeekly = {
+      enabled: !!c.enabled,
+      poolHours: Math.max(0, c.poolHours ?? 12),
+    };
   }
 
   /**
@@ -1368,6 +1429,7 @@ export class AccountManager {
       switchThreshold: this.switchThreshold,
       routes: this.getRoutes(),
       sessions: { ...sessions, distribute: this.distributeSessions },
+      soonestWeekly: { ...this.soonestWeekly },
       accounts: this.accounts.map(a => ({
         name: a.name,
         type: a.type,

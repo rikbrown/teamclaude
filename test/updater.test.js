@@ -14,8 +14,16 @@ test('compareVersions orders x.y.z numerically and ignores pre-release', () => {
   assert.ok(compareVersions('1.10.0', '1.9.0') > 0);   // numeric, not lexical
   assert.ok(compareVersions('2.0.0', '1.9.9') > 0);
   assert.equal(compareVersions('1.1.1', '1.1.1'), 0);
-  assert.equal(compareVersions('1.1.1', '1.1.1-beta.2'), 0); // suffix ignored
+  assert.ok(compareVersions('1.1.1', '1.1.1-beta.2') > 0); // release outranks pre-release (semver §11)
   assert.ok(compareVersions('1.0.0', '1.0.1') < 0);
+});
+
+test('compareVersions orders fork pre-release tails so -rik.N publishes trigger updates', () => {
+  assert.ok(compareVersions('1.1.13-rik.2', '1.1.13-rik.1') > 0);
+  assert.ok(compareVersions('1.1.13-rik.10', '1.1.13-rik.9') > 0); // numeric, not lexical
+  assert.ok(compareVersions('1.1.14-rik.1', '1.1.13-rik.9') > 0);  // base wins first
+  assert.ok(compareVersions('1.1.13-rik.1', '1.1.13') < 0);
+  assert.equal(compareVersions('1.1.13-rik.1', '1.1.13-rik.1'), 0);
 });
 
 // ── installKind ──────────────────────────────────────────────

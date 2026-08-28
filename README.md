@@ -11,6 +11,13 @@
 > - `soonestWeekly` and `distributeSessions` changes now apply on config reload; upstream applies
 >   `distributeSessions` only at startup.
 >
+> Published as [`@rikcodes/teamclaude`](https://www.npmjs.com/package/@rikcodes/teamclaude); self-update
+> tracks that package, so installs of this fork can never be replaced by an upstream release.
+>
+> ```bash
+> npm install -g @rikcodes/teamclaude
+> ```
+>
 > Branch: `rik/soonest-weekly-pool`. Everything else matches upstream.
 
 [![CI](https://github.com/KarpelesLab/teamclaude/actions/workflows/ci.yml/badge.svg)](https://github.com/KarpelesLab/teamclaude/actions/workflows/ci.yml)
@@ -29,7 +36,7 @@ It sits between Claude Code and the Anthropic API, holds several Claude Max (or 
 Node.js 20+ required.
 
 ```bash
-npm install -g @karpeleslab/teamclaude
+npm install -g @rikcodes/teamclaude
 
 teamclaude login     # browser OAuth, run it once per account
 teamclaude server    # start the proxy, shows the TUI

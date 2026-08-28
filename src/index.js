@@ -294,6 +294,7 @@ async function serverCommand() {
     // way routes, sx, probe and warmup are picked up below.
     config.distributeSessions = !!diskConfig.distributeSessions;
     accountManager.setDistributeSessions(config.distributeSessions);
+    config.soonestWeekly = diskConfig.soonestWeekly;
     accountManager.setSoonestWeekly(config.soonestWeekly);
     // Apply an sx.org key/mode change made on disk (e.g. via POST /teamclaude/reload).
     const diskSxKey = diskConfig.sx?.apiKey || null;

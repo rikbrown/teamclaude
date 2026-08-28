@@ -374,6 +374,7 @@ async function serverCommand() {
     }
     config.sessionTitles = diskConfig.sessionTitles;
     sessionTitles.configure(config.sessionTitles);
+    config.soonestWeekly = diskConfig.soonestWeekly;
     accountManager.setSoonestWeekly(config.soonestWeekly);
     // Apply an sx.org key/mode change made on disk (e.g. via POST /teamclaude/reload).
     const diskSxKey = diskConfig.sx?.apiKey || null;

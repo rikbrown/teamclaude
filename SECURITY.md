@@ -1,5 +1,12 @@
 # Security Policy
 
+> **Fork notice.** This repository is a personal fork of
+> [KarpelesLab/teamclaude](https://github.com/KarpelesLab/teamclaude), published to npm as
+> `@rikcodes/teamclaude`. It is not the canonical project and is not maintained by KarpelesLab.
+> Report a vulnerability in upstream code through upstream's channels below. Report anything
+> specific to this fork's changes at
+> https://github.com/rikbrown/teamclaude/security/advisories/new.
+
 ## Reporting a vulnerability
 
 If you discover a security vulnerability in TeamClaude, please report it
@@ -30,6 +37,10 @@ Only the following sources are canonical:
 
 - **Repository:** https://github.com/KarpelesLab/teamclaude
 - **npm package:** `@karpeleslab/teamclaude` (published by KarpelesLab)
+
+This fork is distributed as https://github.com/rikbrown/teamclaude and `@rikcodes/teamclaude`
+(published by `rikbrown`). It carries a different package name deliberately, so it can never be
+mistaken for — or installed over — the canonical package.
 
 Treat any other copy with caution. In particular:
 

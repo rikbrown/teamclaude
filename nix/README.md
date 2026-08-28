@@ -70,7 +70,7 @@ Import the module and enable `services.teamclaude`:
 
 ```nix
 {
-  inputs.teamclaude.url = "github:KarpelesLab/teamclaude";
+  inputs.teamclaude.url = "github:rikbrown/teamclaude";
 
   outputs =
     { nixpkgs, teamclaude, ... }:

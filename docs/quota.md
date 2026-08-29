@@ -86,6 +86,33 @@ Each window is in one of three states, and only the first carries a number:
 | `not_observed` | fewer than two fresh readings in this window — typically the probe is off and the account was not routed to |
 
 `since` is when tracking of the current window started (the first fresh reading of it). Only weekly windows are tracked — the all-models weekly and any family bucket the account reports. The 5h window rolls over too often for a floor to say anything. The sums persist in `teamclaude.state.json`; the interval spanning a restart is never attributed to the outside, since the proxy cannot know what it served while it was down.
+## Burn-rate projection
+
+A bar shows how much of a window is spent. It does not say whether you will reach the reset. The projection answers that: it samples each bucket's utilization over a rolling window (default 90 minutes), fits a consumption rate, and compares the time to exhaustion against the bucket's own reset.
+
+Each account row gains a tag per projected bucket, most urgent first, separated by `·`:
+
+- `Ses TTL 38m` — at the current pace this window runs out 38 minutes from now, before it resets.
+- `Wk 22% unspent` — the reset arrives first and 22% of the window expires unused.
+
+A window that will stop you is always listed before one that will merely expire, and is colored rather than gray. An unspent share is reported for weekly buckets only: a 5h window refills the same day, so its tail is not worth reading. Small surpluses are suppressed below `projection.wasteFloor` (default 10%).
+
+Consumption is bursty, so the estimate is deliberately conservative about when it speaks. Nothing is reported until the samples span five minutes and show measurable consumption, and an idle account reports nothing rather than a rate of zero. History is held in memory only and restarts with the server, so tags reappear a few minutes after a restart. A window rolling over clears that bucket's history, whether it arrives as a cleared reading or as a drop in utilization.
+
+### Choosing the window
+
+Utilization arrives as whole percent, so the signal is a staircase with 1% steps and a narrow window can contain no step to measure. Sampling once a minute against a known burn rate:
+
+| true burn | 30 min | 60 min | 90 min | 120 min |
+| --- | --- | --- | --- | --- |
+| 1%/h | 0.4–2.9, silent half the time | 0.1–1.5 | 0.9–1.1 | 0.8–1.1 |
+| 2%/h | 0.4–2.9 | 1.6–2.2 | 1.8–2.1 | 1.9–2.1 |
+| 3%/h | 2.5–3.4 | 2.6–3.2 | 2.9–3.0 | 2.9–3.0 |
+| 5%/h | 4.8–5.2 | | | 5.0 |
+
+Weekly buckets burn slowly enough to sit in the unreliable range, which is why the default is 90 minutes rather than 30. A fast 5h burn is tracked closely at any of these widths, since a heavy run fills the window with steps quickly. Lower `windowMinutes` to react faster to a change of pace, at the cost of a jumpier figure on the weekly buckets.
+
+`status --json` carries every bucket's projection per account, not just the one on the row. Nothing in selection reads any of this: it is a readout, and turning it off changes no routing decision.
 
 ## Keep-warm
 

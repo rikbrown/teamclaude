@@ -2,6 +2,7 @@ import { refreshAccessToken, isTokenExpiringSoon, isTokenExpired } from './oauth
 import { sameIdentity } from './identity.js';
 import { weeklyBucketForModel, modelGlobMatches } from './model.js';
 import { SessionTracker } from './session-tracker.js';
+import { QuotaProjection, PROJECTED_BUCKETS } from './quota-projection.js';
 
 // Re-exported for callers that import these model helpers from here.
 export { isFableModel, parseRequestModel, parseAdvisorModel } from './model.js';
@@ -126,7 +127,7 @@ function sampleModelFor(route) {
 }
 
 export class AccountManager {
-  constructor(accounts, switchThreshold = 0.98, { refreshFn = refreshAccessToken, throttleProbeFloorMs, familyStaleMs, forcedRefreshFloorMs = FORCED_REFRESH_FLOOR_MS, routes, ramp, distributeSessions = false, soonestWeekly, sessionTracker } = {}) {
+  constructor(accounts, switchThreshold = 0.98, { refreshFn = refreshAccessToken, throttleProbeFloorMs, familyStaleMs, forcedRefreshFloorMs = FORCED_REFRESH_FLOOR_MS, routes, ramp, distributeSessions = false, soonestWeekly, projection, sessionTracker } = {}) {
     // How long a just-minted token is trusted against a forced refresh.
     this._forcedRefreshFloorMs = forcedRefreshFloorMs;
     // Injectable for tests (mirrors Prober's probeFn); defaults to the real
@@ -156,6 +157,7 @@ export class AccountManager {
     this.switchThreshold = switchThreshold;
     this.setRoutes(routes);
     this.setSoonestWeekly(soonestWeekly);
+    this.setProjection(projection);
     // Storm control: when rotation switches to a fresh account, a burst of
     // in-flight requests (e.g. dozens of agents failing over together) would all
     // hit it at once and instantly throttle it — cascading down the fleet
@@ -736,6 +738,47 @@ export class AccountManager {
   }
 
   /**
+   * Burn-rate projection settings, applied live on config reload. Enabled by
+   * default: the projection is a readout and no selection code consults it, so
+   * turning it on cannot change which account serves a request.
+   */
+  setProjection(cfg) {
+    const c = cfg || {};
+    this.projection = new QuotaProjection({
+      enabled: c.enabled !== false,
+      windowMinutes: c.windowMinutes,
+      wasteFloor: c.wasteFloor ?? 0.1,
+    });
+  }
+
+  /** Sample every reported bucket. Both quota write paths call this: response
+   *  headers (updateQuota) and the usage probe (applyUsageData). */
+  _recordQuotaSamples(account, now = Date.now()) {
+    const q = account.quota;
+    for (const bucket of PROJECTED_BUCKETS) {
+      if (q[bucket] !== undefined) this.projection.record(account.index, bucket, q[bucket], now);
+    }
+  }
+
+  /** Every bucket's projection for one account, keyed by bucket name. Buckets
+   *  without a usable rate are absent rather than null. */
+  projectionsFor(accountIndex, now = Date.now()) {
+    const account = this.accounts[accountIndex];
+    if (!account) return {};
+    const q = account.quota;
+    const out = {};
+    for (const bucket of PROJECTED_BUCKETS) {
+      const projected = this.projection.project(accountIndex, bucket, {
+        utilization: q[bucket],
+        resetAt: q[`${bucket}Reset`],
+        now,
+      });
+      if (projected) out[bucket] = projected;
+    }
+    return out;
+  }
+
+  /**
    * Normalize and store the configurable routing table. A route pins a set of
    * model globs to an exclusive set of accounts (and may override the governing
    * quota bucket). Called from the constructor and on config reload.
@@ -1282,6 +1325,8 @@ export class AccountManager {
     if (tokensReset) account.quota.resetsAt = tokensReset;
     else if (requestsReset) account.quota.resetsAt = requestsReset;
 
+    this._recordQuotaSamples(account);
+
     account.usage.totalRequests++;
     account.usage.lastUsed = new Date().toISOString();
 
@@ -1363,6 +1408,8 @@ export class AccountManager {
       }
       if (usage.sevenDayFable.resetAt != null) q.unified7dFableReset = usage.sevenDayFable.resetAt;
     }
+
+    this._recordQuotaSamples(account);
 
     // If we just learned this account's weekly window while probing, re-evaluate
     // selection (same path as learning it from a live response).
@@ -1593,6 +1640,7 @@ export class AccountManager {
       routes: this.getRoutes(),
       sessions: { ...sessions, distribute: this.distributeSessions },
       soonestWeekly: { ...this.soonestWeekly },
+      projection: this.projection.settings(),
       accounts: this.accounts.map(a => ({
         name: a.name,
         type: a.type,
@@ -1603,6 +1651,10 @@ export class AccountManager {
         sessions: sessions.perAccount[a.index] || 0,
         quota: { ...a.quota },
         usage: { ...a.usage },
+        projection: (() => {
+          const buckets = this.projectionsFor(a.index);
+          return { headline: this.projection.headline(Object.values(buckets)), buckets };
+        })(),
         rateLimitedUntil: a.rateLimitedUntil
           ? new Date(a.rateLimitedUntil).toISOString()
           : null,

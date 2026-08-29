@@ -58,6 +58,7 @@ export function createDefaultConfig() {
     switchThreshold: 0.98,
     holdSeconds: 0,
     distributeSessions: false,
+    projection: { enabled: true, windowMinutes: 90, wasteFloor: 0.1 },
     eventLogging: 'hide',
     blockedModels: [],
     accounts: [],

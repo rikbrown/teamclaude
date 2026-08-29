@@ -7,6 +7,7 @@ import {
   oauthIdentityFields,
 } from './identity.js';
 import { formatPercent } from './status-renderer.js';
+import { formatProjection } from './quota-projection.js';
 import { parseProxyUrl, proxyToUrl, describeProxy, resolveUpstreamProxy, setUpstreamProxy, getUpstreamProxy } from './upstream-proxy.js';
 
 // ── ANSI helpers ─────────────────────────────────────────────
@@ -1320,6 +1321,21 @@ export class TUI {
     // and is already conveyed by the Ses bar + status, so it's not repeated here.
     const blocked = blockedFamilies(q, this.am.switchThreshold);
     if (blocked.length) line += `  ${red('⊘ ' + blocked.join(' '))}`;
+
+    // Burn-rate tags, most urgent first: TTL for a window that runs out before
+    // it resets, an unspent share for one that expires with quota left. A
+    // deficit will stop this account, so it is colored; a surplus is a note and
+    // stays gray. Optional on the manager so a stand-in without projection
+    // support still renders.
+    const buckets = this.am.projectionsFor?.(idx) || {};
+    const ranked = this.am.projection?.rank(Object.values(buckets)) || [];
+    if (ranked.length) {
+      const tags = ranked.map(p => {
+        const text = formatProjection(p);
+        return p.kind === 'deficit' ? yellow(text) : gray(text);
+      });
+      line += `  ${tags.join(gray(' · '))}`;
+    }
     return line;
   }
 

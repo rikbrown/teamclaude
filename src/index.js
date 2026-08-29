@@ -24,6 +24,7 @@ import { ensureCerts } from './mitm.js';
 import { Prober } from './prober.js';
 import { Warmer } from './warmer.js';
 import { TUI } from './tui.js';
+import { SessionTitles } from './session-titles.js';
 import { RemoteControl, createAttachSession } from './tui-remote.js';
 import { SxManager } from './sx.js';
 import { autoUpdate, checkForUpdate, currentVersion, runUpdate, installKind, PKG_NAME } from './updater.js';
@@ -204,6 +205,11 @@ async function serverCommand() {
 
   const threshold = config.switchThreshold || 0.98;
   const accountManager = new AccountManager(accounts, threshold, { routes: config.routes, ramp: config.stormRamp, distributeSessions: config.distributeSessions, soonestWeekly: config.soonestWeekly, projection: config.projection });
+  // Names the activity log's session column from Claude Code's own on-disk
+  // session titles. Built whether or not the TUI runs, so a reload has one
+  // object to reconfigure.
+  const sessionTitles = new SessionTitles(config.sessionTitles);
+
 
   // Restore quota observed in a previous run so a restart doesn't lose rotation
   // state (passive — we never call the API to re-learn it). Stale windows are
@@ -298,6 +304,8 @@ async function serverCommand() {
     accountManager.setSoonestWeekly(config.soonestWeekly);
     config.projection = diskConfig.projection;
     accountManager.setProjection(config.projection);
+    config.sessionTitles = diskConfig.sessionTitles;
+    sessionTitles.configure(config.sessionTitles);
     // Apply an sx.org key/mode change made on disk (e.g. via POST /teamclaude/reload).
     const diskSxKey = diskConfig.sx?.apiKey || null;
     const diskSxMode = diskConfig.sx?.mode || 'always';
@@ -328,7 +336,7 @@ async function serverCommand() {
 
   if (useTUI) {
     tui = new TUI({
-      accountManager, config, sx, activityLogPath,
+      accountManager, config, sx, activityLogPath, sessionTitles,
       saveConfig: () => atomicConfigUpdate(async diskConfig => {
         // Write in-memory accounts as the authoritative state, preserving
         // extra disk-only fields (e.g. importFrom) where the account still exists.

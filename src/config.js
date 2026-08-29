@@ -59,6 +59,7 @@ export function createDefaultConfig() {
     holdSeconds: 0,
     distributeSessions: false,
     projection: { enabled: true, windowMinutes: 90, wasteFloor: 0.1 },
+    sessionTitles: { enabled: true, width: 18 },
     eventLogging: 'hide',
     blockedModels: [],
     accounts: [],

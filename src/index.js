@@ -285,7 +285,7 @@ async function serverCommand() {
     console.error(`[TeamClaude] Bad adaptiveDistribution setting in ${getConfigPath()}: ${err.message}`);
     process.exit(1);
   }
-  const accountManager = new AccountManager(accounts, threshold, { routes: config.routes, ramp: config.stormRamp, distributeSessions: config.distributeSessions, expiryRouting: config.expiryRouting, adaptive });
+  const accountManager = new AccountManager(accounts, threshold, { routes: config.routes, ramp: config.stormRamp, distributeSessions: config.distributeSessions, projection: config.projection, expiryRouting: config.expiryRouting, adaptive });
   // Names the activity log's session column from Claude Code's own on-disk
   // session titles. Built whether or not the TUI runs, so a reload has one
   // object to reconfigure.
@@ -432,6 +432,8 @@ async function serverCommand() {
     // persists them; without this a hand edit or another writer waited for a restart.
     config.eventLogging = diskConfig.eventLogging || 'hide';
     config.blockedModels = Array.isArray(diskConfig.blockedModels) ? diskConfig.blockedModels : [];
+    config.projection = diskConfig.projection;
+    accountManager.setProjection(config.projection);
     // Apply an sx.org key/mode change made on disk (e.g. via POST /teamclaude/reload).
     const diskSxKey = diskConfig.sx?.apiKey || null;
     const diskSxMode = diskConfig.sx?.mode || 'always';

@@ -246,7 +246,7 @@ async function serverCommand() {
   }
 
   const threshold = config.switchThreshold || 0.98;
-  const accountManager = new AccountManager(accounts, threshold, { routes: config.routes, ramp: config.stormRamp, distributeSessions: config.distributeSessions, soonestWeekly: config.soonestWeekly });
+  const accountManager = new AccountManager(accounts, threshold, { routes: config.routes, ramp: config.stormRamp, distributeSessions: config.distributeSessions, soonestWeekly: config.soonestWeekly, projection: config.projection });
   // Names the activity log's session column from Claude Code's own on-disk
   // session titles. Built whether or not the TUI runs, so a reload has one
   // object to reconfigure.
@@ -376,6 +376,8 @@ async function serverCommand() {
     sessionTitles.configure(config.sessionTitles);
     config.soonestWeekly = diskConfig.soonestWeekly;
     accountManager.setSoonestWeekly(config.soonestWeekly);
+    config.projection = diskConfig.projection;
+    accountManager.setProjection(config.projection);
     // Apply an sx.org key/mode change made on disk (e.g. via POST /teamclaude/reload).
     const diskSxKey = diskConfig.sx?.apiKey || null;
     const diskSxMode = diskConfig.sx?.mode || 'always';

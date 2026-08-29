@@ -12,6 +12,7 @@ import { configIndexFor, managerAccountFor } from './account-pairing.js';
 import { mintAccountId } from './account-id.js';
 import { formatPercent } from './status-renderer.js';
 import { resolveMaxUsage } from './model.js';
+import { formatProjection } from './quota-projection.js';
 import { parseProxyUrl, proxyToUrl, describeProxy, describeSelfProxy, resolveUpstreamProxy, setUpstreamProxy, getUpstreamProxy } from './upstream-proxy.js';
 import { sanitizeText } from './safe-text.js';
 
@@ -1538,6 +1539,21 @@ export class TUI {
     // OWN configured threshold.
     const blocked = blockedFamilies(q, limFor);
     if (blocked.length) line += `  ${red('⊘ ' + blocked.join(' '))}`;
+
+    // Burn-rate tags, most urgent first: TTL for a window that runs out before
+    // it resets, an unspent share for one that expires with quota left. A
+    // deficit will stop this account, so it is colored; a surplus is a note and
+    // stays gray. Optional on the manager so a stand-in without projection
+    // support still renders.
+    const buckets = this.am.projectionsFor?.(idx) || {};
+    const ranked = this.am.projection?.rank(Object.values(buckets)) || [];
+    if (ranked.length) {
+      const tags = ranked.map(p => {
+        const text = formatProjection(p);
+        return p.kind === 'deficit' ? yellow(text) : gray(text);
+      });
+      line += `  ${tags.join(gray(' · '))}`;
+    }
     // Money tag last, so it sits at the end of the row where the eye lands after
     // the bars. Red once real money has moved, yellow while it only could.
     const money = spendTag(q);

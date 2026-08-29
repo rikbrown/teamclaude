@@ -1,6 +1,6 @@
 # TeamClaude
 
-> **Fork notice (rikbrown).** This fork adds two features and two reload fixes on top of
+> **Fork notice (rikbrown).** This fork adds three features and two reload fixes on top of
 > [KarpelesLab/teamclaude](https://github.com/KarpelesLab/teamclaude):
 >
 > - **[Soonest-weekly rotation](docs/routing.md#soonest-weekly-rotation)** (`soonestWeekly`, opt-in): rank
@@ -12,6 +12,9 @@
 >   bucket's consumption over a rolling window and tag every account row with whichever window binds
 >   first — `Ses TTL 38m` when it runs out before it resets, `Wk 22% unspent` when the reset arrives
 >   first and that much expires. A readout only: no selection code reads it.
+> - **[Session titles](docs/usage.md#session-titles-in-the-activity-log)** (`sessionTitles`, on by default):
+>   name each activity row after the Claude Code session that sent the request, reading the title
+>   `/rename` writes and the one Claude Code generates. A session with neither keeps its short id.
 > - `soonestWeekly` and `distributeSessions` changes now apply on config reload; upstream applies
 >   `distributeSessions` only at startup.
 >

@@ -15,6 +15,7 @@ import { ACCOUNT_REFUSAL_CODES } from './account-refusal.js';
 import { formatPercent, heldFableResets, heldResetCredits, showSessionRow, showWeeklyRow, unavailableLine } from './status-renderer.js';
 import { cacheUsageLabel, cacheUsageState } from './usage-label.js';
 import { resolveMaxUsage, resolveMaxSpendMinor, switchThresholdDiffs, modelLabel, EFFORT_SEP } from './model.js';
+import { formatProjection } from './quota-projection.js';
 import { parseProxyUrl, proxyToUrl, describeProxy, describeSelfProxy, resolveUpstreamProxy, setUpstreamProxy, getUpstreamProxy, localListener, isSelfProxy } from './upstream-proxy.js';
 import { describeRouting, parseRoutingUrl, routingToUrl, checkRouting } from './account-routing.js';
 import { sanitizeText, safeLine } from './safe-text.js';
@@ -3410,6 +3411,21 @@ export class TUI {
     }
     const untagged = blocked.filter(bucket => !marked.has(bucket));
     if (untagged.length) line += `  ${red('⊘ ' + untagged.join(' '))}`;
+
+    // Burn-rate tags, most urgent first: TTL for a window that runs out before
+    // it resets, an unspent share for one that expires with quota left. A
+    // deficit will stop this account, so it is colored; a surplus is a note and
+    // stays gray. Optional on the manager so a stand-in without projection
+    // support still renders.
+    const buckets = this.am.projectionsFor?.(idx) || {};
+    const ranked = this.am.projection?.rank(Object.values(buckets)) || [];
+    if (ranked.length) {
+      const tags = ranked.map(p => {
+        const text = formatProjection(p);
+        return p.kind === 'deficit' ? yellow(text) : gray(text);
+      });
+      line += `  ${tags.join(gray(' · '))}`;
+    }
     // What is left of the prepaid credit, beside its bar.
     const prepaid = creditTag(credit);
     if (prepaid) line += `  ${creditColor(credit)(prepaid)}`;

@@ -123,6 +123,7 @@ export function createDefaultConfig() {
     quotaBarPercent: false,
     probeDisabledAccounts: false,
     accountSort: 'arranged',
+    projection: { enabled: true, windowMinutes: 90, wasteFloor: 0.1 },
     eventLogging: 'hide',
     defaultClientMode: 'mitm',
     // Written out rather than left absent, so a fresh config states the one

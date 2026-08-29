@@ -24,6 +24,34 @@ It reads each OAuth account's utilization from Anthropic's usage endpoint (`/api
 
 The probe is also the only source for the **Sonnet 7-day** bucket, when your plan exposes it. The Fable weekly bucket arrives passively in the response headers (`anthropic-ratelimit-unified-7d_oi-*`), so Fable-aware routing works without turning the probe on.
 
+## Burn-rate projection
+
+A bar shows how much of a window is spent. It does not say whether you will reach the reset. The projection answers that: it samples each bucket's utilization over a rolling window (default 90 minutes), fits a consumption rate, and compares the time to exhaustion against the bucket's own reset.
+
+Each account row gains a tag per projected bucket, most urgent first, separated by `·`:
+
+- `Ses TTL 38m` — at the current pace this window runs out 38 minutes from now, before it resets.
+- `Wk 22% unspent` — the reset arrives first and 22% of the window expires unused.
+
+A window that will stop you is always listed before one that will merely expire, and is colored rather than gray. An unspent share is reported for weekly buckets only: a 5h window refills the same day, so its tail is not worth reading. Small surpluses are suppressed below `projection.wasteFloor` (default 10%).
+
+Consumption is bursty, so the estimate is deliberately conservative about when it speaks. Nothing is reported until the samples span five minutes and show measurable consumption, and an idle account reports nothing rather than a rate of zero. History is held in memory only and restarts with the server, so tags reappear a few minutes after a restart. A window rolling over clears that bucket's history, whether it arrives as a cleared reading or as a drop in utilization.
+
+### Choosing the window
+
+Utilization arrives as whole percent, so the signal is a staircase with 1% steps and a narrow window can contain no step to measure. Sampling once a minute against a known burn rate:
+
+| true burn | 30 min | 60 min | 90 min | 120 min |
+| --- | --- | --- | --- | --- |
+| 1%/h | 0.4–2.9, silent half the time | 0.1–1.5 | 0.9–1.1 | 0.8–1.1 |
+| 2%/h | 0.4–2.9 | 1.6–2.2 | 1.8–2.1 | 1.9–2.1 |
+| 3%/h | 2.5–3.4 | 2.6–3.2 | 2.9–3.0 | 2.9–3.0 |
+| 5%/h | 4.8–5.2 | | | 5.0 |
+
+Weekly buckets burn slowly enough to sit in the unreliable range, which is why the default is 90 minutes rather than 30. A fast 5h burn is tracked closely at any of these widths, since a heavy run fills the window with steps quickly. Lower `windowMinutes` to react faster to a change of pace, at the cost of a jumpier figure on the weekly buckets.
+
+`status --json` carries every bucket's projection per account, not just the one on the row. Nothing in selection reads any of this: it is a readout, and turning it off changes no routing decision.
+
 ## Keep-warm
 
 The rolling **5-hour session window** only starts once an account sends a real message. So when your active account runs out and rotation moves to a cold account, that account's 5h window starts *then* — right when you need its full headroom. Keep-warm ([#76](https://github.com/KarpelesLab/teamclaude/issues/76)) starts the timer on idle accounts ahead of time, so the next account is already partway (or fully) through a fresh window when it's needed.

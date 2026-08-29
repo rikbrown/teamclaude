@@ -1,6 +1,7 @@
 import { createWriteStream } from 'node:fs';
 import { importCredentials, fetchProfile } from './oauth.js';
 import { sameIdentity, findUpsertTarget } from './identity.js';
+import { formatProjection } from './quota-projection.js';
 import { parseProxyUrl, proxyToUrl, describeProxy, resolveUpstreamProxy, setUpstreamProxy, getUpstreamProxy } from './upstream-proxy.js';
 
 // ── ANSI helpers ─────────────────────────────────────────────
@@ -1230,6 +1231,21 @@ export class TUI {
     if (q.unified7dSonnet != null && q.unified7dSonnet >= th) blocked.push('Sonnet');
     if (q.unified7dFable != null && q.unified7dFable >= th) blocked.push('Fable');
     if (blocked.length) line += `  ${red('⊘ ' + blocked.join(' '))}`;
+
+    // Burn-rate tags, most urgent first: TTL for a window that runs out before
+    // it resets, an unspent share for one that expires with quota left. A
+    // deficit will stop this account, so it is colored; a surplus is a note and
+    // stays gray. Optional on the manager so a stand-in without projection
+    // support still renders.
+    const buckets = this.am.projectionsFor?.(idx) || {};
+    const ranked = this.am.projection?.rank(Object.values(buckets)) || [];
+    if (ranked.length) {
+      const tags = ranked.map(p => {
+        const text = formatProjection(p);
+        return p.kind === 'deficit' ? yellow(text) : gray(text);
+      });
+      line += `  ${tags.join(gray(' · '))}`;
+    }
     return line;
   }
 

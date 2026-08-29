@@ -1,6 +1,6 @@
 # TeamClaude
 
-> **Fork notice (rikbrown).** This fork adds one feature and two reload fixes on top of
+> **Fork notice (rikbrown).** This fork adds two features and two reload fixes on top of
 > [KarpelesLab/teamclaude](https://github.com/KarpelesLab/teamclaude):
 >
 > - **[Soonest-weekly rotation](docs/routing.md#soonest-weekly-rotation)** (`soonestWeekly`, opt-in): rank
@@ -8,6 +8,10 @@
 >   current account when another resets more than `poolHours` sooner, and balance `distributeSessions` within
 >   that pool instead of across all accounts. Spends the quota closest to refreshing first, so a window no
 >   longer rolls over with quota unspent.
+> - **[Burn-rate projection](docs/quota.md#burn-rate-projection)** (`projection`, on by default): sample each
+>   bucket's consumption over a rolling window and tag every account row with whichever window binds
+>   first — `Ses TTL 38m` when it runs out before it resets, `Wk 22% unspent` when the reset arrives
+>   first and that much expires. A readout only: no selection code reads it.
 > - `soonestWeekly` and `distributeSessions` changes now apply on config reload; upstream applies
 >   `distributeSessions` only at startup.
 >
@@ -52,6 +56,7 @@ Already logged into Claude Code? `teamclaude import` takes its credentials inste
 
 - Rotates to the next account when the 5h session or 7d weekly bucket reaches the threshold (98% by default), preferring the account whose weekly quota resets soonest.
 - Optionally spends the account whose weekly window resets soonest **first**, preempting the current account when another resets more than `poolHours` sooner, so a window stops rolling over with quota unspent (`soonestWeekly`, this fork).
+- Projects each quota window's burn rate against its reset, so a row says `Ses TTL 38m · Wk 22% unspent` instead of leaving you to read it off a bar (`projection`, this fork).
 - Tracks the per-model weekly cap separately, so an account out of Fable quota is skipped for Fable requests and still serves Opus and Sonnet.
 - Tells a spent quota bucket apart from a per-minute rate limit and only rotates on the first one. Rotating on a rate limit would just move the burst to the next account and drop the warm cache, so it paces the same account instead.
 - Paces requests onto a freshly switched account, so a herd of agents failing over at the same instant doesn't throttle it and cascade down the fleet.

@@ -1,6 +1,6 @@
 {
   "name": "@rikcodes/teamclaude",
-  "version": "1.1.13-rik.1",
+  "version": "1.1.13-rik.2",
   "description": "Multi-account Claude proxy with automatic quota-based rotation",
   "type": "module",
   "main": "src/index.js",

@@ -99,6 +99,39 @@ export function mergeNoProxy(...inherited) {
 // `/tc-acct/` prefix. TC_ACCT itself is then unset, so the pin does not leak
 // into claude or anything it spawns — same reasoning as `run` deleting it from
 // the child environment.
+// `config.customModels` → the `--settings` JSON that puts each model in the
+// /model picker under its REAL id ({model, label?, description?} rows; typed
+// `/model <id>` also accepts picker rows). contextTokens is ours, not Claude
+// Code's — it feeds CLAUDE_CODE_MAX_CONTEXT_TOKENS below. Null when empty so
+// callers can skip the flag entirely.
+export function buildCustomModelSettings(customModels) {
+  if (!customModels?.length) return null;
+  const options = customModels.map(({ model, label, description }) => ({
+    model,
+    ...(label ? { label } : {}),
+    ...(description ? { description } : {}),
+  }));
+  return JSON.stringify({ modelPicker: { options } });
+}
+
+// The env-only registration for launchers we can't pass flags to (`teamclaude
+// env`). ANTHROPIC_CUSTOM_MODEL_OPTION registers ONE model (env can't express a
+// list — the picker rows need `--settings`, i.e. `teamclaude run`), so the
+// first entry is the one that gets a picker row and typed-/model acceptance.
+// CLAUDE_CODE_MAX_CONTEXT_TOKENS is global for all unknown model ids: use the
+// largest declared window so no custom model is compacted early; deliberately
+// NOT modelOverrides, which would pin the window to the mapped Claude model's.
+export function buildCustomModelVars(customModels) {
+  if (!customModels?.length) return {};
+  const vars = { ANTHROPIC_CUSTOM_MODEL_OPTION: customModels[0].model };
+  if (customModels[0].label) vars.ANTHROPIC_CUSTOM_MODEL_OPTION_NAME = customModels[0].label;
+  if (customModels[0].description) vars.ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION = customModels[0].description;
+  const windows = customModels.map(m => m.contextTokens).filter(n => Number.isFinite(n));
+  if (windows.length) vars.CLAUDE_CODE_MAX_CONTEXT_TOKENS = String(Math.max(...windows));
+  return vars;
+}
+
+
 /**
  * @param {Object} opts
  * @param {unknown} opts.port
@@ -108,8 +141,9 @@ export function mergeNoProxy(...inherited) {
  * @param {string|null} [opts.account]
  * @param {string} [opts.proxyApiKey]
  * @param {string|null} [opts.inheritedNoProxy]
+ * @param {Array<Object>|null} [opts.customModels]
  */
-export function buildClaudeEnvLines({ port, useMitm = true, caPath = null, holdSeconds = 0, account = null, proxyApiKey = '', inheritedNoProxy = null }) {
+export function buildClaudeEnvLines({ port, useMitm = true, caPath = null, holdSeconds = 0, account = null, proxyApiKey = '', inheritedNoProxy = null, customModels = null }) {
   const lines = [];
   const pin = (account || '').trim();
   // The port is interpolated unquoted into URLs the shell evals, so it has to
@@ -147,6 +181,11 @@ export function buildClaudeEnvLines({ port, useMitm = true, caPath = null, holdS
   // the client-side timeout so it doesn't give up mid-hold.
   const holdMs = (holdSeconds || 0) * 1000;
   if (holdMs > 0) lines.push(`export API_TIMEOUT_MS=${holdMs + 60_000}`);
+
+  // Custom (third-party) model registration — see buildCustomModelVars.
+  for (const [key, value] of Object.entries(buildCustomModelVars(customModels))) {
+    lines.push(`export ${key}=${shellQuote(value)}`);
+  }
 
   return lines;
 }

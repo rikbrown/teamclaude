@@ -1,8 +1,12 @@
 # TeamClaude
 
-> **Fork notice (rikbrown).** This fork adds two features and two reload fixes on top of
+> **Fork notice (rikbrown).** This fork adds three features and two reload fixes on top of
 > [KarpelesLab/teamclaude](https://github.com/KarpelesLab/teamclaude):
 >
+> - **[OpenAI models via a Codex sidecar](docs/openai.md)** (`sidecars` + `customModels`, opt-in):
+>   route `gpt-*` requests through a supervised local translating proxy to a ChatGPT subscription,
+>   under real model names — `/model gpt-5.6-sol` in the picker and typed, correct 272k context
+>   sizing, and dispatchable GPT subagents — while Claude traffic stays on the Claude accounts.
 > - **[Soonest-weekly rotation](docs/routing.md#soonest-weekly-rotation)** (`soonestWeekly`, opt-in): rank
 >   equal-priority accounts by the weekly window that governs the requested model, continuously — preempt the
 >   current account when another resets more than `poolHours` sooner, and balance `distributeSessions` within
@@ -70,6 +74,7 @@ with the selected TeamClaude account credential before forwarding.
 - Holds the request open until quota resets instead of returning 429 when every account is spent, so an unattended run finishes on its own (`holdSeconds`, off by default).
 - Refreshes OAuth tokens before they expire and writes them back to config. Client refreshes pass through untouched.
 - Takes any Anthropic-compatible API (DeepSeek, GLM) as a low-priority fallback for when the Claude accounts are done.
+- Serves OpenAI models next to Claude ones — a supervised local sidecar translates `gpt-*` requests onto a ChatGPT subscription, with real model names in `/model` and GPT subagents dispatchable from a Claude parent (`sidecars` + `customModels`, this fork).
 - No dependencies. Node built-ins only.
 
 ## Everyday commands
@@ -109,6 +114,7 @@ Step-by-step lifecycle: [docs/routing.md](docs/routing.md#request-lifecycle).
 | [Usage](docs/usage.md) | Server and TUI, running Claude Code, shell alias, command reference, logging |
 | [Routing](docs/routing.md) | Rotation, the two kinds of 429, storm control, model routes, session spreading, pinning, prompt cache |
 | [Quota](docs/quota.md) | Quota probe, keep-warm, holding on exhaustion |
+| [OpenAI models](docs/openai.md) | Codex sidecar setup, custom model registration, GPT subagents, limitations |
 | [Configuration](docs/configuration.md) | Config format, every field, environment variables, network tuning |
 | [Proxy modes](docs/proxy-modes.md) | MITM forward proxy, sx.org residential egress |
 | [Compliance](docs/compliance.md) | Terms of service notes |

@@ -2227,12 +2227,7 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
     // `anthropic-ratelimit-*` and Codex under `x-codex-*`; `updateQuota` picks
     // the parser by provider, so keeping only Anthropic's prefix handed a Codex
     // account an empty object and its quota never landed.
-    const rateLimitHeaders = {};
-    for (const [key, value] of upstreamRes.headers.entries()) {
-      if (key.startsWith('anthropic-ratelimit-') || key.startsWith('x-codex-')) {
-        rateLimitHeaders[key] = value;
-      }
-    }
+    const rateLimitHeaders = collectRateLimitHeaders(upstreamRes.headers);
     accountManager.updateQuota(account.index, rateLimitHeaders);
 
     // Any non-429 response is live proof a rate-limit hold no longer binds —
@@ -2276,7 +2271,10 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
       // already recorded the spent bucket's utilization from the headers).
       const rl = rateLimitHeaders;
       const generalRejected = rl['anthropic-ratelimit-unified-5h-status'] === 'rejected'
-        || rl['anthropic-ratelimit-unified-7d-status'] === 'rejected';
+        || rl['anthropic-ratelimit-unified-7d-status'] === 'rejected'
+        // A spent Codex window on a sidecar-backed account is the same shape:
+        // a durable quota rejection, not a transient throttle.
+        || codexQuotaRejected(rl);
       const fableRejected = rl['anthropic-ratelimit-unified-7d_oi-status'] === 'rejected' && !generalRejected;
       if ((generalRejected || fableRejected) && retryCount < maxRetries) {
         // A Fable-only rejection leaves the account fine for other models, so we
@@ -2993,6 +2991,25 @@ export function rewriteModel(body, modelMap) {
     }
   } catch { /* not JSON — pass through unchanged */ }
   return body;
+}
+
+// Rate-limit telemetry we pass to AccountManager.updateQuota: Anthropic's
+// `anthropic-ratelimit-*` family, plus the OpenAI/Codex `x-codex-*` family a
+// translating sidecar may forward from the ChatGPT backend. Exported for tests.
+export function collectRateLimitHeaders(headers) {
+  const out = {};
+  for (const [key, value] of headers.entries()) {
+    if (key.startsWith('anthropic-ratelimit-') || key.startsWith('x-codex-')) out[key] = value;
+  }
+  return out;
+}
+
+// Durable Codex quota exhaustion: either subscription window (primary ≈ 5h,
+// secondary ≈ weekly) reports fully spent. Like a unified "rejected" status,
+// retrying the same account is futile until the window resets. Exported for tests.
+export function codexQuotaRejected(rl) {
+  return parseFloat(rl['x-codex-primary-used-percent']) >= 100
+    || parseFloat(rl['x-codex-secondary-used-percent']) >= 100;
 }
 
 function computeRetryAfter(accounts) {

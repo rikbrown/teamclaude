@@ -45,7 +45,7 @@ import { autoUpdate, checkForUpdate, currentVersion, runUpdate, installKind, PKG
 import { renderStatus, formatPercent } from './status-renderer.js';
 import { sanitizeText } from './safe-text.js';
 import { ClientUsageTracker, UsageDimensionTracker } from './client-usage.js';
-import { buildClaudeEnvLines, buildCustomModelSettings, buildCustomModelVars, encodePinComponent } from './claude-env.js';
+import { buildClaudeEnvLines, buildCustomModelAgents, buildCustomModelSettings, buildCustomModelVars, encodePinComponent } from './claude-env.js';
 import { serviceKind, installService, uninstallService, serviceStatus, renderService, logPath } from './service.js';
 import { formatTerminalTitle, titleSequence, TITLE_STACK_PUSH, TITLE_STACK_POP } from './terminal-title.js';
 import { getUpstreamProxy, describeProxy, describeSelfProxy } from './upstream-proxy.js';
@@ -989,6 +989,11 @@ async function runCommand() {
     Object.assign(env, buildCustomModelVars(config.customModels));
     const settings = buildCustomModelSettings(config.customModels);
     if (settings && !claudeArgs.includes('--settings')) claudeArgs.push('--settings', settings);
+    // Dispatchable subagents per custom model — the Agent tool's `model`
+    // parameter is an alias enum, so only a named agent definition can carry a
+    // custom model id into a subagent.
+    const agents = buildCustomModelAgents(config.customModels);
+    if (agents && !claudeArgs.includes('--agents')) claudeArgs.push('--agents', agents);
   }
 
   // If holdSeconds is set, ensure API_TIMEOUT_MS on the Claude Code side is

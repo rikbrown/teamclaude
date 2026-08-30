@@ -49,6 +49,27 @@ export function buildCustomModelSettings(customModels) {
   return JSON.stringify({ modelPicker: { options } });
 }
 
+// `config.customModels` → the `--agents` JSON that makes each model
+// dispatchable as a subagent. The Agent tool's per-invocation `model`
+// parameter is an alias enum (sonnet|opus|haiku|fable) and rejects custom ids;
+// an agent DEFINITION's `model:` field accepts any id, so each custom model
+// gets a general-purpose agent named after it ("dispatch a gpt-5.6-terra
+// subagent" then works out of the box). Null when empty.
+export function buildCustomModelAgents(customModels) {
+  if (!customModels?.length) return null;
+  const agents = {};
+  for (const { model, label } of customModels) {
+    agents[model] = {
+      description: `General-purpose subagent running on ${label || model} (via TeamClaude). `
+        + `Use when asked to run a task on ${model}.`,
+      prompt: `You are a general-purpose subagent running on the ${model} model. `
+        + 'Complete the task you are given and report the results concisely.',
+      model,
+    };
+  }
+  return JSON.stringify(agents);
+}
+
 // The env-only registration for launchers we can't pass flags to (`teamclaude
 // env`). ANTHROPIC_CUSTOM_MODEL_OPTION registers ONE model (env can't express a
 // list — the picker rows need `--settings`, i.e. `teamclaude run`), so the

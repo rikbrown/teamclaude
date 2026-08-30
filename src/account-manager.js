@@ -46,6 +46,17 @@ const FAMILY_WEEKLY_BUCKETS = [
   { key: 'unified7dSonnet', label: 'Sonnet', usageKey: 'sevenDaySonnet' },
 ];
 
+// A Codex `*-reset-at` header as a ms timestamp. The wire format isn't pinned
+// down (the sidecar forwards it opaquely), so accept epoch seconds, epoch ms,
+// or an ISO-8601 date; anything else is null.
+function parseResetAt(value) {
+  if (value == null || value === '') return null;
+  const n = Number(value);
+  if (Number.isFinite(n)) return n > 1e12 ? n : n * 1000;
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
 function emptyQuota() {
   return {
     // Standard API rate limits (API key accounts)
@@ -1834,6 +1845,20 @@ export class AccountManager {
       account.quota.unifiedStatus = uStatus;
       account.quota.unifiedStatusSeenAt = Date.now();
     }
+
+    // OpenAI/Codex windows (`x-codex-*`, forwarded by a translating sidecar for
+    // a ChatGPT-subscription account). Primary (~300 min) and secondary
+    // (~10080 min) match the 5h/weekly shape exactly, so they land in the same
+    // slots — display, projection and switch-threshold logic apply unchanged.
+    // used-percent is 0-100 (not the 0-1 fraction Anthropic reports).
+    const cxPrimary = parseFloat(headers['x-codex-primary-used-percent']);
+    const cxSecondary = parseFloat(headers['x-codex-secondary-used-percent']);
+    if (!isNaN(cxPrimary)) account.quota.unified5h = cxPrimary / 100;
+    if (!isNaN(cxSecondary)) account.quota.unified7d = cxSecondary / 100;
+    const cxPrimaryReset = parseResetAt(headers['x-codex-primary-reset-at']);
+    const cxSecondaryReset = parseResetAt(headers['x-codex-secondary-reset-at']);
+    if (cxPrimaryReset != null) account.quota.unified5hReset = cxPrimaryReset;
+    if (cxSecondaryReset != null) account.quota.unified7dReset = cxSecondaryReset;
 
     // Standard rate limits (API key accounts)
     const tokensLimit = parseInt(headers['anthropic-ratelimit-tokens-limit'], 10);

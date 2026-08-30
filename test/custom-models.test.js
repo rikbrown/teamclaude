@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildClaudeEnvLines, buildCustomModelSettings, buildCustomModelVars } from '../src/claude-env.js';
+import { buildClaudeEnvLines, buildCustomModelAgents, buildCustomModelSettings, buildCustomModelVars } from '../src/claude-env.js';
 
 // Covers custom-model registration (codex-proxy feature): `config.customModels`
 // entries surfaced to Claude Code so third-party models (e.g. gpt-5.6-sol via
@@ -48,6 +48,26 @@ test('buildCustomModelVars omits vars it has no data for', () => {
   });
   assert.deepEqual(buildCustomModelVars([]), {});
   assert.deepEqual(buildCustomModelVars(undefined), {});
+});
+
+// ── --agents JSON (run mode: dispatchable GPT subagents) ─────────────────────
+// The Agent tool's per-invocation `model` parameter is an alias enum
+// (sonnet|opus|haiku|fable), so a custom model is only reachable via an agent
+// DEFINITION whose frontmatter `model:` names it. Inject one per custom model.
+
+test('buildCustomModelAgents defines one dispatchable agent per model', () => {
+  const parsed = JSON.parse(buildCustomModelAgents(models));
+  assert.deepEqual(Object.keys(parsed), ['gpt-5.6-sol', 'gpt-5.6-luna']);
+  assert.equal(parsed['gpt-5.6-sol'].model, 'gpt-5.6-sol');
+  assert.ok(parsed['gpt-5.6-sol'].description.includes('GPT-5.6 Sol')); // label surfaces for the dispatcher
+  assert.ok(parsed['gpt-5.6-sol'].prompt.includes('gpt-5.6-sol'));
+  assert.equal(parsed['gpt-5.6-luna'].model, 'gpt-5.6-luna'); // no label → still well-formed
+  assert.ok(parsed['gpt-5.6-luna'].description.length > 0);
+});
+
+test('buildCustomModelAgents returns null when nothing is configured', () => {
+  assert.equal(buildCustomModelAgents([]), null);
+  assert.equal(buildCustomModelAgents(undefined), null);
 });
 
 // ── env command lines ────────────────────────────────────────────────────────

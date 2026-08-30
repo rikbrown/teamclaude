@@ -30,6 +30,7 @@ import { ensureCerts, mitmHosts } from './mitm.js';
 import { Prober } from './prober.js';
 import { Warmer } from './warmer.js';
 import { createRollingWarmupSchedule, formatWarmupScheduleConfirmation, resolveWarmupConfig, resolveWarmupSchedule } from './warmup-schedule.js';
+import { Sidecar } from './sidecar.js';
 import { TUI } from './tui.js';
 import { SessionTitles } from './session-titles.js';
 import { RemoteControl, createAttachSession } from './tui-remote.js';
@@ -38,7 +39,7 @@ import { autoUpdate, checkForUpdate, currentVersion, resolveVersionLabel, runUpd
 import { renderStatus, formatPercent } from './status-renderer.js';
 import { sanitizeText } from './safe-text.js';
 import { ClientUsageTracker, UsageDimensionTracker } from './client-usage.js';
-import { buildClaudeEnvLines, bypassesAllHosts, clearSelfProxyEnvLines, encodePinComponent, mergeNoProxy, resolveClientMode } from './claude-env.js';
+import { buildClaudeEnvLines, buildCustomModelSettings, buildCustomModelVars, bypassesAllHosts, clearSelfProxyEnvLines, encodePinComponent, mergeNoProxy, resolveClientMode } from './claude-env.js';
 import { serviceKind, installService, uninstallService, serviceStatus, renderService, logPath } from './service.js';
 import { formatTerminalTitle, titleSequence, TITLE_STACK_PUSH, TITLE_STACK_POP } from './terminal-title.js';
 import { getUpstreamProxy, describeProxy, describeSelfProxy } from './upstream-proxy.js';
@@ -364,6 +365,9 @@ async function serverCommand() {
   let prober = null;
   // Opt-in keep-warm scheduler (interval or persisted reset-target schedule).
   let warmer = null;
+  // Supervised sidecar processes (config.sidecars, default none) — e.g. a local
+  // Anthropic→OpenAI translating proxy that a third-party account routes to.
+  let sidecar = null;
   const serverStartedAt = Date.now();
   // Read once here, not per request: `teamclaude update` swaps package.json on
   // disk while this process keeps running the old code, and status must report
@@ -609,6 +613,7 @@ async function serverCommand() {
         error: null,
       })),
     },
+    sidecars: sidecar?.getStatus() || [],
   });
   hooks.getQuotaExtra = () => ({ warmup: resolveWarmupConfig(config) });
 
@@ -690,6 +695,10 @@ async function serverCommand() {
   });
   warmer.start();
 
+  // Launch supervised sidecars (no-op when config.sidecars is empty).
+  sidecar = new Sidecar(config.sidecars);
+  sidecar.start();
+
   // Background self-update for a backgrounded (headless) server. Skipped under
   // the TUI, where npm's install output would corrupt the display — interactive
   // users update via `teamclaude run` (post-session) or `teamclaude update`.
@@ -714,6 +723,7 @@ async function serverCommand() {
     prober?.stop();
     warmer?.stop();
     eventLoopMonitor.stop();
+    sidecar?.stop();
     if (quotaSaveInterval) clearInterval(quotaSaveInterval);
     await persistQuotaState();
     // Don't linger waiting on keep-alive / streaming connections: actively
@@ -971,6 +981,7 @@ async function envCommand() {
       // The shell doing the eval keeps its own NO_PROXY entries; re-running is
       // idempotent, since the merged value is what it will have next time.
       inheritedNoProxy: [process.env.NO_PROXY, process.env.no_proxy].filter(Boolean).join(','),
+      customModels: config.customModels,
     });
     // Base-URL mode takes the proxy back OUT of a shell an earlier MITM eval
     // put it into; only this proxy's own loopback address is unset.
@@ -1044,7 +1055,8 @@ async function runCommand() {
   // also pins (shipped in 1.1.10). TC_ACCT is the supported way now — it works in
   // MITM mode too, and keeps the pin out of the API path.
   const pinnedBase = isLocalAccountPin(process.env.ANTHROPIC_BASE_URL, port);
-  if (await isProxyUp(port)) {
+  const proxyUp = await isProxyUp(port);
+  if (proxyUp) {
     if (useMitm) {
       // Route ALL of claude's traffic through us as an HTTPS forward proxy, so
       // even hardcoded api.anthropic.com endpoints (e.g. the design MCP) get the
@@ -1095,6 +1107,16 @@ async function runCommand() {
     console.error('Start it with: teamclaude server');
     console.error('Or pass --auto-fallback to launch claude directly (bypassing the proxy) when it is down.');
     process.exit(1);
+  }
+
+  // Register custom (third-party) models with Claude Code — /model picker rows
+  // via --settings, typed-/model + window sizing via env — but only when routed
+  // through the proxy: launched directly, those models aren't reachable. A
+  // caller-supplied --settings wins; merging two would silently drop keys.
+  if (proxyUp && config.customModels?.length) {
+    Object.assign(env, buildCustomModelVars(config.customModels));
+    const settings = buildCustomModelSettings(config.customModels);
+    if (settings && !claudeArgs.includes('--settings')) claudeArgs.push('--settings', settings);
   }
 
   // If holdSeconds is set, ensure API_TIMEOUT_MS on the Claude Code side is

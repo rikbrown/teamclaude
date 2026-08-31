@@ -73,13 +73,26 @@ sizing, plus `ANTHROPIC_CUSTOM_MODEL_OPTION` for the **first** custom model. Env
 express picker rows or agent definitions. For GPT subagents under `env`, create
 `~/.claude/agents/<name>.md` with `model: gpt-5.6-terra` frontmatter.
 
+## Quota
+
+Codex reports how much of the subscription is spent as `x-codex-*` response headers, and Claude
+Code never sees them, so the reference sidecar drops the lot. TeamClaude reads them when they
+arrive: each window is filed by its declared length — 300 minutes into the session bar, 10080 into
+the weekly one — and a 429 whose headers show a spent window (≥100%) counts as durable exhaustion
+rather than a rate limit. Which bar fills depends on the plan: a ChatGPT Pro subscription meters a
+weekly window only, so the session bar stays `unknown`.
+
+Getting the headers that far takes a patch to the sidecar — one module and four call sites, which
+keeps the newest snapshot and stamps it onto every Codex response under the names Codex itself
+uses. Both transports are covered: the HTTP one carries the headers, the WebSocket one carries the
+same numbers as a `codex.rate_limits` event ahead of the first output, so a response reports the
+request it answers. Until it lands upstream, build the branch and point `sidecars[].command` at
+`target/release/claude-code-proxy` instead of the Homebrew binary. Without the patch the account
+still works; its bars just read `unknown`, and exhaustion shows up only as a 429 with
+`retry-after`.
+
 ## Limitations
 
-- **Quota bars show `unknown`** for the codex account: the sidecar does not yet forward the
-  Codex rate-limit telemetry (`x-codex-*` headers / the in-band `codex.rate_limits` event).
-  TeamClaude already parses those headers into the 5h/weekly slots when they arrive, and a
-  429 whose headers show a spent window (≥100%) is classified as durable exhaustion. Until then,
-  exhaustion shows up only as a 429 with `retry-after`.
 - Claude Code prints a one-line `[claude-code:unrecognized_model]` stderr diagnostic per custom
   model. Silencing it requires `modelOverrides`, which would pin the custom model to the mapped
   Claude model's 200k window; TeamClaude keeps the correct window and accepts the one-line notice.

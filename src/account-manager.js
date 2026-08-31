@@ -22,6 +22,11 @@ const PERSISTED_QUOTA_FIELDS = [
   'tokensLimit', 'tokensRemaining', 'requestsLimit', 'requestsRemaining', 'resetsAt',
 ];
 
+// Longest Codex window still treated as a session bucket. The two lengths seen
+// in practice are 300 minutes (5h) and 10080 (weekly), so a day sits safely
+// between them.
+const CODEX_WEEKLY_MIN_MINUTES = 1440;
+
 // A Codex `*-reset-at` header as a ms timestamp. The wire format isn't pinned
 // down (the sidecar forwards it opaquely), so accept epoch seconds, epoch ms,
 // or an ISO-8601 date; anything else is null.
@@ -1216,18 +1221,23 @@ export class AccountManager {
     if (uStatus) account.quota.unifiedStatus = uStatus;
 
     // OpenAI/Codex windows (`x-codex-*`, forwarded by a translating sidecar for
-    // a ChatGPT-subscription account). Primary (~300 min) and secondary
-    // (~10080 min) match the 5h/weekly shape exactly, so they land in the same
-    // slots — display, projection and switch-threshold logic apply unchanged.
+    // a ChatGPT-subscription account). Codex reports two windows, `primary` and
+    // `secondary`, whose meaning comes from the declared length rather than the
+    // position: a ChatGPT Pro plan reports its weekly limit as the primary one
+    // and meters no secondary window at all. So each window is filed by length,
+    // which lands it in the same 5h/weekly slots the rest of the code reads —
+    // display, projection and switch-threshold logic apply unchanged. A window
+    // with no length is a bucket the plan does not have, not one at 0% used.
     // used-percent is 0-100 (not the 0-1 fraction Anthropic reports).
-    const cxPrimary = parseFloat(headers['x-codex-primary-used-percent']);
-    const cxSecondary = parseFloat(headers['x-codex-secondary-used-percent']);
-    if (!isNaN(cxPrimary)) account.quota.unified5h = cxPrimary / 100;
-    if (!isNaN(cxSecondary)) account.quota.unified7d = cxSecondary / 100;
-    const cxPrimaryReset = parseResetAt(headers['x-codex-primary-reset-at']);
-    const cxSecondaryReset = parseResetAt(headers['x-codex-secondary-reset-at']);
-    if (cxPrimaryReset != null) account.quota.unified5hReset = cxPrimaryReset;
-    if (cxSecondaryReset != null) account.quota.unified7dReset = cxSecondaryReset;
+    for (const window of ['primary', 'secondary']) {
+      const used = parseFloat(headers[`x-codex-${window}-used-percent`]);
+      const minutes = parseInt(headers[`x-codex-${window}-window-minutes`], 10);
+      if (isNaN(used) || !(minutes > 0)) continue;
+      const reset = parseResetAt(headers[`x-codex-${window}-reset-at`]);
+      const weekly = minutes > CODEX_WEEKLY_MIN_MINUTES;
+      account.quota[weekly ? 'unified7d' : 'unified5h'] = used / 100;
+      if (reset != null) account.quota[weekly ? 'unified7dReset' : 'unified5hReset'] = reset;
+    }
 
     // Standard rate limits (API key accounts)
     const tokensLimit = parseInt(headers['anthropic-ratelimit-tokens-limit'], 10);

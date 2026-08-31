@@ -32,11 +32,41 @@ test('updateQuota maps codex primary/secondary used-percent into the 5h/7d slots
   assert.equal(q.unified7dReset, (reset + 86_400) * 1000);
 });
 
+test('updateQuota files a codex window by its length, not its position', () => {
+  // A ChatGPT Pro subscription reports its weekly limit as the *primary* window
+  // and has no secondary one at all.
+  const am = new AccountManager([oauth('codex')], 0.98);
+  const reset = Math.floor((Date.now() + 600_000_000) / 1000);
+  am.updateQuota(0, {
+    'x-codex-primary-used-percent': '1',
+    'x-codex-primary-window-minutes': '10080',
+    'x-codex-primary-reset-at': String(reset),
+  });
+  const q = am.accounts[0].quota;
+  assert.equal(q.unified7d, 0.01);
+  assert.equal(q.unified7dReset, reset * 1000);
+  assert.equal(q.unified5h, null);
+});
+
+test('updateQuota ignores a codex window the plan does not meter', () => {
+  // Unmetered windows arrive as zeroes with no length — not as 0% used.
+  const am = new AccountManager([oauth('codex')], 0.98);
+  am.updateQuota(0, {
+    'x-codex-secondary-used-percent': '0',
+    'x-codex-secondary-window-minutes': '0',
+    'x-codex-secondary-reset-at': '',
+  });
+  const q = am.accounts[0].quota;
+  assert.equal(q.unified5h, null);
+  assert.equal(q.unified7d, null);
+});
+
 test('updateQuota accepts an ISO-8601 codex reset-at', () => {
   const am = new AccountManager([oauth('codex')], 0.98);
   const iso = new Date(Date.now() + 3600_000).toISOString();
   am.updateQuota(0, {
     'x-codex-primary-used-percent': '10',
+    'x-codex-primary-window-minutes': '300',
     'x-codex-primary-reset-at': iso,
   });
   assert.equal(am.accounts[0].quota.unified5hReset, Date.parse(iso));

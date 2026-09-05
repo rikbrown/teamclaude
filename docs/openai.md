@@ -42,7 +42,8 @@ against your ChatGPT subscription, and accepts raw `gpt-*` model ids.
      "customModels": [
        { "model": "gpt-5.6-sol",   "label": "GPT-5.6 Sol",   "contextTokens": 272000 },
        { "model": "gpt-5.6-terra", "label": "GPT-5.6 Terra", "contextTokens": 272000 },
-       { "model": "gpt-5.6-luna",  "label": "GPT-5.6 Luna",  "contextTokens": 272000 }
+       { "model": "gpt-5.6-luna",  "label": "GPT-5.6 Luna",  "contextTokens": 272000 },
+       { "model": "gpt-6-astra",   "label": "GPT-6 Astra",   "contextTokens": 272000 }
      ]
    }
    ```
@@ -96,6 +97,10 @@ still works; its bars just read `unknown`, and exhaustion shows up only as a 429
 - Claude Code prints a one-line `[claude-code:unrecognized_model]` stderr diagnostic per custom
   model. Silencing it requires `modelOverrides`, which would pin the custom model to the mapped
   Claude model's 200k window; TeamClaude keeps the correct window and accepts the one-line notice.
+- The sidecar allow-lists Codex model ids — a `customModels` row alone does not unlock a new
+  OpenAI model. It rejects unknown ids until you install a build that lists them (the reference
+  sidecar added `gpt-6-astra` on 2026-09-04). Copy each id's `context_window` from
+  `~/.codex/models_cache.json` into `contextTokens`.
 - The sidecar listens without client authentication — keep it on loopback (the default).
 
 ## Terms of service

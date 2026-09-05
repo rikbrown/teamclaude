@@ -191,10 +191,6 @@ Default selection is sticky. It re-ranks only when the current account is exhaus
 
 This feature is on by default. Each account row shows which window binds first: `Ses TTL 38m` when the session bucket runs out before it resets, or `Wk 22% unspent` when the weekly reset arrives first and that amount of quota expires. This is a readout only; no selection code reads it. Tune or disable it with `projection: { enabled, windowMinutes, wasteFloor }`. Details: [Quota](docs/quota.md#burn-rate-projection).
 
-### Session titles
-
-This feature is off by default. Activity rows use the name of the Claude Code session that sent the request. They use the title written by `/rename` or the title that Claude Code generates; a session with neither keeps its short id. Toggle the feature from the settings screen (**g** → Session titles) or with `sessionTitles: { enabled, width, projectsDir }`. Details: [Usage](docs/usage.md#session-titles-in-the-activity-log).
-
 ## Documentation
 
 | Page | Contents |

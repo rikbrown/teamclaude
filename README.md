@@ -1,6 +1,6 @@
 # TeamClaude
 
-> **Fork notice (rikbrown).** This fork adds three features and two reload fixes on top of
+> **Fork notice (rikbrown).** This fork adds three features on top of
 > [KarpelesLab/teamclaude](https://github.com/KarpelesLab/teamclaude):
 >
 > - **[OpenAI models via a Codex sidecar](docs/openai.md)** (`sidecars` + `customModels`, opt-in):
@@ -11,13 +11,11 @@
 >   equal-priority accounts by the weekly window that governs the requested model, continuously — preempt the
 >   current account when another resets more than `poolHours` sooner, and balance `distributeSessions` within
 >   that pool instead of across all accounts. Spends the quota closest to refreshing first, so a window no
->   longer rolls over with quota unspent.
+>   longer rolls over with quota unspent. Applied live on config reload.
 > - **[Burn-rate projection](docs/quota.md#burn-rate-projection)** (`projection`, on by default): sample each
 >   bucket's consumption over a rolling window and tag every account row with whichever window binds
 >   first — `Ses TTL 38m` when it runs out before it resets, `Wk 22% unspent` when the reset arrives
 >   first and that much expires. A readout only: no selection code reads it.
-> - `soonestWeekly` and `distributeSessions` changes now apply on config reload; upstream applies
->   `distributeSessions` only at startup.
 >
 > Published as [`@rikcodes/teamclaude`](https://www.npmjs.com/package/@rikcodes/teamclaude); self-update
 > tracks that package, so installs of this fork can never be replaced by an upstream release.

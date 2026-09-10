@@ -3,7 +3,7 @@ import { sameIdentity } from './identity.js';
 import { safeLine } from './safe-text.js';
 import { removedAccountIds, addedAccountIds, configIndexFor } from './account-pairing.js';
 import { ensureAccountIds } from './account-id.js';
-import { accountSwitchThreshold, accountAllowsExtraUsage, accountRouting } from './account-manager.js';
+import { accountSwitchThreshold, accountAllowsExtraUsage, accountRouting, normalizeHeadersTimeoutMs } from './account-manager.js';
 import { localListener } from './upstream-proxy.js';
 
 /**
@@ -162,6 +162,10 @@ export async function syncAccountsFromDisk(diskConfig, memConfig, accountManager
     // missing from this sync until #374: an edit waited for a restart.
     mgr.stripRequestFields = diskAcct.stripRequestFields || null;
     mgr.messageThreads = diskAcct.messageThreads === true;
+    // Same per-request read (`account.headersTimeoutMs` in forwardRequest);
+    // same normalization as the constructor, so a removed or invalid disk value
+    // reverts to the fleet default.
+    mgr.headersTimeoutMs = normalizeHeadersTimeoutMs(diskAcct.headersTimeoutMs);
     // Mirror onto the memConfig entry: the TUI save stencil rebuilds
     // diskConfig.accounts from config.accounts as `{ ...diskAcct, ...live }`,
     // so a stale key there would win the spread and silently overwrite this
@@ -188,6 +192,7 @@ export async function syncAccountsFromDisk(diskConfig, memConfig, accountManager
       // would win the save stencil's spread and undo the disk edit.
       if (typeof diskAcct.autoRedeemReset === 'boolean') cfgAcct.autoRedeemReset = diskAcct.autoRedeemReset;
       else delete cfgAcct.autoRedeemReset;
+      if (diskAcct.headersTimeoutMs != null) cfgAcct.headersTimeoutMs = diskAcct.headersTimeoutMs; else delete cfgAcct.headersTimeoutMs;
     }
     // Pick up enable/disable toggles; re-enabling clears a stuck error state.
     const wantDisabled = !!diskAcct.disabled;

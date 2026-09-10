@@ -173,6 +173,17 @@ function copyBuckets(byBucket) {
   return out;
 }
 
+// `accounts[].headersTimeoutMs`: how long to wait for this account's upstream
+// to send response HEADERS before the socket is treated as dead (see
+// upstream-fetch.js). Slow backends — a Codex sidecar can take minutes to first
+// byte on a non-streaming reply — need more than the fleet default. Only a
+// positive integer counts; anything else (absent, 0, negative, fractional,
+// non-numeric) falls back to the default. 0 is rejected on purpose: passed
+// through, it would arm a 0ms deadline and fail every request instantly.
+export function normalizeHeadersTimeoutMs(v) {
+  return Number.isInteger(v) && v > 0 ? v : null;
+}
+
 // Build a fresh in-memory account record from a config/disk account object.
 // Shared by the constructor and addAccount() so the field set can never drift
 // between startup accounts and runtime-added ones (a divergence here once left
@@ -209,6 +220,9 @@ function makeAccount(acct, index) {
     // Fields to drop from request bodies for this account (third-party upstreams
     // that reject e.g. `context_management`). See server.js stripBodyFields.
     stripRequestFields: acct.stripRequestFields || null,
+    // Per-account response-headers deadline (ms); null means the fleet default
+    // in upstream-fetch.js. See normalizeHeadersTimeoutMs.
+    headersTimeoutMs: normalizeHeadersTimeoutMs(acct.headersTimeoutMs),
     models: acct.models || null,
     credential: acct.accessToken || acct.apiKey,
     refreshToken: acct.refreshToken || null,

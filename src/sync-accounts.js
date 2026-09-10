@@ -1,6 +1,7 @@
 import { importCredentials } from './oauth.js';
 import { sameIdentity } from './identity.js';
 import { ensureAccountIds } from './account-id.js';
+import { normalizeHeadersTimeoutMs } from './account-manager.js';
 
 /**
  * Sync accounts from disk config: add new accounts and refresh credentials
@@ -103,6 +104,10 @@ export async function syncAccountsFromDisk(diskConfig, memConfig, accountManager
     // to the fleet default instead of sticking on the old value.
     mgr.upstream = diskAcct.upstream || null;
     mgr.modelMap = diskAcct.modelMap || null;
+    // Same per-request read (`account.headersTimeoutMs` in forwardRequest);
+    // same normalization as the constructor, so a removed or invalid disk value
+    // reverts to the fleet default.
+    mgr.headersTimeoutMs = normalizeHeadersTimeoutMs(diskAcct.headersTimeoutMs);
     // Mirror onto the memConfig entry: the TUI save stencil rebuilds
     // diskConfig.accounts from config.accounts as `{ ...diskAcct, ...live }`,
     // so a stale key there would win the spread and silently overwrite this
@@ -113,6 +118,7 @@ export async function syncAccountsFromDisk(diskConfig, memConfig, accountManager
       if (diskAcct.upstream) cfgAcct.upstream = diskAcct.upstream; else delete cfgAcct.upstream;
       if (diskAcct.modelMap) cfgAcct.modelMap = diskAcct.modelMap; else delete cfgAcct.modelMap;
       if (diskAcct.maxUsage != null) cfgAcct.maxUsage = diskAcct.maxUsage; else delete cfgAcct.maxUsage;
+      if (diskAcct.headersTimeoutMs != null) cfgAcct.headersTimeoutMs = diskAcct.headersTimeoutMs; else delete cfgAcct.headersTimeoutMs;
     }
     // Pick up enable/disable toggles; re-enabling clears a stuck error state.
     const wantDisabled = !!diskAcct.disabled;

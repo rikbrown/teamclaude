@@ -3248,6 +3248,9 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
         defaultHeadersTimeoutMs: defaultHeadersTimeoutFor(account),
         body: ['GET', 'HEAD'].includes(method) ? undefined : sendBody,
         redirect: 'manual',
+        // Wins over both the env var and defaultHeadersTimeoutMs above; null defers
+        // to them.
+        headersTimeoutMs: account.headersTimeoutMs,
       }, sx, route);
     } finally {
       admittedLoad = accountManager.release(account.index,

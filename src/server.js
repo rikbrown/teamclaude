@@ -2251,6 +2251,8 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
         signal: ctx.signal,
         body: ['GET', 'HEAD'].includes(method) ? undefined : sendBody,
         redirect: 'manual',
+        // null → upstreamFetch's fleet default (env var or 120s).
+        headersTimeoutMs: account.headersTimeoutMs,
       }, sx, route);
     } finally {
       admittedLoad = accountManager.release(account.index,

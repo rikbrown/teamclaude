@@ -2,6 +2,7 @@ import { importCredentials } from './oauth.js';
 import { sameIdentity } from './identity.js';
 import { safeLine } from './safe-text.js';
 import { ensureAccountIds } from './account-id.js';
+import { normalizeHeadersTimeoutMs } from './account-manager.js';
 
 /**
  * Sync accounts from disk config: add new accounts and refresh credentials
@@ -116,6 +117,10 @@ export async function syncAccountsFromDisk(diskConfig, memConfig, accountManager
     // missing from this sync until #374: an edit waited for a restart.
     mgr.stripRequestFields = diskAcct.stripRequestFields || null;
     mgr.messageThreads = diskAcct.messageThreads === true;
+    // Same per-request read (`account.headersTimeoutMs` in forwardRequest);
+    // same normalization as the constructor, so a removed or invalid disk value
+    // reverts to the fleet default.
+    mgr.headersTimeoutMs = normalizeHeadersTimeoutMs(diskAcct.headersTimeoutMs);
     // Mirror onto the memConfig entry: the TUI save stencil rebuilds
     // diskConfig.accounts from config.accounts as `{ ...diskAcct, ...live }`,
     // so a stale key there would win the spread and silently overwrite this
@@ -128,6 +133,7 @@ export async function syncAccountsFromDisk(diskConfig, memConfig, accountManager
       if (diskAcct.stripRequestFields) cfgAcct.stripRequestFields = diskAcct.stripRequestFields; else delete cfgAcct.stripRequestFields;
       if (diskAcct.messageThreads === true) cfgAcct.messageThreads = true; else delete cfgAcct.messageThreads;
       if (diskAcct.maxUsage != null) cfgAcct.maxUsage = diskAcct.maxUsage; else delete cfgAcct.maxUsage;
+      if (diskAcct.headersTimeoutMs != null) cfgAcct.headersTimeoutMs = diskAcct.headersTimeoutMs; else delete cfgAcct.headersTimeoutMs;
     }
     // Pick up enable/disable toggles; re-enabling clears a stuck error state.
     const wantDisabled = !!diskAcct.disabled;

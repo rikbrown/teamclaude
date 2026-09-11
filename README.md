@@ -1,17 +1,12 @@
 # TeamClaude
 
-> **Fork notice (rikbrown).** This fork adds three features on top of
+> **Fork notice (rikbrown).** This fork adds two features on top of
 > [KarpelesLab/teamclaude](https://github.com/KarpelesLab/teamclaude), currently based on upstream 1.1.19:
 >
 > - **[OpenAI models via a Codex sidecar](docs/openai.md)** (`sidecars` + `customModels`, opt-in):
 >   route `gpt-*` requests through a supervised local translating proxy to a ChatGPT subscription,
 >   under real model names — `/model gpt-5.6-sol` in the picker and typed, correct 272k context
 >   sizing, and dispatchable GPT subagents — while Claude traffic stays on the Claude accounts.
-> - **[Soonest-weekly rotation](docs/routing.md#soonest-weekly-rotation)** (`soonestWeekly`, opt-in): rank
->   equal-priority accounts by the weekly window that governs the requested model, continuously — preempt the
->   current account when another resets more than `poolHours` sooner, and balance `distributeSessions` within
->   that pool instead of across all accounts. Spends the quota closest to refreshing first, so a window no
->   longer rolls over with quota unspent. Applied live on config reload.
 > - **[Burn-rate projection](docs/quota.md#burn-rate-projection)** (`projection`, on by default): sample each
 >   bucket's consumption over a rolling window and tag every account row with whichever window binds
 >   first — `Ses TTL 38m` when it runs out before it resets, `Wk 22% unspent` when the reset arrives
@@ -59,7 +54,6 @@ Already logged into Claude Code? `teamclaude import` takes its credentials inste
 ## What it does
 
 - Rotates to the next account when the 5h session or 7d weekly bucket reaches the threshold (98% by default), preferring the account whose weekly quota resets soonest.
-- Optionally spends the account whose weekly window resets soonest **first**, preempting the current account when another resets more than `poolHours` sooner, so a window stops rolling over with quota unspent (`soonestWeekly`, this fork).
 - Projects each quota window's burn rate against its reset, so a row says `Ses TTL 38m · Wk 22% unspent` instead of leaving you to read it off a bar (`projection`, this fork).
 - Tracks the per-model weekly cap separately, so an account out of Fable quota is skipped for Fable requests and still serves Opus and Sonnet.
 - Tells a spent quota bucket apart from a per-minute rate limit and only rotates on the first one. Rotating on a rate limit would just move the burst to the next account and drop the warm cache, so it paces the same account instead.
@@ -172,16 +166,6 @@ Each request is routed by the model name in its body, so one session can freely 
 Claude Code prints one `[claude-code:unrecognized_model]` line to stderr for each custom model. This is expected; suppressing it would lose the correct context window. The quota bars for the sidecar account show `unknown` unless the sidecar forwards Codex's rate-limit headers — see [Quota](docs/openai.md#quota). Keep the sidecar on loopback, and use **one** ChatGPT subscription for each person. Pooling several subscriptions is the pattern that OpenAI's fraud systems target ([terms of service](docs/openai.md#terms-of-service)).
 
 Full details: [docs/openai.md](docs/openai.md).
-
-### Soonest-weekly rotation
-
-Default selection is sticky. It re-ranks only when the current account is exhausted, so a weekly window can expire with unused quota. `soonestWeekly` re-ranks continuously. Among equal-priority accounts, the one whose governing weekly window resets soonest is used first. It preempts the current account when another account resets more than `poolHours` sooner.
-
-```json
-"soonestWeekly": { "enabled": true, "poolHours": 12 }
-```
-
-`distributeSessions` works with this setting. New sessions balance across that pool instead of across all equal-priority accounts. Both settings take effect when the configuration reloads (upstream applies `distributeSessions` only at startup). Details: [Routing](docs/routing.md#soonest-weekly-rotation).
 
 ### Burn-rate projection
 

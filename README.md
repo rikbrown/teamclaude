@@ -1,7 +1,7 @@
 # TeamClaude
 
 > **Fork notice (rikbrown).** This fork adds three features on top of
-> [KarpelesLab/teamclaude](https://github.com/KarpelesLab/teamclaude):
+> [KarpelesLab/teamclaude](https://github.com/KarpelesLab/teamclaude), currently based on upstream 1.1.19:
 >
 > - **[OpenAI models via a Codex sidecar](docs/openai.md)** (`sidecars` + `customModels`, opt-in):
 >   route `gpt-*` requests through a supervised local translating proxy to a ChatGPT subscription,
@@ -202,7 +202,7 @@ This feature is on by default. Each account row shows which window binds first: 
 
 ## Releasing this fork
 
-Versions are `<upstream base>-rik.<n>`, e.g. `1.1.13-rik.1`. The self-updater orders that tail, so every publish reaches existing installs within a day.
+Versions are `<upstream base>-rik.<n>`, e.g. `1.1.19-rik.1`. The self-updater orders that tail and installs only that shape (`x.y.z` or `x.y.z-rik.N`), so every publish reaches existing installs within a day.
 
 1. Rebase onto the upstream release you want as the base, if any.
 2. Bump `version` in `package.json` and commit.

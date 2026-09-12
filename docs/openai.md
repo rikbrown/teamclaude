@@ -92,6 +92,30 @@ request it answers. Until it lands upstream, build the branch and point `sidecar
 still works; its bars just read `unknown`, and exhaustion shows up only as a 429 with
 `retry-after`.
 
+## Why not the built-in Codex provider?
+
+TeamClaude also speaks to Codex natively: an account with `"provider": "codex"` pools a ChatGPT
+login with no sidecar at all. That is a different job, and it does not replace this one.
+
+The native provider is a **passthrough** — the client speaks OpenAI's own protocol and the body is
+forwarded untouched, which is what keeps tool calls, streaming events and cache breakpoints exact.
+It therefore serves the **Codex CLI**, pointed at `<proxy>/backend-api/codex`, and requests are
+matched to it **by path**: `/v1/messages` is Anthropic's, `/backend-api/codex/*` is Codex's.
+
+Claude Code only speaks `/v1/messages`. So a `gpt-*` request from a Claude Code session can never
+reach a native Codex account — which is exactly why the sidecar exists: it translates, and the
+native path deliberately does not.
+
+Use the sidecar to put **GPT models inside a Claude Code session** (`/model gpt-*`, dispatchable GPT
+subagents, mixed-model sessions). Use `"provider": "codex"` to pool ChatGPT logins for the **Codex
+CLI**. They coexist: a native Codex account is eligible only for Codex paths, and the subscription
+partition keeps it out of `/v1/messages` traffic on its own.
+
+> Do not add `"provider": "codex"` to a sidecar account. It marks the account as a foreign
+> subscription, so the partition excludes it from the `/v1/messages` traffic it is there to serve,
+> and every `gpt-*` request fails to find an account. A sidecar account is reached over the
+> Anthropic wire and correctly carries no `provider` field.
+
 ## Limitations
 
 - Claude Code prints a one-line `[claude-code:unrecognized_model]` stderr diagnostic per custom

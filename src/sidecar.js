@@ -128,6 +128,7 @@ export class Sidecar {
 
 // Real spawner: stdout ignored (sidecars log to their own files), stderr piped
 // for the ring buffer. detached:false so the child dies with us as a backstop.
+/** @param {{name?: string, command: string, args: string[], env: Record<string, string|undefined>}} spec */
 function defaultSpawn({ command, args, env }) {
   return spawn(command, args, { env, stdio: ['ignore', 'ignore', 'pipe'] });
 }

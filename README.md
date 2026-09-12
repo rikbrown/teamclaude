@@ -24,9 +24,9 @@
 > Already have upstream installed globally? Run `npm uninstall -g @karpeleslab/teamclaude` first —
 > both packages provide the `teamclaude` command.
 >
-> Branch: `rik/soonest-weekly-pool`. Everything else matches upstream.
+> Branch: `rik/main`. Everything else matches upstream.
 
-[![CI](https://github.com/rikbrown/teamclaude/actions/workflows/ci.yml/badge.svg?branch=rik/soonest-weekly-pool)](https://github.com/rikbrown/teamclaude/actions/workflows/ci.yml)
+[![CI](https://github.com/rikbrown/teamclaude/actions/workflows/ci.yml/badge.svg?branch=rik/main)](https://github.com/rikbrown/teamclaude/actions/workflows/ci.yml)
 [![npm version](https://img.shields.io/npm/v/@rikcodes/teamclaude.svg)](https://www.npmjs.com/package/@rikcodes/teamclaude)
 [![node](https://img.shields.io/node/v/@rikcodes/teamclaude.svg)](https://nodejs.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -190,12 +190,12 @@ Versions are `<upstream base>-rik.<n>`, e.g. `1.1.19-rik.1`. The self-updater or
 
 1. Rebase onto the upstream release you want as the base, if any.
 2. Bump `version` in `package.json` and commit.
-3. Push to `rik/soonest-weekly-pool` — the Publish workflow runs the tests, publishes to npm, and cuts a GitHub release.
+3. Push to `rik/main` — the Publish workflow runs the tests, publishes to npm, and cuts a GitHub release.
 
 The workflow authenticates with npm Trusted Publishing (OIDC), which needs a one-time setup on npmjs.com: `@rikcodes/teamclaude` → Settings → Trusted Publisher → GitHub Actions, owner `rikbrown`, repo `teamclaude`, workflow `publish.yml`. Until that exists, publish by hand:
 
 ```bash
-pnpm publish --publish-branch rik/soonest-weekly-pool --tag latest --otp=<code>
+pnpm publish --publish-branch rik/main --tag latest --otp=<code>
 ```
 
 A prerelease version always needs an explicit `--tag`, and `latest` is the tag the self-updater reads.

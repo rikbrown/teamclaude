@@ -2495,7 +2495,7 @@ export class TUI {
     let links = new Map();
 
     // ── Header
-    const left = bold(' TeamClaude');
+    const left = bold(' RikClaude Harness');
     const port = this.config.proxy?.port || 3456;
     const sess = this.am.sessionStats();
     const sessStr = (sess.active || sess.known)

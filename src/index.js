@@ -472,7 +472,7 @@ async function serverCommand() {
 
   if (useTUI) {
     tui = new TUI({
-      accountManager, config, sx, activityLogPath, sessionTitles,
+      accountManager, config, sx, activityLogPath, sessionTitles, version: serverVersion,
       saveConfig: () => atomicConfigUpdate(async diskConfig => {
         diskConfig.accounts = mergeAccountsForSave(
           config.accounts, accountManager.accounts, diskConfig.accounts, removedAccountIds(config),

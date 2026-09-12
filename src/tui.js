@@ -414,7 +414,11 @@ export class TUI {
     readCredentials = importCredentials, readProfile = fetchProfile,
     // Names the activity column against the session id the client sent. Absent
     // or disabled leaves every row showing the short id.
-    sessionTitles = null }) {
+    sessionTitles = null,
+    // Shown faint beside the title. Null in attach mode, where the dashboard is
+    // built before the first poll and the server's version is not yet known,
+    // and in tests — both render the title alone rather than a stray `null`.
+    version = null }) {
     this.am = accountManager;
     this.remote = remote;
     this.applySwitch = applySwitch;
@@ -430,6 +434,7 @@ export class TUI {
     this._readProfile = readProfile;
     this._activityStream = null;
     this.sessionTitles = sessionTitles;
+    /** @type {string|null} */ this.version = version;
 
     this.log = [];           // completed activity entries
     this.active = new Map(); // in-flight requests
@@ -1372,7 +1377,7 @@ export class TUI {
     const lines = [];
 
     // ── Header
-    const left = bold(' TeamClaude');
+    const left = bold(' RikClaude Harness') + (this.version ? dim(` ${this.version}`) : '');
     const port = this.config.proxy?.port || 3456;
     const sess = this.am.sessionStats();
     const sessStr = (sess.active || sess.known)

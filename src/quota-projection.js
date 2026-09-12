@@ -111,6 +111,9 @@ export class QuotaProjection {
 
   /**
    * Project one bucket against its reset.
+   * @param {number} accountIndex
+   * @param {string} bucket
+   * @param {{utilization?: number|null, resetAt?: number|null, now?: number}} [sample]
    * @returns {{bucket: string, kind: 'deficit'|'surplus', exhaustsInMs?: number,
    *   unspent?: number, resetInMs: number} | null}
    */

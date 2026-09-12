@@ -3,9 +3,9 @@ name: CI
 on:
   workflow_dispatch:
   push:
-    branches: [rik/soonest-weekly-pool]
+    branches: [rik/main]
   pull_request:
-    branches: [rik/soonest-weekly-pool]
+    branches: [rik/main]
 
 jobs:
   node:

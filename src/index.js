@@ -1099,8 +1099,11 @@ async function runCommand() {
     if (settings && !claudeArgs.includes('--settings')) claudeArgs.push('--settings', settings);
     // Dispatchable subagents per custom model — the Agent tool's `model`
     // parameter is an alias enum, so only a named agent definition can carry a
-    // custom model id into a subagent.
-    const agents = buildCustomModelAgents(config.customModels);
+    // custom model id into a subagent. `customModelAgents: false` skips them for
+    // operators with their own ~/.claude/agents definitions: the plain agents
+    // invite an effort-less dispatch, and a file-based agent's `model:` reaches
+    // the proxy without them.
+    const agents = config.customModelAgents === false ? null : buildCustomModelAgents(config.customModels);
     if (agents && !claudeArgs.includes('--agents')) claudeArgs.push('--agents', agents);
   }
 

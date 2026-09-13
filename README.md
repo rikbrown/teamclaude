@@ -150,7 +150,7 @@ At launch, `teamclaude run` — and the `claude` alias, which passes through `ru
 | Row field | Where it ends up |
 | --- | --- |
 | `model`, `label`, `description` | A `/model` picker row under the **real** model id (`--settings`), so `/model gpt-5.6-sol` works picked or typed |
-| `model` | A dispatchable subagent named after the model (`--agents`), so "dispatch a `gpt-5.6-terra` subagent" works from a Claude parent |
+| `model` | A dispatchable subagent named after the model (`--agents`), so "dispatch a `gpt-5.6-terra` subagent" works from a Claude parent. Set `"customModelAgents": false` to skip these if you define your own agents in `~/.claude/agents/` |
 | `contextTokens` | `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, set to the largest value across rows, so Claude Code compacts at the real window instead of assuming 200k |
 
 For tools that spawn `claude` themselves, `teamclaude env` can set only environment variables. It carries the window and `ANTHROPIC_CUSTOM_MODEL_OPTION` for the **first** row. For GPT subagents under `env`, create `~/.claude/agents/<name>.md` with `model: gpt-5.6-terra` in its frontmatter.

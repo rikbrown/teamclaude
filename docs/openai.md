@@ -66,6 +66,8 @@ traffic to Claude accounts, so the only way to reach a GPT model is to ask for o
 - **Dispatchable GPT subagents**: `run` injects one agent definition per custom model, named after
   the model — "dispatch a `gpt-5.6-terra` subagent" works in any session. (The Agent tool's `model`
   *parameter* is an alias enum and cannot carry a custom id; only an agent definition can.)
+  `"customModelAgents": false` turns these off when your own `~/.claude/agents/` definitions
+  already name the models.
 - Mixed sessions: a Claude parent freely dispatches GPT subagents and vice versa; the proxy routes
   each request by the model in its body.
 

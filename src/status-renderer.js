@@ -211,10 +211,19 @@ function routingLines(routes, blocked, paint) {
     // say so, rather than listing eligible accounts it will never reach.
     const routeBlocked = globs.length > 0
       && globs.every(g => blocked.some(p => modelGlobOverlaps(p, g)));
+    // A route may list accounts from two providers — a local translating sidecar
+    // on this route's own wire, plus the subscription pool its back leg reaches.
+    // Tag the ones that are not this route's own provider, so a mixed row says
+    // which hop each account serves instead of reading as one flat pool.
+    const routeProvider = route.provider || 'anthropic';
+    const accountText = (a) => {
+      const tag = a.provider && a.provider !== routeProvider ? `:${nameText(a.provider)}` : '';
+      return nameText(a.name) + tag;
+    };
     const accounts = routeBlocked
       ? paint.red('blocked')
       : (route.accounts || [])
-        .map(a => (a.eligible ? paint.green(nameText(a.name)) : paint.red(nameText(a.name)))).join(' ') || paint.gray('(none)');
+        .map(a => (a.eligible ? paint.green(accountText(a)) : paint.red(accountText(a)))).join(' ') || paint.gray('(none)');
     const tag = route.autocreated ? paint.dim(' (auto)') : route.bucket ? paint.dim(` [${nameText(route.bucket)}]`) : '';
     const pin = route.pinned ? paint.dim(` [pinned: ${nameText(route.pinned)}]`) : '';
     // padEnd on the raw text, color after, so ANSI codes don't throw off alignment.

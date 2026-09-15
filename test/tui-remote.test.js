@@ -380,7 +380,7 @@ test('a general route renders, and a half-specified one does not take the dashbo
   ];
   am.applyStatus(status);
 
-  assert.deepEqual(am.getRoutes().map(r => r.accounts), [[{ name: 'alpha', eligible: true }], []]);
+  assert.deepEqual(am.getRoutes().map(r => r.accounts), [[{ name: 'alpha', provider: undefined, eligible: true }], []]);
   assert.deepEqual(am.getRoutes()[1].match, []);
   const out = renderToString(tui);
   assert.match(out, /alpha/);

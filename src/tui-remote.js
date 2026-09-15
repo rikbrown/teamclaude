@@ -280,6 +280,15 @@ export class RemoteAccountManager {
     // both leaves the label empty and the header simply omits it.
     this.versionLabel = text(status?.server?.versionLabel ?? status?.server?.version, LABEL_MAX);
     this.updateAvailable = !!status?.server?.updateAvailable;
+    // Conduit lines read this. Clamped like every other remote field: the
+    // payload is a server's word, not ours, and it reaches a rendered line.
+    this.sidecars = (Array.isArray(status?.sidecars) ? status.sidecars : []).map(sc => ({
+      name: text(sc?.name, NAME_MAX, '?'),
+      running: !!sc?.running,
+      pid: Number.isFinite(sc?.pid) ? sc.pid : null,
+      restarts: Number.isFinite(sc?.restarts) ? sc.restarts : 0,
+      lastExit: sc?.lastExit == null ? null : text(sc.lastExit, 48),
+    }));
     this.status = status;
     this.connected = true;
     this.lastError = null;

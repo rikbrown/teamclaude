@@ -411,6 +411,9 @@ function timestamp() {
 
 export class TUI {
   constructor({ accountManager, config, saveConfig, syncAccounts, onQuit, sx = null, probeQuota = null, activityLogPath = null,
+    // Supervised sidecar state for the conduit lines. A getter, not a snapshot:
+    // the supervisor respawns on its own schedule and the TUI redraws on a timer.
+    getSidecars = null,
     // Attach mode: the accounts belong to a server in another process, reached
     // over its control plane. Everything that would mutate local state is off,
     // and a switch becomes a request (applySwitch) instead of an assignment.
@@ -435,6 +438,7 @@ export class TUI {
     this.sx = sx;            // sx.org proxy manager (may be null)
     this.sxBalance = null;   // last fetched sx.org balance, for the settings screen
     this.probeQuota = probeQuota; // on-demand fleet-wide quota refresh (may be null)
+    this.getSidecars = getSidecars; // supervised sidecar state (may be null)
     this.activityLogPath = activityLogPath;
     this._readCredentials = readCredentials;
     this._readProfile = readProfile;
@@ -1545,6 +1549,8 @@ export class TUI {
         const b = budgets.get(categoryOf(this.am.accounts[i]));
         lines.push(this._renderAcct(i, b.bw, b.showBoth, routes, genRoutes, familyTarget, b.showFamily, nameW));
       }
+      // Local backends sit under the seats, as a readout rather than rows.
+      lines.push(...this._conduitLines());
     }
 
     // Routing is surfaced inline on each account row (see _renderAcct): a colored
@@ -1596,14 +1602,15 @@ export class TUI {
     this._paint(buf, force);
   }
 
-  /** Manager indices in the order the rows are drawn: accounts served by a
-   *  local process last, every other account left where it is.
+  /** Manager indices of the accounts drawn as rows: the seats that rotate.
    *
-   *  A local backend (a translating proxy in front of another vendor, say) is
-   *  infrastructure rather than a seat to rotate between, so it reads as noise
-   *  wedged among the accounts that do rotate. Config order cannot keep it out
-   *  of the way on its own, because a newly added account is appended AFTER it
-   *  and puts it back in the middle.
+   *  A local backend — a translating proxy in front of another vendor — is
+   *  infrastructure, not a seat. It holds no subscription (its token is a
+   *  placeholder), it is the only candidate its route has, so it never rotates,
+   *  and it has no quota of its own to show. Drawn among the accounts it was a
+   *  row of dashes and borrowed numbers in a table whose whole purpose is which
+   *  account is being spent. It gets its own line below instead — see
+   *  _conduitLines. Sorting it last was the first half of this thought.
    *
    *  Display only. `selIdx`, `currentIndex`, session pins and route entries all
    *  stay manager indices, so nothing about selection or routing moves with the
@@ -1612,11 +1619,44 @@ export class TUI {
   _displayOrder() {
     return this.am.accounts
       .map((/** @type {any} */ _, /** @type {number} */ i) => i)
-      .sort((/** @type {number} */ x, /** @type {number} */ y) => {
-        const sx = isLocalUpstream(this.am.accounts[x]) ? 1 : 0;
-        const sy = isLocalUpstream(this.am.accounts[y]) ? 1 : 0;
-        return sx - sy || x - y; // ties keep list order, so the sort is stable
-      });
+      .filter(i => !isLocalUpstream(this.am.accounts[i]));
+  }
+
+  /** Manager indices of the local backends, in config order. */
+  _conduitOrder() {
+    return this.am.accounts.map((/** @type {any} */ _, /** @type {number} */ i) => i).filter(i => isLocalUpstream(this.am.accounts[i]));
+  }
+
+  /** One line per local backend: what it is, where it sends, and whether it can
+   *  serve. Its supervised process's state is folded in when this TUI has it
+   *  (the server passes a getter; the remote TUI reads the status payload), so
+   *  a crash-looping sidecar says so here rather than only in `status --json`.
+   *
+   *  Deliberately terse. There is nothing to choose between, so this is a
+   *  readout, not a row: the operator needs "is it up" and nothing else. */
+  _conduitLines() {
+    const sidecars = this._sidecars();
+    return this._conduitOrder().map(i => {
+      const a = this.am.accounts[i];
+      let host = a.upstream;
+      try { host = new URL(a.upstream).host; } catch { /* keep the raw string */ }
+      // Matched by name: a sidecars[] entry and the account that routes to it
+      // are named by the same operator, and nothing else pairs them.
+      const proc = sidecars.find(sc => sc.name === a.name) || null;
+      const state = a.disabled ? red('disabled')
+        : a.rateLimitedUntil > Date.now() ? yellow('throttled')
+          : proc && !proc.running ? red(`down (${proc.lastExit || 'restarting'})`)
+            : proc ? green('up') : green('ok');
+      const pid = proc?.running ? dim(` pid ${proc.pid}`) : '';
+      const restarts = proc?.restarts ? yellow(` ${proc.restarts} restarts`) : '';
+      return ` ${dim('⚙')} ${a.name} ${dim('→')} ${dim(host)}  ${state}${pid}${restarts}`;
+    });
+  }
+
+  /** Supervised sidecar state, or [] when this TUI has no view of it. */
+  _sidecars() {
+    const list = this.getSidecars ? this.getSidecars() : this.am.sidecars;
+    return Array.isArray(list) ? list : [];
   }
 
   _renderAcct(idx, bw, showBoth, routes = this.am.getRoutes(), genRoutes = routes.filter(r => routeFamily(r) === null), familyTarget = {}, showFamily = true, nameW = NAME_MIN) {

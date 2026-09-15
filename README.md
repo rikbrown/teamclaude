@@ -163,7 +163,9 @@ Each request is routed by the model name in its body, so one session can freely 
 2. Add a `customModels` row. Codex publishes the window for each model as `context_window` in `~/.codex/models_cache.json`; copy it to `contextTokens`.
 3. Start a new `teamclaude run` session. The rows are read at launch, so you do not need to restart the server. If you upgraded the sidecar binary, restart the server — or send `SIGTERM` to the sidecar process and let the supervisor restart it with the new binary.
 
-Claude Code prints one `[claude-code:unrecognized_model]` line to stderr for each custom model. This is expected; suppressing it would lose the correct context window. The quota bars for the sidecar account show `unknown` unless the sidecar forwards Codex's rate-limit headers — see [Quota](docs/openai.md#quota). Keep the sidecar on loopback, and use **one** ChatGPT subscription for each person. Pooling several subscriptions is the pattern that OpenAI's fraud systems target ([terms of service](docs/openai.md#terms-of-service)).
+Claude Code prints one `[claude-code:unrecognized_model]` line to stderr for each custom model. This is expected; suppressing it would lose the correct context window. The quota bars for the sidecar account show `unknown` unless the sidecar forwards Codex's rate-limit headers — see [Quota](docs/openai.md#quota). Keep the sidecar on loopback.
+
+One sidecar holds one ChatGPT login, so GPT requests do not rotate. To use a pool, point the sidecar's back leg at TeamClaude. The native Codex accounts then provide the same rotation, quota bars and `disable` behaviour as Claude accounts — see [Several ChatGPT accounts behind one sidecar](docs/openai.md#several-chatgpt-accounts-behind-one-sidecar). **Read the [terms of service](docs/openai.md#terms-of-service) first.** OpenAI's Terms of Use prohibit rotating ChatGPT subscriptions to get past a spent window, and account suspension is a plausible consequence — a sharper trade-off than pooling Claude subscriptions, which the first-party client offers to do by hand.
 
 Full details: [docs/openai.md](docs/openai.md).
 

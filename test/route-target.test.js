@@ -47,7 +47,7 @@ test('a Claude family route never previews Codex subscription accounts', () => {
   const route = byName(am.getRoutes(), 'fable');
   assert.equal(route.provider, 'anthropic');
   assert.equal(route.target, 'claude');
-  assert.deepEqual(route.accounts, [{ name: 'claude', eligible: true }]);
+  assert.deepEqual(route.accounts, [{ name: 'claude', provider: 'anthropic', eligible: true }]);
   assert.equal(am.getStatus().defaultTarget, 'claude');
 });
 

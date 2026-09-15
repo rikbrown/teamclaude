@@ -610,6 +610,9 @@ async function serverCommand() {
         await reloadAccounts();
         return outcome;
       },
+      // Read through to the live supervisor rather than snapshotting: it
+      // respawns on its own schedule and the TUI redraws on a timer.
+      getSidecars: () => sidecar?.getStatus() || [],
       // `p` key: on-demand fleet-wide quota refresh. The prober is constructed
       // after the TUI, so this is a thunk over the closure variable.
       probeQuota: () => prober?.probeAll(),

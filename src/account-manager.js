@@ -1,5 +1,5 @@
 import { refreshAccessToken, isTokenExpiringSoon, isTokenExpired, formatMoney } from './oauth.js';
-import { providerOf, DEFAULT_PROVIDER, isSubscriptionAccount } from './provider.js';
+import { providerOf, DEFAULT_PROVIDER, isSubscriptionAccount, isLocalUpstream } from './provider.js';
 import { refreshCodexToken } from './codex-auth.js';
 import { parseCodexQuota, parseCodexPlanType } from './codex-quota.js';
 import { sameIdentity } from './identity.js';
@@ -3455,14 +3455,26 @@ export class AccountManager {
     // display, projection and switch-threshold logic apply unchanged. A window
     // with no length is a bucket the plan does not have, not one at 0% used.
     // used-percent is 0-100 (not the 0-1 fraction Anthropic reports).
-    for (const window of ['primary', 'secondary']) {
-      const used = parseFloat(headers[`x-codex-${window}-used-percent`]);
-      const minutes = parseInt(headers[`x-codex-${window}-window-minutes`], 10);
-      if (isNaN(used) || !(minutes > 0)) continue;
-      const reset = parseResetAt(headers[`x-codex-${window}-reset-at`]);
-      const weekly = minutes > CODEX_WEEKLY_MIN_MINUTES;
-      account.quota[weekly ? 'unified7d' : 'unified5h'] = used / 100;
-      if (reset != null) account.quota[weekly ? 'unified7dReset' : 'unified5hReset'] = reset;
+    //
+    // Unless this account is a CONDUIT: a local proxy whose own back leg draws
+    // on the Codex accounts in this same fleet. Then the numbers it forwards
+    // belong to whichever of them served, and filing them here makes the
+    // conduit's bars a copy of the last one to answer. That is not merely a
+    // wrong readout — the conduit is the only account its route can use on the
+    // way in, so borrowing a spent account's number takes it below the switch
+    // threshold and every request fails, while a sibling sits at 0%.
+    // A standalone sidecar (no Codex accounts here) is NOT a conduit: it holds
+    // its own login, the forwarded numbers are its own, and they still apply.
+    if (!(isLocalUpstream(account) && this.accounts.some(a => providerOf(a) === 'codex'))) {
+      for (const window of ['primary', 'secondary']) {
+        const used = parseFloat(headers[`x-codex-${window}-used-percent`]);
+        const minutes = parseInt(headers[`x-codex-${window}-window-minutes`], 10);
+        if (isNaN(used) || !(minutes > 0)) continue;
+        const reset = parseResetAt(headers[`x-codex-${window}-reset-at`]);
+        const weekly = minutes > CODEX_WEEKLY_MIN_MINUTES;
+        account.quota[weekly ? 'unified7d' : 'unified5h'] = used / 100;
+        if (reset != null) account.quota[weekly ? 'unified7dReset' : 'unified5hReset'] = reset;
+      }
     }
 
     // Standard rate limits (API key accounts)

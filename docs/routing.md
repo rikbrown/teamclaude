@@ -103,7 +103,7 @@ Per-model quota is respected automatically, so most setups need nothing here. To
 ```
 
 - **`match`** — one or more model globs; the first route whose globs match wins.
-- **`accounts`** — account names (or indices) that may serve matching models. **Exclusive**: only these are used (and they 429/rotate among themselves when spent). Omit to route to all accounts — e.g. to only set a `bucket` override.
+- **`accounts`** — account names (or indices) that may serve matching models. **Exclusive**: only these are used (and they 429/rotate among themselves when spent). Omit to route to all accounts — e.g. to only set a `bucket` override. A route that names accounts can list several **providers**. The request path selects the eligible provider, so the others stay inert until a request arrives on their path. `teamclaude status` tags an account when its provider differs from the route's (`you@example.com:codex`). A route that names **no** accounts is not widened this way — it constrains models, not accounts, so only the requesting provider's pool serves it.
 - **`bucket`** — optional: force which quota bucket governs eligibility (`unified7dFable`, `unified7dSonnet`, `unified7d`), for the rare case the family can't be inferred from the model id.
 - **`color`** — optional: `red`/`green`/`yellow`/`blue`/`magenta`/`cyan`, tinting this route's inline marker in the TUI. Display only.
 

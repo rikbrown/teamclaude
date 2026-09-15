@@ -24,6 +24,11 @@ export const PROVIDERS = {
     // Anthropic pins the account inside the request body (metadata.user_id),
     // so the body rewrites apply here and only here.
     rewritesBody: true,
+    // Claude Code waits for the first response byte for as long as its own
+    // API_TIMEOUT_MS allows, which is generous. That is what lets the proxy
+    // wait out a short retry-after, or poll for an account to recover, without
+    // the client ever seeing the 429.
+    holdsConnection: true,
   },
   codex: {
     id: 'codex',
@@ -36,6 +41,13 @@ export const PROVIDERS = {
     // needed — and the Anthropic-specific tool-pair repair would be wrong to
     // apply to a Responses API body.
     rewritesBody: false,
+    // A Codex client gives the response head a fixed 60s and then retries the
+    // whole request, about four times, before failing. None of that is visible
+    // from here, so a wait we intended as "absorb this for the client" reads to
+    // it as a hang: it abandons the attempt we are still holding, retries into
+    // the same wait, and turns one reportable 429 into a ~250s silent stall and
+    // then a storm of them. Answer it instead and let it back off knowing why.
+    holdsConnection: false,
   },
 };
 
@@ -202,6 +214,25 @@ export function upstreamFor(account, configuredUpstream) {
   const provider = providerOf(account);
   if (provider !== DEFAULT_PROVIDER) return PROVIDERS[provider].upstream;
   return configuredUpstream || PROVIDERS.anthropic.upstream;
+}
+
+/**
+ * Whether the proxy may hold a request on the connection — waiting out a
+ * retry-after, or polling for an account to recover — instead of answering now.
+ *
+ * Holding is only invisible to a client that waits longer than we do. That is a
+ * property of the client, and the request path is what we know about it: every
+ * caller on the Codex path speaks the Codex protocol and brings its own fixed
+ * deadline with it, whether it is the Codex CLI or a translating sidecar's back
+ * leg. Keyed on the provider rather than on the caller's address, because a
+ * loopback peer does not narrow it — Claude Code is loopback too.
+ *
+ * Only the WAIT is withheld. Pausing the account, so concurrent requests avoid
+ * it, still happens; the client is simply told now, with the retry-after it
+ * needs to act on.
+ */
+export function holdsConnection(provider) {
+  return PROVIDERS[provider && PROVIDERS[provider] ? provider : DEFAULT_PROVIDER].holdsConnection;
 }
 
 /** Whether the Anthropic-only body rewrites apply to this account. */

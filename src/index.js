@@ -20,6 +20,7 @@ import {
   canUpsertOAuthAccount,
   isTokenRejection,
   oauthIdentityFields,
+  duplicateNameWarnings,
 } from './identity.js';
 import { resolveAccounts } from './resolve-accounts.js';
 import { loginCodex } from './codex-auth.js';
@@ -375,6 +376,11 @@ async function serverCommand() {
     console.error(`[TeamClaude] Bad adaptiveDistribution setting in ${getConfigPath()}: ${err.message}`);
     process.exit(1);
   }
+  // Name is the addressing key for routes, TC_ACCT and the CLI, while identity
+  // is provider-aware — so the same email on two providers is two accounts with
+  // one name, and every name lookup becomes ambiguous. Said once at startup and
+  // again after a reload, never fatal.
+  for (const line of duplicateNameWarnings(accounts)) console.error(line);
   const accountManager = new AccountManager(accounts, threshold, { routes: config.routes, ramp: config.stormRamp, distributeSessions: config.distributeSessions, projection: config.projection, expiryRouting: config.expiryRouting, advisorEligibility: config.advisorEligibility, adaptive, listener: localListener(config) });
   // Names the activity log's session column from Claude Code's own on-disk
   // session titles. Built whether or not the TUI runs, so a reload has one
@@ -551,6 +557,7 @@ async function serverCommand() {
     // fresh sign-in brings the store's accounts in; the pass is also what makes
     // an import or login on this install reach the other ones.
     credentialSync.sync('reload').catch(() => {});
+    for (const line of duplicateNameWarnings(accountManager.accounts)) console.error(line);
     // Pick up client-key edits (proxy.clientKeys is read live by both auth
     // gates through the shared config object, so refreshing it here is all a
     // key add/rotate/revoke needs — no restart).
@@ -1238,8 +1245,21 @@ async function upsertCodexAccount(requestedName, creds, routing = null, storeRou
   /** @type {Record<string, any>|null} */
   let signedIn = null;
   await atomicConfigUpdate(config => {
-    const name = requestedName || creds.email
+    // A Codex login is named for its email, and the same person's Anthropic
+    // account is named for the same email — so the default collides by default.
+    // Name is the addressing key (routes, TC_ACCT, `disable`), and a route
+    // listing an ambiguous name admits BOTH accounts, including the one that
+    // cannot serve the request. Prefix rather than refuse: the operator asked
+    // for this login, and a name they did not choose is a smaller surprise than
+    // a failed command. An explicit name (--name) is theirs and is left alone.
+    const preferred = creds.email
       || `codex-${config.accounts.filter(a => a.provider === 'codex').length + 1}`;
+    const takenByOther = (n) => config.accounts.some(a => a.name === n && a.provider !== 'codex');
+    const name = requestedName
+      || (takenByOther(preferred) ? `codex:${preferred}` : preferred);
+    if (!requestedName && name !== preferred) {
+      console.log(`Named "${name}" — "${preferred}" is already an account on another provider.`);
+    }
 
     const account = {
       name,

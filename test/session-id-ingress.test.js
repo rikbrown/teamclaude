@@ -114,3 +114,28 @@ test('clientSessionId: the Codex spelling, and which header wins', () => {
   assert.equal(clientSessionId({ 'x-claude-code-session-id': 'sess-1', 'session-id': UUID }), 'sess-1');
   assert.equal(clientSessionId({ 'x-claude-code-session-id': 'a/b', 'session-id': UUID }), null);
 });
+
+// The sidecar spelling. A translating sidecar (Anthropic wire in, Codex
+// Responses out) re-emits the session it was handed as `session_id`, because
+// that is the name the Codex backend itself reads. When such a sidecar's back
+// leg re-enters this proxy to draw a pooled subscription, that underscore was
+// the only session tag on the request — so the second hop arrived untagged,
+// session affinity never applied to it, and a rotation mid-session moved the
+// conversation onto a cold account for no reason the operator could see.
+test('clientSessionId: the sidecar underscore spelling', async () => {
+  assert.equal(clientSessionId({ session_id: UUID }), UUID);
+  assert.equal(clientSessionId({ session_id: 'a/b' }), null);
+  assert.equal(clientSessionId({ session_id: ['a', 'b'] }), null);
+  // Both hyphenated spellings are more specific, so either decides when set —
+  // including when its value is malformed, which is still an answer.
+  assert.equal(clientSessionId({ 'session-id': 'sess-1', session_id: UUID }), 'sess-1');
+  assert.equal(clientSessionId({ 'x-claude-code-session-id': 'sess-2', session_id: UUID }), 'sess-2');
+  assert.equal(clientSessionId({ 'session-id': 'a/b', session_id: UUID }), null);
+});
+
+test('a re-entering sidecar request is tracked by its session_id header', async () => {
+  await withProxy(async (port, started) => {
+    assert.equal(await postWithHeaders(port, { session_id: UUID }), 200);
+    assert.deepEqual(started, [UUID]);
+  });
+});

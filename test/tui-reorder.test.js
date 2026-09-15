@@ -203,18 +203,19 @@ test('a hand-written order sorts placed accounts first and unplaced after, in ar
 
 // ── local backends ───────────────────────────────────────────
 
-test('a locally-served account still lists last, whatever the arrangement says', async () => {
+test('a locally-served account is never a row, whatever the arrangement says', async () => {
   const { tui, am, config } = makeTUI({
     names: ['alpha', 'codex', 'bravo'],
     upstreams: { codex: 'http://127.0.0.1:18765' },
   });
-  assert.deepEqual(shown(tui), ['alpha', 'bravo', 'codex']);
+  // It draws as a conduit line below the table instead (see _conduitLines).
+  assert.deepEqual(shown(tui), ['alpha', 'bravo']);
 
   openReorder(tui);
   tui._key('right');
   await settle(tui);
 
-  assert.deepEqual(shown(tui), ['bravo', 'alpha', 'codex'], 'the conduit was dragged out of last place');
+  assert.deepEqual(shown(tui), ['bravo', 'alpha'], 'the conduit was drawn as a row');
   assert.equal(am.accounts[1].displayOrder, null, 'the conduit was given a list position');
   assert.equal(config.accounts[1].displayOrder, undefined, 'the conduit entry was written to');
   // Dense over the rows that can be arranged, so the numbers read straight.
@@ -230,7 +231,7 @@ test('the reorder cursor never stops on a row it cannot move', () => {
   assert.equal(am.accounts[tui.selIdx].name, 'alpha');
   tui._key('down');
   assert.equal(am.accounts[tui.selIdx].name, 'bravo');
-  tui._key('down');                       // the conduit row is drawn below, but is not a stop
+  tui._key('down');                       // the conduit is drawn below as a line, not a row
   assert.equal(am.accounts[tui.selIdx].name, 'bravo');
 });
 

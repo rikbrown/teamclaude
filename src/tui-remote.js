@@ -269,7 +269,12 @@ export class RemoteAccountManager {
       target: r?.target == null ? r?.target : text(r.target, NAME_MAX),
       match: (Array.isArray(r?.match) ? r.match : []).map(g => text(g, 64)).filter(Boolean),
       accounts: (Array.isArray(r?.accounts) ? r.accounts : [])
-        .map(a => ({ ...a, name: text(a?.name, NAME_MAX, '?'), eligible: !!a?.eligible })),
+        .map(a => ({
+          ...a,
+          name: text(a?.name, NAME_MAX, '?'),
+          provider: a?.provider == null ? a?.provider : text(a.provider, 16),
+          eligible: !!a?.eligible,
+        })),
     }));
     // A server too old to send versionLabel still sends version; one older than
     // both leaves the label empty and the header simply omits it.

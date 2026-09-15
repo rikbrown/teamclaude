@@ -19,6 +19,7 @@ import {
   updateAccountEntry,
   canUpsertOAuthAccount,
   oauthIdentityFields, duplicateNameWarnings } from './identity.js';
+import { routeReachabilityWarnings } from './route-warnings.js';
 import { resolveAccounts } from './resolve-accounts.js';
 import { loginCodex } from './codex-auth.js';
 import { syncAccountsFromDisk } from './sync-accounts.js';
@@ -290,6 +291,10 @@ async function serverCommand() {
   // one name, and every name lookup becomes ambiguous. Said once at startup and
   // again after a reload, never fatal.
   for (const line of duplicateNameWarnings(accounts)) console.error(line);
+  // Same shape, same reason: route membership is by name while eligibility is by
+  // provider, so a route can list only accounts that cannot serve the request
+  // that arrives — and every readout still shows it healthy.
+  for (const line of routeReachabilityWarnings(config.routes, accounts)) console.error(line);
   const accountManager = new AccountManager(accounts, threshold, { routes: config.routes, ramp: config.stormRamp, distributeSessions: config.distributeSessions, projection: config.projection, expiryRouting: config.expiryRouting, adaptive });
   // Names the activity log's session column from Claude Code's own on-disk
   // session titles. Built whether or not the TUI runs, so a reload has one
@@ -413,6 +418,9 @@ async function serverCommand() {
     // Pick up route table edits (teamclaude route …, TUI editor, or a hand edit).
     config.routes = diskConfig.routes || [];
     accountManager.setRoutes(config.routes);
+    // After setRoutes, not before: a route edit is the whole reason this check
+    // exists, and reading the table it replaced would miss exactly that.
+    for (const line of routeReachabilityWarnings(config.routes, accountManager.accounts)) console.error(line);
     // Pick up a distributeSessions change (hand edit or another writer) the same
     // way routes, sx, probe and warmup are picked up below.
     // Not coerced to a boolean: 'adaptive' is a third mode, and !! would flatten

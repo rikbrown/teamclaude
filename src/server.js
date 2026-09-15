@@ -801,13 +801,15 @@ const SESSION_ID_SHAPE = /^[A-Za-z0-9._-]{1,128}$/;
 /** The session id a request carries, or null when the header is absent or
  *  malformed — a malformed one is treated as no session, not rejected.
  *
- *  Claude Code sends `x-claude-code-session-id`, the Codex CLI `session-id`.
- *  Reading only the first left every Codex request untagged, so
- *  `distributeSessions` had nothing to place and a Codex pool stayed on one
- *  account until the switch threshold. The specific header wins when both are
- *  present: `session-id` is generic enough for a proxy in front to set. */
+ *  Claude Code sends `x-claude-code-session-id`, the Codex CLI `session-id`,
+ *  and a translating sidecar re-emits the session it was given as `session_id`
+ *  (the spelling the Codex backend itself uses). Reading only the first left
+ *  every Codex request untagged, so `distributeSessions` had nothing to place
+ *  and a Codex pool stayed on one account until the switch threshold. Order is
+ *  most-specific first: the underscore form is the one a sidecar writes on our
+ *  behalf, and `session-id` is generic enough for a proxy in front to set. */
 export function clientSessionId(headers) {
-  const raw = headers['x-claude-code-session-id'] ?? headers['session-id'];
+  const raw = headers['x-claude-code-session-id'] ?? headers['session-id'] ?? headers['session_id'];
   return typeof raw === 'string' && SESSION_ID_SHAPE.test(raw) ? raw : null;
 }
 

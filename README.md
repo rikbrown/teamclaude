@@ -221,7 +221,7 @@ Three details matter:
 - **`CCP_CODEX_TRANSPORT=http` is required.** A WebSocket upgrade is relayed with the caller's own headers and draws no account, so the WebSocket transport cannot be pooled.
 - **Do not reuse a name across providers.** Routes address accounts by name, so a shared name admits both — including the Claude account that cannot serve `gpt-*`, which outranks the sidecar on priority and wins. TeamClaude warns at startup when it sees one.
 
-Two things differ from the single-account setup: each turn appears **twice** in the activity list, once per hop, and tokens are booked against the sidecar row, so a ChatGPT account reads `N req · 0 tok`. Its quota bars are unaffected because they come from the `x-codex-*` headers on the second hop, where the subscription is.
+Two things differ from the single-account setup: each turn appears **twice** in the activity list, once per hop, and tokens are booked against the sidecar account, so a ChatGPT account reads `N req · 0 tok`. Its quota bars are unaffected because they come from the `x-codex-*` headers on the second hop, where the subscription is.
 
 Full details, including what happens to quota on each hop: [Several ChatGPT accounts behind one sidecar](docs/openai.md#several-chatgpt-accounts-behind-one-sidecar).
 

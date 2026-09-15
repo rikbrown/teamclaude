@@ -85,6 +85,14 @@ the weekly one — and a 429 whose headers show a spent window (≥100%) counts 
 rather than a rate limit. Which bar fills depends on the plan: a ChatGPT Pro subscription meters a
 weekly window only, so the session bar stays `unknown`.
 
+The account that receives the numbers depends on the setup. A standalone sidecar holds its own
+ChatGPT login, so its forwarded numbers fill its own bars. A sidecar whose back leg re-enters this
+proxy (below) is a **conduit**: the numbers describe the pooled account that served the second hop,
+so they are filed against that account and the conduit keeps none. Otherwise, its bars would track
+the account that answered last. If a borrowed number crossed the switch threshold, it would take the
+conduit out of service and fail every `gpt-*` request while a sibling remained at 0%, because the
+conduit is the only account that its route can use on the way in.
+
 Getting the headers that far takes a patch to the sidecar — one module and four call sites, which
 keeps the newest snapshot and stamps it onto every Codex response under the names Codex itself
 uses. Both transports are covered: the HTTP one carries the headers, the WebSocket one carries the
@@ -158,17 +166,29 @@ are eligible on the way back. This separation lets one route list both.
    TeamClaude replaces both the bearer and the account header on the way out. Leave `accountId`
    unset so the sidecar's identity cannot leak.
 
-3. **Add the accounts** with `teamclaude login --codex`, once per ChatGPT account.
+3. **Add the accounts** — run `teamclaude login --codex` once for each ChatGPT account. The login
+   takes its email as its name. The same person's Anthropic account usually has that name, so the
+   Codex name gets a prefix to keep it unambiguous — `codex:you@example.com`. Routes address accounts
+   by name, so a shared name admits both.
 
 4. **List them on the `gpt-*` route** alongside the sidecar account, and set a matching
    `headersTimeoutMs` for each one — the 120s fleet default is shorter than a long reasoning turn:
 
    ```json
-   { "name": "codex", "match": ["gpt-*"], "accounts": ["codex", "you@example.com", "you@work.example"] }
+   { "name": "codex", "match": ["gpt-*"], "accounts": ["codex", "codex:you@example.com", "codex:you@work.example"] }
    ```
 
-Rotation, quota bars, the session-reset countdown and `teamclaude disable` then work for the
-ChatGPT accounts exactly as they do for Claude accounts. Two things differ:
+   > **Keep the sidecar account on this route.** It can look removable because it is not a
+   > subscription or an account row, but it is the routing target for the way *in*. Without it, every
+   > `gpt-*` request fails to find an account while `teamclaude status` still shows two healthy
+   > ChatGPT accounts on the route.
+
+5. **Restart the server.** `sidecars[].env` is read only at startup, so a config reload does not
+   apply the change — and killing the sidecar only starts it again with the old environment.
+
+Rotation, quota bars, the session-reset countdown and `teamclaude disable` then work for ChatGPT
+accounts as they do for Claude accounts. The sidecar no longer appears in the account table. It
+appears beneath it as a `⚙` readout line that shows its supervised process state. Two things differ:
 
 - **Each turn appears twice** in the activity list and the request log, once per hop.
 - **Tokens are booked against the sidecar account**, not the ChatGPT one. Nothing parses the

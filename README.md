@@ -1,7 +1,7 @@
 # TeamClaude
 
 > **Fork notice (rikbrown).** This fork adds two features on top of
-> [KarpelesLab/teamclaude](https://github.com/KarpelesLab/teamclaude), currently based on upstream 1.1.19:
+> [KarpelesLab/teamclaude](https://github.com/KarpelesLab/teamclaude), currently based on upstream 1.1.20:
 >
 > - **[OpenAI models via a Codex sidecar](docs/openai.md)** (`sidecars` + `customModels`, opt-in):
 >   route `gpt-*` requests through a supervised local translating proxy to a ChatGPT subscription,

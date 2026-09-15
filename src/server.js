@@ -12,7 +12,7 @@ import { parseRequestModel, parseAdvisorModel } from './account-manager.js';
 import { TopLevelFieldFinder, modelGlobMatches } from './model.js';
 import { BodyWriter, truncationNote } from './request-log.js';
 import { upstreamFetch, upstreamPoolStatus } from './upstream-fetch.js';
-import { applyAuthHeaders, upstreamFor, rewritesBody, providerForPath, providerOf, isSubscriptionAccount, DEFAULT_PROVIDER, PROVIDERS } from './provider.js';
+import { applyAuthHeaders, upstreamFor, rewritesBody, providerForPath, providerOf, isSubscriptionAccount, holdsConnection, DEFAULT_PROVIDER, PROVIDERS } from './provider.js';
 import { tunnelTls } from './sx.js';
 import { createEgressGuard } from './egress-guard.js';
 import { safeLine } from './safe-text.js';
@@ -2076,7 +2076,11 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
     // recovers or the budget (holdSeconds) runs out. Claude Code waits for
     // the first response byte, so this is transparent to the client as long
     // as API_TIMEOUT_MS on the Claude Code side is large enough.
-    if (ctx.holdBudgetMs > 0) {
+    //
+    // Which is exactly the assumption `holdsConnection` exists to check. A
+    // Codex caller gives up on the head long before the budget does, so for it
+    // the hold is not transparent at all — it is the whole failure.
+    if (ctx.holdBudgetMs > 0 && holdsConnection(ctx.provider)) {
       // Cap the per-poll sleep to 60s so a newly-available account (e.g. one
       // manually enabled or whose quota reset early) is picked up within a
       // minute instead of sleeping the full retryAfter (often 3600s).
@@ -2089,7 +2093,7 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
     }
 
     const exhaustedRetries = ctx.exhaustedRetries || 0;
-    if (exhaustedRetries < 1 && retryAfter <= INLINE_RETRY_AFTER_MAX_SECONDS) {
+    if (exhaustedRetries < 1 && retryAfter <= INLINE_RETRY_AFTER_MAX_SECONDS && holdsConnection(ctx.provider)) {
       ctx.exhaustedRetries = exhaustedRetries + 1;
       console.log(`[TeamClaude] All accounts exhausted — waiting ${retryAfter}s before retry`);
       await waitForRetry(retryAfter * 1000, ctx.signal);
@@ -2449,17 +2453,19 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
       // Absorb short waits inline on the same account — the client never sees the
       // 429. Bounded by retryCount (maxRetries = account count) so a persistently
       // rate-limited account can't loop forever tying up the connection.
-      if (retryAfter <= RATE_LIMIT_ABSORB_MAX_SECONDS && retryCount < maxRetries) {
+      if (retryAfter <= RATE_LIMIT_ABSORB_MAX_SECONDS && retryCount < maxRetries && holdsConnection(ctx.provider)) {
         console.log(`[TeamClaude] Rate-limit 429 on "${account.name}" — waiting ${retryAfter}s, retrying same account (no switch)`);
         await waitForRetry(retryAfter * 1000, ctx.signal);
         if (clientGone(res)) { ctx.abandoned = true; return; }
         return forwardRequest(req, res, body, accountManager, upstream, retryCount + 1, hooks, reqId, ctx, logDir, sx, nextUseSx);
       }
 
-      // Longer retry-after (or retries exhausted): don't hold the connection and
-      // don't rotate — surface the 429 with retry-after so the client backs off.
-      // The pause above keeps other requests off this account meanwhile.
-      console.log(`[TeamClaude] Rate-limit 429 on "${account.name}" — retry-after ${retryAfter}s over inline cap; returning 429 to client (no switch)`);
+      // Longer retry-after, retries exhausted, or a caller that will not wait
+      // for us (see holdsConnection): don't hold the connection and don't
+      // rotate — surface the 429 with retry-after so the client backs off. The
+      // pause above keeps other requests off this account meanwhile.
+      const why = holdsConnection(ctx.provider) ? `retry-after ${retryAfter}s over inline cap` : `${ctx.provider} caller does not wait`;
+      console.log(`[TeamClaude] Rate-limit 429 on "${account.name}" — ${why}; returning 429 to client (no switch)`);
       ctx.status = 429;
       if (!res.headersSent && !clientGone(res)) {
         res.writeHead(429, { 'Content-Type': 'application/json', 'retry-after': String(retryAfter) });

@@ -509,3 +509,40 @@ test('renderStatus strips control characters out of account and route strings', 
   assert.match(output, /pinned: a/);
   assert.equal(output.split('\n').filter(l => /forged/.test(l)).length, 1);   // no forged line
 });
+
+// A route spanning two providers tags the accounts that are not its own, so a
+// mixed row says which hop each account serves. But the tag is a fact about the
+// account, and when the NAME already carries that fact the row says it twice:
+// `login --codex` mints `codex:someone@example.com`, which rendered as
+// `codex:someone@example.com:codex`.
+test('renderStatus does not re-tag a name that already leads with its provider', () => {
+  const status = sampleStatus();
+  status.routes = [{
+    name: 'codex',
+    match: ['gpt-*'],
+    provider: 'anthropic',
+    accounts: [
+      { name: 'codex', provider: 'anthropic', eligible: true },
+      { name: 'codex:rik@district.net', provider: 'codex', eligible: true },
+    ],
+  }];
+  const output = renderStatus(status, { color: false, now });
+  assert.match(output, /codex:rik@district\.net(?!:codex)/);
+  assert.doesNotMatch(output, /:codex:codex|district\.net:codex/);
+});
+
+test('renderStatus still tags a foreign account whose name does not say so', () => {
+  const status = sampleStatus();
+  status.routes = [{
+    name: 'codex',
+    match: ['gpt-*'],
+    provider: 'anthropic',
+    accounts: [
+      { name: 'sidecar', provider: 'anthropic', eligible: true },
+      { name: 'chatgpt-1', provider: 'codex', eligible: true },
+    ],
+  }];
+  const output = renderStatus(status, { color: false, now });
+  assert.match(output, /chatgpt-1:codex/);
+  assert.doesNotMatch(output, /sidecar:/);
+});

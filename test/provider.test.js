@@ -95,6 +95,21 @@ test('Codex without an account id still authenticates', () => {
   assert.ok(!('chatgpt-account-id' in headers));
 });
 
+// The forward path strips inbound `authorization` from every request but not
+// this header, so a caller that sends one of its own — a translating sidecar
+// does, from its own local login — used to have it survive when the selected
+// account carried no accountId. That pairs THIS account's token with THAT
+// caller's account id, which is a different subscription entirely.
+test('Codex never inherits the caller\'s ChatGPT account id', () => {
+  const withOwn = { 'chatgpt-account-id': 'acct-caller' };
+  applyAuthHeaders(withOwn, { provider: 'codex', type: 'oauth', credential: 'tok', accountId: 'acct-1' });
+  assert.deepEqual(withOwn, { authorization: 'Bearer tok', 'chatgpt-account-id': 'acct-1' });
+
+  const noneOnAccount = { 'chatgpt-account-id': 'acct-caller' };
+  applyAuthHeaders(noneOnAccount, { provider: 'codex', type: 'oauth', credential: 'tok' });
+  assert.deepEqual(noneOnAccount, { authorization: 'Bearer tok' });
+});
+
 test('an account upstream overrides the provider default', () => {
   assert.equal(upstreamFor({ upstream: 'https://glm.example' }, 'https://api.anthropic.com'), 'https://glm.example');
 });

@@ -169,6 +169,12 @@ export function applyAuthHeaders(headers, account) {
   const provider = providerOf(account);
   if (provider === 'codex') {
     headers['authorization'] = `Bearer ${account.credential}`;
+    // Cleared before it is set, not merely overwritten. `authorization` is
+    // stripped from every inbound request, but this header is not — so a
+    // caller that sends one of its own (a translating sidecar does, from its
+    // own local login) would have it survive for an account that carries no
+    // accountId, pairing THIS account's token with THAT caller's account id.
+    delete headers['chatgpt-account-id'];
     if (account.accountId) headers['chatgpt-account-id'] = account.accountId;
     return;
   }

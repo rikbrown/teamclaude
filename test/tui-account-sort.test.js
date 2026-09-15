@@ -6,8 +6,8 @@ import { TUI } from '../src/tui.js';
 //
 // A reset sort (`accountSort`) changes the order the rows are DRAWN in and
 // nothing else. The arrangement (`displayOrder`) is still what the reorder
-// screen edits and still breaks ties, and provider groups and locally-served
-// rows keep their places, exactly as they do in the arranged order.
+// screen edits and still breaks ties, and provider groups keep their places,
+// exactly as they do in the arranged order.
 //
 // Same harness shape as tui-reorder.test.js: a minimal AccountManager stand-in
 // and a stubbed render(), so these exercise the state machine, not the terminal.
@@ -139,7 +139,7 @@ for (const [sort, family, key] of /** @type {const} */ ([
   });
 }
 
-test('provider groups and locally-served rows keep their places', () => {
+test('provider groups keep their places, and local backends stay off the list', () => {
   const now = Date.now();
   const { tui } = makeTUI({
     names: ['codex-a', 'claude-a', 'local', 'claude-b'],
@@ -149,8 +149,8 @@ test('provider groups and locally-served rows keep their places', () => {
     resets: { 'codex-a': now + HOUR, 'claude-a': now + 4 * DAY, local: now + 2 * HOUR, 'claude-b': now + DAY },
   });
   // Codex has the soonest reset of all and still lists after the Claude group;
-  // the local backend's early reset does not pull it out of last place.
-  assert.deepEqual(shown(tui), ['claude-b', 'claude-a', 'local', 'codex-a']);
+  // the local backend draws as a conduit line, so no reset puts it among the rows.
+  assert.deepEqual(shown(tui), ['claude-b', 'claude-a', 'codex-a']);
 });
 
 test('an unknown sort value reads as arranged', () => {

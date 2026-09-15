@@ -604,6 +604,9 @@ export class TUI {
     // Cast so the destructured binding is the callback type, not `null`: index.js passes a function here.
     loginAccount = /** @type {null | ((account: Record<string, any>) => Promise<{ action: 'updated' | 'added', name: string }>)} */ (null),
     activityLogPath = null,
+    // Supervised sidecar state for the conduit lines. A getter, not a snapshot:
+    // the supervisor respawns on its own schedule and the TUI redraws on a timer.
+    getSidecars = null,
     // Attach mode: the accounts belong to a server in another process, reached
     // over its control plane. Everything that would mutate local state is off,
     // and a switch becomes a request (applySwitch) instead of an assignment.
@@ -632,6 +635,7 @@ export class TUI {
     this.probeQuota = probeQuota; // on-demand fleet-wide quota refresh (may be null)
     /** @type {null | ((account: Record<string, any>) => Promise<{ action: 'updated' | 'added', name: string }>)} */
     this.loginAccount = loginAccount; // browser (re-)login for a chosen account (may be null)
+    this.getSidecars = getSidecars; // supervised sidecar state (may be null)
     this.activityLogPath = activityLogPath;
     this._readCredentials = readCredentials;
     this._readProfile = readProfile;
@@ -2192,6 +2196,8 @@ export class TUI {
         const layout = this._listLayout(order, W);
         for (const i of order) lines.push(this._renderRow(i, layout, current));
       }
+      // Local backends sit under the seats, as a readout rather than rows.
+      lines.push(...this._conduitLines());
     }
 
     // Routing is surfaced inline on each account row (see _renderAcct): a colored
@@ -2461,16 +2467,16 @@ export class TUI {
     return left.complete && right.complete ? { leftW, rightW, left, right } : null;
   }
 
-  /** Manager indices in the order the rows are drawn: grouped by provider, then
-   *  accounts served by a local process last, every other account in the order
-   *  the operator arranged.
+  /** Manager indices of the accounts drawn as rows — the seats that rotate —
+   *  grouped by provider, then in the order the operator arranged.
    *
-   *  A local backend (a translating proxy in front of another vendor, say) is
-   *  infrastructure rather than a seat to rotate between, so it reads as noise
-   *  wedged among the accounts that do rotate. Config order cannot keep it out
-   *  of the way on its own, because a newly added account is appended AFTER it
-   *  and puts it back in the middle. That rule is a category, not a preference,
-   *  so it wins over the arrangement rather than competing with it.
+   *  A local backend — a translating proxy in front of another vendor — is
+   *  infrastructure, not a seat. It holds no subscription (its token is a
+   *  placeholder), it is the only candidate its route has, so it never rotates,
+   *  and it has no quota of its own to show. Drawn among the accounts it was a
+   *  row of dashes and borrowed numbers in a table whose whole purpose is which
+   *  account is being spent. It gets its own line below instead — see
+   *  _conduitLines. Sorting it last was the first half of this thought.
    *
    *  Display only. `selIdx`, `currentIndex`, session pins and route entries all
    *  stay manager indices, so nothing about selection or routing moves with the
@@ -2491,15 +2497,13 @@ export class TUI {
     const now = Date.now();
     return this.am.accounts
       .map((/** @type {any} */ _, /** @type {number} */ i) => i)
+      .filter(i => !isLocalUpstream(this.am.accounts[i]))
       .sort((/** @type {number} */ x, /** @type {number} */ y) => {
         const px = PROVIDER_ORDER.indexOf(providerOf(this.am.accounts[x]));
         const py = PROVIDER_ORDER.indexOf(providerOf(this.am.accounts[y]));
-        const sx = isLocalUpstream(this.am.accounts[x]) ? 1 : 0;
-        const sy = isLocalUpstream(this.am.accounts[y]) ? 1 : 0;
-        // Provider, then the local category, then the sort: the first two are
-        // what a row IS, so no sort and no number the operator set crosses them.
+        // Provider, then the sort, then the arrangement: the provider is what a
+        // row IS, so no sort and no number the operator set crosses it.
         if (px !== py) return px - py;
-        if (sx !== sy) return sx - sy;
         if (resetOf) {
           const tx = resetRank(resetOf(this.am.accounts[x].quota || {}), now);
           const ty = resetRank(resetOf(this.am.accounts[y].quota || {}), now);
@@ -2513,18 +2517,55 @@ export class TUI {
       });
   }
 
+  /** Manager indices of the local backends, in config order. */
+  _conduitOrder() {
+    return this.am.accounts.map((/** @type {any} */ _, /** @type {number} */ i) => i).filter(i => isLocalUpstream(this.am.accounts[i]));
+  }
+
+  /** One line per local backend: what it is, where it sends, and whether it can
+   *  serve. Its supervised process's state is folded in when this TUI has it
+   *  (the server passes a getter; the remote TUI reads the status payload), so
+   *  a crash-looping sidecar says so here rather than only in `status --json`.
+   *
+   *  Deliberately terse. There is nothing to choose between, so this is a
+   *  readout, not a row: the operator needs "is it up" and nothing else. */
+  _conduitLines() {
+    const sidecars = this._sidecars();
+    return this._conduitOrder().map(i => {
+      const a = this.am.accounts[i];
+      let host = a.upstream;
+      try { host = new URL(a.upstream).host; } catch { /* keep the raw string */ }
+      // Matched by name: a sidecars[] entry and the account that routes to it
+      // are named by the same operator, and nothing else pairs them.
+      const proc = sidecars.find(sc => sc.name === a.name) || null;
+      const state = a.disabled ? red('disabled')
+        : a.rateLimitedUntil > Date.now() ? yellow('throttled')
+          : proc && !proc.running ? red(`down (${proc.lastExit || 'restarting'})`)
+            : proc ? green('up') : green('ok');
+      const pid = proc?.running ? dim(` pid ${proc.pid}`) : '';
+      const restarts = proc?.restarts ? yellow(` ${proc.restarts} restarts`) : '';
+      return ` ${dim('⚙')} ${a.name} ${dim('→')} ${dim(host)}  ${state}${pid}${restarts}`;
+    });
+  }
+
+  /** Supervised sidecar state, or [] when this TUI has no view of it. */
+  _sidecars() {
+    const list = this.getSidecars ? this.getSidecars() : this.am.sidecars;
+    return Array.isArray(list) ? list : [];
+  }
+
   /** Manager indices of the rows the operator can arrange, in drawn order.
    *
-   *  Every account except the locally-served ones: _displayOrder pins those to
-   *  the end of the list whatever a number says, so they hold no position and
-   *  their array slots are simply stepped over.
+   *  Every account except the locally-served ones. _displayOrder already leaves
+   *  those out (they draw as conduit lines, not rows), so they hold no position
+   *  and their array slots are simply stepped over.
    *
    *  Always in the arranged order, whatever `accountSort` says: a move
    *  renumbers every account from this list, so a sorted list here would
    *  write the sort into `displayOrder`.
    */
   _arrangeable() {
-    return this._displayOrder({ arranged: true }).filter((/** @type {number} */ i) => !isLocalUpstream(this.am.accounts[i]));
+    return this._displayOrder({ arranged: true });
   }
 
   /** The rows that carry ►: the cursor, or in a mixed pool each provider's current

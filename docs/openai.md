@@ -97,26 +97,85 @@ still works; its bars just read `unknown`, and exhaustion shows up only as a 429
 ## Why not the built-in Codex provider?
 
 TeamClaude also speaks to Codex natively: an account with `"provider": "codex"` pools a ChatGPT
-login with no sidecar at all. That is a different job, and it does not replace this one.
+login with no sidecar at all. It serves a different job.
 
 The native provider is a **passthrough** — the client speaks OpenAI's own protocol and the body is
 forwarded untouched, which is what keeps tool calls, streaming events and cache breakpoints exact.
 It therefore serves the **Codex CLI**, pointed at `<proxy>/backend-api/codex`, and requests are
 matched to it **by path**: `/v1/messages` is Anthropic's, `/backend-api/codex/*` is Codex's.
 
-Claude Code only speaks `/v1/messages`. So a `gpt-*` request from a Claude Code session can never
-reach a native Codex account — which is exactly why the sidecar exists: it translates, and the
-native path deliberately does not.
+Claude Code only speaks `/v1/messages`, so it cannot reach a native Codex account directly. The
+sidecar exists to translate; the native path deliberately does not.
 
 Use the sidecar to put **GPT models inside a Claude Code session** (`/model gpt-*`, dispatchable GPT
 subagents, mixed-model sessions). Use `"provider": "codex"` to pool ChatGPT logins for the **Codex
-CLI**. They coexist: a native Codex account is eligible only for Codex paths, and the subscription
-partition keeps it out of `/v1/messages` traffic on its own.
+CLI** — or, as shown below, behind the sidecar too.
 
 > Do not add `"provider": "codex"` to a sidecar account. It marks the account as a foreign
 > subscription, so the partition excludes it from the `/v1/messages` traffic it is there to serve,
 > and every `gpt-*` request fails to find an account. A sidecar account is reached over the
 > Anthropic wire and correctly carries no `provider` field.
+
+## Several ChatGPT accounts behind one sidecar
+
+The sidecar holds one ChatGPT login, so GPT requests do not rotate. Its quota reading also belongs
+to a login that TeamClaude does not own.
+
+Point the sidecar's **back leg** at TeamClaude so that the native Codex pool serves its requests:
+
+```
+Claude Code ──▶ TC /v1/messages (gpt-*) ──▶ sidecar account (127.0.0.1:18765)
+            ──▶ sidecar translates ──▶ TC /backend-api/codex/responses
+            ──▶ ChatGPT account pool ──▶ chatgpt.com
+```
+
+Each hop is classified by path, so the subscription partition keeps the pools separate: only the
+sidecar account is eligible on the way in (it carries no `provider`), and only the ChatGPT accounts
+are eligible on the way back. This separation lets one route list both.
+
+1. **Redirect the sidecar and pin its transport** on the `sidecars` entry:
+
+   ```json
+   { "name": "codex",
+     "command": ["claude-code-proxy", "serve", "--no-monitor", "--port", "18765"],
+     "env": {
+       "CCP_CODEX_BASE_URL": "http://127.0.0.1:3456/backend-api/codex/responses",
+       "CCP_CODEX_TRANSPORT": "http"
+     } }
+   ```
+
+   `http` is **required** because a WebSocket upgrade is relayed with the caller's own headers and
+   draws no account. Without it, the transport cannot use the pool.
+
+2. **Stub the sidecar's own login.** Back up `~/.config/claude-code-proxy/codex/auth.json`, then
+   replace it with a placeholder that never expires:
+
+   ```json
+   { "access": "delegated-to-teamclaude", "refresh": "", "expires": 4102444800000 }
+   ```
+
+   The sidecar refuses to run with an empty store but does not refresh a far-future token.
+   TeamClaude replaces both the bearer and the account header on the way out. Leave `accountId`
+   unset so the sidecar's identity cannot leak.
+
+3. **Add the accounts** with `teamclaude login --codex`, once per ChatGPT account.
+
+4. **List them on the `gpt-*` route** alongside the sidecar account, and set a matching
+   `headersTimeoutMs` for each one — the 120s fleet default is shorter than a long reasoning turn:
+
+   ```json
+   { "name": "codex", "match": ["gpt-*"], "accounts": ["codex", "you@example.com", "you@work.example"] }
+   ```
+
+Rotation, quota bars, the session-reset countdown and `teamclaude disable` then work for the
+ChatGPT accounts exactly as they do for Claude accounts. Two things differ:
+
+- **Each turn appears twice** in the activity list and the request log, once per hop.
+- **Tokens are booked against the sidecar account**, not the ChatGPT one. Nothing parses the
+  Responses body shape for usage, so a ChatGPT row reads `N req · 0 tok`. Its quota bars are
+  unaffected — those come from the `x-codex-*` headers on the second hop.
+
+Read [Terms of service](#terms-of-service) before setting this up.
 
 ## Limitations
 
@@ -131,7 +190,36 @@ partition keeps it out of `/v1/messages` traffic on its own.
 
 ## Terms of service
 
-OpenAI staff have publicly described one person using their own ChatGPT subscription through a
-third-party client as acceptable. Their fraud systems target one subscription serving many
-consumers. Use one codex account yourself; **do not pool multiple ChatGPT accounts for rotation**
-as TeamClaude does with Claude accounts. See also [compliance](compliance.md).
+> This is the maintainer's good-faith reading, **not legal advice**. It is less comfortable than
+> the Anthropic case. Read OpenAI's current [Terms of Use](https://openai.com/policies/row-terms-of-use/)
+> and decide for yourself. See also [compliance](compliance.md).
+
+**Pooling several ChatGPT accounts is a named prohibition.** Under "What you cannot do", OpenAI's
+consumer Terms of Use forbid you to "interfere with or disrupt our Services, including circumvent
+any rate limits or restrictions or bypass any protective measures". Rotating to a second
+subscription after spending the first one's window plainly does that. This is stronger than a guess
+about fraud heuristics, and the likely consequence is account suspension rather than a refused
+request.
+
+**The single-account case is a grey area, not a blessed one.** OpenAI staff have publicly described
+one person using their own ChatGPT subscription through a third-party client as acceptable. Their
+fraud systems also target one subscription serving many consumers. But the same clause list forbids
+you to "automatically or programmatically extract data or Output". A literal reading covers any
+third-party harness — including a sidecar serving one login. The favourable reading rests on staff
+statements, not on a carve-out in the terms.
+
+**There is no Anthropic-style defence here.** Claude Code's own `/extra-usage` flow offers signing
+in to a different account when you hit a limit, so TeamClaude automates a move that the first-party
+client already offers. OpenAI publishes no equivalent option, so that argument stops at the Codex
+boundary. An unreleased "subscription sharing" mechanism has been reported, but nothing is
+documented or launched.
+
+**Enforcement is not hypothetical.** Third-party harnesses that use ChatGPT OAuth have reportedly
+been cut off. The [openai/codex discussion](https://github.com/openai/codex/discussions/8338) asking
+whether a forked CLI is permitted also has no answer from OpenAI. Both reports are secondary, but
+they point the same way.
+
+TeamClaude pools ChatGPT accounts only when you configure it to. This is the one feature in the
+fork whose documented risk is a suspended subscription rather than a degraded experience, so it
+stays off until you wire it up deliberately — see [Several ChatGPT accounts behind one
+sidecar](#several-chatgpt-accounts-behind-one-sidecar).

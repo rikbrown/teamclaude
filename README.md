@@ -165,9 +165,65 @@ Each request is routed by the model name in its body, so one session can freely 
 
 Claude Code prints one `[claude-code:unrecognized_model]` line to stderr for each custom model. This is expected; suppressing it would lose the correct context window. The quota bars for the sidecar account show `unknown` unless the sidecar forwards Codex's rate-limit headers — see [Quota](docs/openai.md#quota). Keep the sidecar on loopback.
 
-One sidecar holds one ChatGPT login, so GPT requests do not rotate. To use a pool, point the sidecar's back leg at TeamClaude. The native Codex accounts then provide the same rotation, quota bars and `disable` behaviour as Claude accounts — see [Several ChatGPT accounts behind one sidecar](docs/openai.md#several-chatgpt-accounts-behind-one-sidecar). **Read the [terms of service](docs/openai.md#terms-of-service) first.** OpenAI's Terms of Use prohibit rotating ChatGPT subscriptions to get past a spent window, and account suspension is a plausible consequence — a sharper trade-off than pooling Claude subscriptions, which the first-party client offers to do by hand.
+The sidecar appears under the account table as a `⚙` line rather than a row because it holds no subscription, is the only account its route can use, and never rotates. The line also shows its supervised process state (`up pid 98018`, or `down (code 1) 3 restarts`).
 
-Full details: [docs/openai.md](docs/openai.md).
+#### Several ChatGPT accounts
+
+> **Read the [terms of service](docs/openai.md#terms-of-service) before setting this up.** OpenAI's Terms of Use prohibit rotating ChatGPT subscriptions past a spent window, and account suspension is a plausible consequence. This is a sharper trade-off than pooling Claude subscriptions because the first-party client lets you switch Claude subscriptions by hand.
+
+One sidecar holds one ChatGPT login, so GPT requests do not rotate and its quota belongs to a login that TeamClaude does not own. Point the sidecar's **back leg** at TeamClaude so native Codex accounts serve it instead:
+
+```
+Claude Code ──▶ TC /v1/messages (gpt-*) ──▶ sidecar account ──▶ sidecar translates
+            ──▶ TC /backend-api/codex/responses ──▶ ChatGPT account pool ──▶ chatgpt.com
+```
+
+Each hop is classified by its path, and the subscription partition keeps the pools apart: on the way in only the sidecar account is eligible, on the way back only the ChatGPT accounts. One route lists both.
+
+**1. Add the accounts** — run `teamclaude login --codex` once for each one. A Codex login takes its email as its name. Your Anthropic account probably uses the same name, so the Codex name gets a prefix to keep it unambiguous:
+
+```
+$ teamclaude login --codex
+Named "codex:you@example.com" — "you@example.com" is already an account on another provider.
+```
+
+**2. Redirect the sidecar** and stub its own login, so TeamClaude supplies the credential instead:
+
+```json
+{ "name": "codex",
+  "command": ["claude-code-proxy", "serve", "--no-monitor", "--port", "18765"],
+  "env": {
+    "CCP_CODEX_BASE_URL": "http://127.0.0.1:3456/backend-api/codex/responses",
+    "CCP_CODEX_TRANSPORT": "http"
+  } }
+```
+
+```bash
+cd ~/.config/claude-code-proxy/codex
+cp auth.json auth.json.bak                      # the real login — keep it
+echo '{ "access": "delegated-to-teamclaude", "refresh": "", "expires": 4102444800000 }' > auth.json
+```
+
+The sidecar refuses to start with an empty store but never refreshes a far-future token, and TeamClaude replaces both the bearer and the account header on the way out. Leave `accountId` unset so none of the sidecar's own identity can leak.
+
+**3. Put them all on the `gpt-*` route**, sidecar included, and give each account a `headersTimeoutMs` — the 120s fleet default is shorter than a long reasoning turn:
+
+```json
+{ "name": "codex", "match": ["gpt-*"],
+  "accounts": ["codex", "codex:you@example.com", "codex:you@work.example"] }
+```
+
+**4. Restart the server.** A `sidecars[].env` change is read once at startup, so a reload is not enough.
+
+Three details matter:
+
+- **Leave the sidecar account on the route.** It can look removable because it is not a subscription or an account row, but it is the routing target for the way *in*. Without it, every `gpt-*` request fails to find an account while `teamclaude status` shows two healthy ChatGPT accounts on the route.
+- **`CCP_CODEX_TRANSPORT=http` is required.** A WebSocket upgrade is relayed with the caller's own headers and draws no account, so the WebSocket transport cannot be pooled.
+- **Do not reuse a name across providers.** Routes address accounts by name, so a shared name admits both — including the Claude account that cannot serve `gpt-*`, which outranks the sidecar on priority and wins. TeamClaude warns at startup when it sees one.
+
+Two things differ from the single-account setup: each turn appears **twice** in the activity list, once per hop, and tokens are booked against the sidecar row, so a ChatGPT account reads `N req · 0 tok`. Its quota bars are unaffected because they come from the `x-codex-*` headers on the second hop, where the subscription is.
+
+Full details, including what happens to quota on each hop: [Several ChatGPT accounts behind one sidecar](docs/openai.md#several-chatgpt-accounts-behind-one-sidecar).
 
 ### Burn-rate projection
 

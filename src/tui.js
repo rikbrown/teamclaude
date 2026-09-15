@@ -1409,7 +1409,8 @@ export class TUI {
 
   /** Flip stdout between blocking and non-blocking. A handle without the
    *  method (a pipe in tests, a file) needs neither, and a failure to flip is
-   *  worth no more than the old behaviour it leaves in place. */
+   *  worth no more than the old behaviour it leaves in place.
+   *  @param {boolean} blocking */
   _setStdoutBlocking(blocking) {
     // `_handle` is Node-internal and untyped; the optional chain is the guard.
     try { /** @type {any} */ (process.stdout)._handle?.setBlocking?.(blocking); } catch {}

@@ -2699,14 +2699,27 @@ export class AccountManager {
   }
 
   /** Accounts a configured route can use (all accounts when it lists none), each
-   * with a live eligibility flag for a representative model of the route. */
+   * with a live eligibility flag for a representative model of the route and the
+   * provider that will serve it.
+   *
+   * A route that NAMES its accounts is shown in full, whatever provider each one
+   * belongs to. One route legitimately spans two: a translating sidecar reached
+   * on the Anthropic wire, plus the subscription pool its own back leg re-enters
+   * on the provider's path. Both hops are that route's traffic. Filtering the
+   * view by a single provider hid the second set completely — the route looked
+   * like it listed one account, and a newly added subscription that nobody had
+   * added to the list was invisible rather than merely idle, which is the exact
+   * shape of the diagnosis this view exists to prevent.
+   *
+   * A route that lists NOBODY is different: it constrains models, not accounts,
+   * so only the asking provider's own pool can serve it and the partition still
+   * applies. */
   _routeAccountsView(route, provider = DEFAULT_PROVIDER) {
     const sample = sampleModelFor(route);
-    const excluded = this._excludeOtherProviders(null, provider);
-    const inRoute = a => !route.accounts.length
-      || route.accounts.includes(a.name) || route.accounts.includes(String(a.index));
-    return this.accounts.filter(a => inRoute(a) && !excluded?.has(a.index))
-      .map(a => ({ name: a.name, eligible: this._isAvailable(a, sample) }));
+    const listed = route.accounts.length
+      ? this.accounts.filter(a => route.accounts.includes(a.name) || route.accounts.includes(String(a.index)))
+      : this.accounts.filter(a => !this._excludeOtherProviders(null, provider)?.has(a.index));
+    return listed.map(a => ({ name: a.name, provider: providerOf(a), eligible: this._isAvailable(a, sample) }));
   }
 
   /** A representative model id for a route name (configured or auto fable/sonnet),

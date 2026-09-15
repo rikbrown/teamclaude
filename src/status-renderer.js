@@ -217,7 +217,13 @@ function routingLines(routes, blocked, paint) {
     // which hop each account serves instead of reading as one flat pool.
     const routeProvider = route.provider || 'anthropic';
     const accountText = (a) => {
-      const tag = a.provider && a.provider !== routeProvider ? `:${nameText(a.provider)}` : '';
+      const foreign = a.provider && a.provider !== routeProvider;
+      // Unless the name already leads with it. `login --codex` mints
+      // `codex:someone@example.com`, so tagging that again reads
+      // `codex:someone@example.com:codex` — the same word twice, once as the
+      // thing's name and once as a fact about it.
+      const saysSoItself = foreign && a.name.startsWith(`${a.provider}:`);
+      const tag = foreign && !saysSoItself ? `:${nameText(a.provider)}` : '';
       return nameText(a.name) + tag;
     };
     const accounts = routeBlocked

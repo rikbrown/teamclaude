@@ -188,3 +188,48 @@ export function oauthIdentityFields(profile) {
       .map(key => [key, profile[key]])
   );
 }
+
+/**
+ * Names held by more than one account, with the providers that hold each.
+ *
+ * `name` is this proxy's ADDRESSING key — routes name accounts by it
+ * (`_routeAllows`), so do `TC_ACCT`, the `/tc-acct/` pin, `teamclaude disable`
+ * and the TUI pickers. Identity, by contrast, is deliberately provider-aware:
+ * `sameIdentity` treats two providers as separate plans, so signing the same
+ * person's email into Anthropic and into Codex correctly yields two accounts.
+ *
+ * Those two rules meet badly. Two distinct accounts sharing a name make every
+ * name-addressed lookup ambiguous, and the lookups do not agree with each other
+ * about which one they mean: `_routeAllows` admits BOTH, while
+ * `resolveAccountPin` takes the first. Listing a shared name in a route
+ * therefore quietly admits an account that cannot serve the request — and when
+ * that account outranks the intended one on priority, it wins.
+ *
+ * Detection only. Nothing here refuses a config: an operator who wants two rows
+ * called the same thing may have a reason, and a proxy that will not start is
+ * worse than one that says what is wrong.
+ *
+ * @param {Array<{name?: string}>} accounts
+ * @returns {Array<{name: string, providers: string[]}>}
+ */
+export function duplicateAccountNames(accounts = []) {
+  const byName = new Map();
+  for (const a of accounts) {
+    const name = a?.name;
+    if (typeof name !== 'string' || !name) continue;
+    if (!byName.has(name)) byName.set(name, []);
+    byName.get(name).push(providerOf(a));
+  }
+  return [...byName.entries()]
+    .filter(([, providers]) => providers.length > 1)
+    .map(([name, providers]) => ({ name, providers }));
+}
+
+/** The duplicate-name warning lines for `accounts`, or [] when there are none. */
+export function duplicateNameWarnings(accounts = []) {
+  return duplicateAccountNames(accounts).map(({ name, providers }) =>
+    `[TeamClaude] Two accounts are named "${name}" (${providers.join(', ')}). `
+    + 'Routes, TC_ACCT and `teamclaude disable` address accounts by name, so this one is '
+    + 'ambiguous: a route listing it admits both, including the one that cannot serve the '
+    + 'request. Rename one (e.g. "codex:' + name + '").');
+}

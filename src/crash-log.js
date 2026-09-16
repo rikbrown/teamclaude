@@ -4,7 +4,8 @@ import { appendFileSync } from 'node:fs';
  *
  *  Node reports this asynchronously when the stream is non-blocking, so it
  *  arrives as an event rather than at the call site and no `try` around the
- *  write can catch it. */
+ *  write can catch it.
+ *  @param {any} err */
 function isBrokenPipe(err) {
   return err?.code === 'EPIPE' || err?.code === 'ERR_STREAM_DESTROYED';
 }

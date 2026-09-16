@@ -1707,10 +1707,13 @@ export class TUI {
       // Matched by name: a sidecars[] entry and the account that routes to it
       // are named by the same operator, and nothing else pairs them.
       const proc = sidecars.find(sc => sc.name === a.name) || null;
+      // A held port reads as a crash loop but is not one: the binary is fine and
+      // something else owns the address, which is a different thing to go and fix.
       const state = a.disabled ? red('disabled')
         : a.rateLimitedUntil > Date.now() ? yellow('throttled')
-          : proc && !proc.running ? red(`down (${proc.lastExit || 'restarting'})`)
-            : proc ? green('up') : green('ok');
+          : proc?.blocked ? red('port in use')
+            : proc && !proc.running ? red(`down (${proc.lastExit || 'restarting'})`)
+              : proc ? green('up') : green('ok');
       const pid = proc?.running ? dim(` pid ${proc.pid}`) : '';
       const restarts = proc?.restarts ? yellow(` ${proc.restarts} restarts`) : '';
       return ` ${dim('⚙')} ${a.name} ${dim('→')} ${dim(host)}  ${state}${pid}${restarts}`;

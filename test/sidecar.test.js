@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { Sidecar, restartDelayMs } from '../src/sidecar.js';
+import { Sidecar, restartDelayMs, isBindConflict } from '../src/sidecar.js';
 
 // A fake child process: enough surface for the supervisor (pid, kill, 'exit'/
 // 'error' events, a stderr emitter). Lets tests crash and kill children at will.
@@ -154,4 +154,143 @@ test('getStatus() keeps the last stderr lines for diagnosis', () => {
   const [s] = sc.getStatus();
   assert.deepEqual(s.stderrTail, ['line two', 'line three']); // capped at last 2
   sc.stop();
+});
+
+// ── a held port ──────────────────────────────────────────────────────────────
+
+// A sidecar binds a fixed port, so a copy that outlives its server keeps that
+// port and every later server fails to bind. Reported as a bare "code 1" and
+// retried forever, that looked like a broken binary; it is the opposite.
+
+test('a bind conflict on stderr is reported as blocked, not as a plain crash', () => {
+  const spawn = fakeSpawner();
+  const sc = makeSidecar([{ name: 'codex', command: ['ccp'] }], spawn);
+  sc.start();
+
+  spawn.children[0].stderr.emit('data', Buffer.from(
+    'Error: failed to bind proxy listener on 127.0.0.1:18765: Address already in use (os error 48)\n'));
+  const [s] = sc.getStatus();
+  assert.equal(s.blocked, true);
+  assert.match(s.blockedReason, /Address already in use/);
+  sc.stop();
+});
+
+test('an ordinary crash is not reported as blocked', () => {
+  const spawn = fakeSpawner();
+  const sc = makeSidecar([{ name: 'codex', command: ['ccp'] }], spawn);
+  sc.start();
+  spawn.children[0].stderr.emit('data', Buffer.from('panicked at src/main.rs:12\n'));
+  spawn.children[0].emit('exit', 1, null);
+  const [s] = sc.getStatus();
+  assert.equal(s.blocked, false);
+  assert.equal(s.lastExit, 'code 1');
+  sc.stop();
+});
+
+test('a retry clears the previous attempt s bind conflict', async () => {
+  const spawn = fakeSpawner();
+  const sc = makeSidecar([{ name: 'codex', command: ['ccp'] }], spawn);
+  sc.start();
+  spawn.children[0].stderr.emit('data', Buffer.from('Address already in use (os error 48)\n'));
+  spawn.children[0].emit('exit', 1, null);
+  assert.equal(sc.getStatus()[0].blocked, true);
+  await wait(30);
+  assert.equal(sc.getStatus()[0].blocked, false, 'the new attempt starts clean');
+  sc.stop();
+});
+
+// ── reaping our own orphan ───────────────────────────────────────────────────
+
+/** A fake `ps`: pid -> {ppid, command}, absent means not running. */
+function fakeProcs(table) {
+  const fn = (pid) => table[pid] || null;
+  return fn;
+}
+function recordKills() {
+  const kills = [];
+  const fn = (pid, signal) => kills.push([pid, signal]);
+  fn.kills = kills;
+  return fn;
+}
+
+test('an orphan this server recorded is reaped before the respawn', () => {
+  const spawn = fakeSpawner();
+  const killFn = recordKills();
+  const sc = makeSidecar([{ name: 'codex', command: ['ccp', '--port', '18765'] }], spawn, {
+    savedPids: { codex: { pid: 4242, command: 'ccp' } },
+    readProcess: fakeProcs({ 4242: { ppid: 1, command: '/usr/local/bin/ccp --port 18765' } }),
+    killFn,
+  });
+  sc.start();
+  assert.deepEqual(killFn.kills, [[4242, 'SIGTERM']]);
+  sc.stop();
+});
+
+test('a recorded pid that still has a parent belongs to a live server and is left alone', () => {
+  const spawn = fakeSpawner();
+  const killFn = recordKills();
+  const sc = makeSidecar([{ name: 'codex', command: ['ccp'] }], spawn, {
+    savedPids: { codex: { pid: 4242, command: 'ccp' } },
+    readProcess: fakeProcs({ 4242: { ppid: 900, command: '/usr/local/bin/ccp' } }),
+    killFn,
+  });
+  sc.start();
+  assert.deepEqual(killFn.kills, [], 'another supervisor owns it');
+  sc.stop();
+});
+
+test('a recycled pid running a different program is left alone', () => {
+  const spawn = fakeSpawner();
+  const killFn = recordKills();
+  const sc = makeSidecar([{ name: 'codex', command: ['ccp'] }], spawn, {
+    savedPids: { codex: { pid: 4242, command: 'ccp' } },
+    readProcess: fakeProcs({ 4242: { ppid: 1, command: '/usr/bin/some-unrelated-daemon' } }),
+    killFn,
+  });
+  sc.start();
+  assert.deepEqual(killFn.kills, [], 'the pid was recycled, it is not our sidecar');
+  sc.stop();
+});
+
+test('nothing is signalled when there is no record, or the pid is gone', () => {
+  const spawn = fakeSpawner();
+  const killFn = recordKills();
+  makeSidecar([{ name: 'codex', command: ['ccp'] }], spawn, { killFn, readProcess: fakeProcs({}) }).start();
+  makeSidecar([{ name: 'codex', command: ['ccp'] }], spawn, {
+    savedPids: { codex: { pid: 4242, command: 'ccp' } },
+    readProcess: fakeProcs({}),   // not running
+    killFn,
+  }).start();
+  assert.deepEqual(killFn.kills, []);
+});
+
+// ── recording pids ───────────────────────────────────────────────────────────
+
+test('a live pid is published for the owner to persist', () => {
+  const spawn = fakeSpawner();
+  const seen = [];
+  const sc = makeSidecar([{ name: 'codex', command: ['ccp'] }], spawn, { onPids: (p) => seen.push(p) });
+  sc.start();
+  assert.deepEqual(seen.at(-1), { codex: { pid: 100, command: 'ccp' } });
+  sc.stop();
+});
+
+test('a down sidecar keeps its recorded pid, which is exactly when it is needed', () => {
+  const spawn = fakeSpawner();
+  const sc = makeSidecar([{ name: 'codex', command: ['ccp'] }], spawn, {
+    savedPids: { codex: { pid: 4242, command: 'ccp' } },
+    readProcess: fakeProcs({}),
+  });
+  sc.start();
+  spawn.children[0].emit('exit', 1, null);
+  // Blocked-and-down is the case where the older pid identifies the leftover;
+  // dropping it here would discard the one fact that makes a reap possible.
+  assert.deepEqual(sc.exportPids().codex, { pid: 100, command: 'ccp' });
+  sc.stop();
+});
+
+test('isBindConflict matches the phrasings runtimes actually print', () => {
+  assert.equal(isBindConflict('Address already in use (os error 48)'), true);
+  assert.equal(isBindConflict('listen EADDRINUSE: address already in use 127.0.0.1:3456'), true);
+  assert.equal(isBindConflict('panicked at src/main.rs'), false);
 });

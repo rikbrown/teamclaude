@@ -414,7 +414,7 @@ async function serverCommand() {
 
   // Periodically persist quota (and once more on shutdown) to the state file.
   const persistQuotaState = () =>
-    saveState({ quota: accountManager.exportQuotaState(), clients: clientUsage.exportState(), usageDimensions: dimensionUsage.exportState() })
+    saveState({ quota: accountManager.exportQuotaState(), clients: clientUsage.exportState(), usageDimensions: dimensionUsage.exportState(), sidecars: sidecar?.exportPids() || savedState?.sidecars || {} })
       .catch(err => console.error(`[TeamClaude] Failed to save quota state: ${err.message}`));
   let quotaSaveInterval = null;
 
@@ -990,7 +990,13 @@ async function serverCommand() {
   // the store is reached over the network and the proxy serves meanwhile.
   credentialSync.start().catch(() => {});
   // Launch supervised sidecars (no-op when config.sidecars is empty).
-  sidecar = new Sidecar(config.sidecars);
+  sidecar = new Sidecar(config.sidecars, {
+    // A sidecar outlives a server that was killed rather than asked to stop,
+    // and goes on holding its port. The pid recorded here is the only thing
+    // that lets the next start tell its own leftover from a stranger's process.
+    savedPids: savedState?.sidecars || null,
+    onPids: () => { persistQuotaState(); },
+  });
   sidecar.start();
 
   // Background self-update for a backgrounded (headless) server. Skipped under

@@ -31,6 +31,14 @@ test('the title names the build that is running', () => {
   assert.equal(formatTerminalTitle({ index: 1, total: 2, version: 'f265cb7' }), 'teamclaude 2/2 f265cb7');
 });
 
+// A checkout names a version AND the commit it was built from. At the old
+// 20-column bound that label reached the tab as half a sha — a commit id that
+// identifies nothing, in the one place an unattended restart gets noticed.
+test('a checkout label reaches the title whole', () => {
+  assert.equal(formatTerminalTitle({ index: 0, total: 4, name: 'work', version: '1.1.20-rik.12+acc19b3' }),
+    'teamclaude 1/4 work 1.1.20-rik.12+acc19b3');
+});
+
 test('a title with no version is the title as it was before there was one', () => {
   assert.equal(formatTerminalTitle({ index: 0, total: 4, name: 'work' }), 'teamclaude 1/4 work');
   assert.equal(formatTerminalTitle({ index: 0, total: 4, name: 'work', version: null }), 'teamclaude 1/4 work');
@@ -42,7 +50,7 @@ test('a long name and a long version together cannot run away with the tab', () 
     name: 'user@example.com (Some Very Long Org Name)',
     version: 'v1.2.3-rc.1+build.20260917.deadbeef',
   });
-  assert.ok(out.length <= 'teamclaude 1/1 '.length + 24 + 1 + 20, `runaway title: ${out}`);
+  assert.ok(out.length <= 'teamclaude 1/1 '.length + 24 + 1 + 24, `runaway title: ${out}`);
   assert.ok(out.endsWith('…'), `the version is what gets cut: ${out}`);
 });
 

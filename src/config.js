@@ -103,6 +103,7 @@ export function createDefaultConfig() {
     eventLogging: 'hide',
     defaultClientMode: 'mitm',
     activityLog: null,
+    autoRestart: false,
     blockedModels: [],
     accounts: [],
   };

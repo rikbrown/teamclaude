@@ -59,10 +59,18 @@ const painted = (tui, W) => frame(tui, W).at(-1);
 /** The footer as the mode composes it, before the frame is assembled. */
 const composed = (tui, W) => stripSgr(tui._renderFooter(W));
 
-/** What the footer put in its right-hand corner: the last token on a line that
- *  ends one column short of the edge. '' when it drew nothing there — a line
- *  padded out by fitLine ends in a run of spaces and matches nothing. */
-const labelOf = line => /\s{2,}(\S+) $/.exec(line)?.[1] ?? '';
+/** What the footer put in its right-hand corner: the one or two tokens on a
+ *  line that ends one column short of the edge — the build label, and the
+ *  update marker after it when there is one. '' when it drew nothing there: a
+ *  line padded out by fitLine ends in a run of spaces and matches nothing.
+ *
+ *  At most one single space inside the capture, on purpose. Key hints are two
+ *  or more spaces apart, and so is the padding run that holds this corner, so
+ *  a looser pattern would reach back and swallow the tail of the hints. */
+const cornerOf = line => /\s{2,}(\S+(?: \S+)?) $/.exec(line)?.[1] ?? '';
+
+/** Just the build from that corner, with any update marker taken off. */
+const labelOf = line => cornerOf(line).replace(/ ▲$/, '');
 
 const LABEL = '1.1.20-rik.12+acc19b3';   // a checkout: version + build sha
 const BARE = '1.1.20-rik.12';            // the same label with its sha spent
@@ -210,6 +218,82 @@ test('the same ladder, run by narrowing a real terminal', () => {
   }
 });
 
+// ── the update marker ────────────────────────────────────────
+//
+// The corner is the only place the display says an update is waiting. The
+// header carried that marker for as long as it carried the build and lost both
+// at once, so there is no second ▲ anywhere for this one to be read against.
+
+test('an update waiting puts a marker after the build, and nothing does otherwise', () => {
+  const on = painted(makeTUI({ versionLabel: LABEL, updateAvailable: true, onRestart: () => {} }), 120);
+  assert.equal(cornerOf(on), `${LABEL} ▲`);
+  assert.equal(labelOf(on), LABEL, 'the build is still the label; the marker is a note after it');
+
+  const off = painted(makeTUI({ versionLabel: LABEL, updateAvailable: false, onRestart: () => {} }), 120);
+  assert.equal(cornerOf(off), LABEL);
+  assert.doesNotMatch(off, /▲/, 'and nowhere else on the line either');
+});
+
+test('the marker is budgeted before the label is cut, not after it', () => {
+  // Measured off the hints rather than written down, like the ladder above:
+  // what is under test is the room the label was given, not any one hint.
+  const hints = displayWidth(composed(makeTUI({}), 200));
+  const corner = (room, updateAvailable) => {
+    const W = hints + GAP + 1 + room;
+    const line = composed(makeTUI({ versionLabel: LABEL, updateAvailable }), W);
+    assert.equal(displayWidth(line), W, `room=${room} upd=${updateAvailable}: ${displayWidth(line)} columns`);
+    return cornerOf(line);
+  };
+  assert.equal(corner(21, false), LABEL, 'room for the whole label and no more');
+  assert.equal(corner(21, true), `${BARE} ▲`, 'the marker is paid for out of the label, not out of the line');
+  assert.equal(corner(23, true), `${LABEL} ▲`, 'two columns more and both are drawn whole');
+});
+
+test('a corner too narrow to carry both draws neither', () => {
+  const hints = displayWidth(composed(makeTUI({}), 200));
+  // Five columns: enough for a cut label on its own, not for one and a marker.
+  const W = hints + GAP + 1 + 5;
+  assert.equal(labelOf(composed(makeTUI({ versionLabel: LABEL }), W)), '…k.12');
+
+  const line = composed(makeTUI({ versionLabel: LABEL, updateAvailable: true }), W);
+  assert.equal(cornerOf(line), '', 'the label went and the marker went with it');
+  assert.doesNotMatch(line, /▲/);
+  assert.equal(line, composed(makeTUI({}), W), 'leaving the footer drawn before there was a build to name');
+});
+
+test('no build to name draws no marker, whatever this process knows', () => {
+  // A marker alone in the corner names nothing it could be an update TO, and at
+  // that end of the line it reads as one more key hint.
+  const line = painted(makeTUI({ versionLabel: '', updateAvailable: true }), 100);
+  assert.doesNotMatch(line, /▲/);
+  assert.equal(line, painted(makeTUI({}), 100));
+});
+
+test('a footer carrying the marker is exactly the terminal width on every screen', () => {
+  for (const [name, apply] of SCREENS) {
+    for (const W of WIDTHS) {
+      const tui = makeTUI({ versionLabel: LABEL, updateAvailable: true });
+      apply(tui);
+      const line = composed(tui, W);
+      if (!cornerOf(line)) continue;   // too narrow to name it — its own test above
+      assert.equal(displayWidth(line), W,
+        `${name} at W=${W}: composed ${displayWidth(line)} columns, so fitLine will pad or cut it`);
+    }
+  }
+});
+
+test('and the footer the paint loop writes carries it at exactly the width too', () => {
+  for (const mode of ['normal', 'settings', 'input']) {
+    for (const W of WIDTHS) {
+      const tui = makeTUI({ versionLabel: LABEL, updateAvailable: true, onRestart: () => {} });
+      tui.mode = mode;
+      if (mode === 'input') { tui.inputPrompt = 'Threshold (%)'; tui.inputBuf = '95'; }
+      const line = painted(tui, W);
+      assert.equal(displayWidth(line), W, `mode ${mode} at W=${W}: footer width ${displayWidth(line)}`);
+    }
+  }
+});
+
 // ── the drain keeps the corner ───────────────────────────────
 //
 // The drain footer names no build. The line lives for at most the deadline, the
@@ -225,6 +309,16 @@ test('a drain footer names no build, however much room it has', () => {
     assert.equal(labelOf(line), '', `W=${W}: ${JSON.stringify(line.slice(-28))}`);
     assert.doesNotMatch(line, /1\.1\.20/, 'not anywhere else on the line either');
     assert.match(line, /ctrl-c/, 'the columns went to the escape hatch');
+    assert.equal(displayWidth(line), W);
+  }
+});
+
+test('and it draws no update marker either, for the same reason', () => {
+  for (const W of [80, 200]) {
+    const tui = makeTUI({ versionLabel: LABEL, updateAvailable: true, onRestart: () => {} });
+    tui.restartDrainStarted({ deadlineMs: 30_000, inFlight: () => 1 });
+    const line = painted(tui, W);
+    assert.doesNotMatch(line, /▲/, `W=${W}: ${JSON.stringify(line.slice(-28))}`);
     assert.equal(displayWidth(line), W);
   }
 });
@@ -274,4 +368,25 @@ test('a version label off the wire cannot put an escape sequence in the footer',
   const line = painted(tui, 100);
   assert.doesNotMatch(line, /[\x1b\x07\x9b]/);
   assert.equal(displayWidth(line), 100);
+});
+
+test('the marker in attach mode reports the server, not this process', () => {
+  const on = painted(remoteTUI(
+    { version: '1.0.0', versionLabel: 'v9.9.9', updateAvailable: true },
+    { updateAvailable: false },
+  ), 100);
+  assert.equal(cornerOf(on), 'v9.9.9 ▲');
+
+  const off = painted(remoteTUI(
+    { version: '1.0.0', versionLabel: 'v9.9.9' },
+    { versionLabel: 'ignored-local', updateAvailable: true },
+  ), 100);
+  assert.equal(cornerOf(off), 'v9.9.9', 'an update to the local checkout says nothing about the server');
+});
+
+test('a dashboard that has not polled yet draws no marker, having nothing to hang it on', () => {
+  const am = new RemoteAccountManager();
+  const line = painted(makeTUI({ am, remote: true, versionLabel: 'local-checkout', updateAvailable: true }), 100);
+  assert.equal(cornerOf(line), '');
+  assert.doesNotMatch(line, /▲/);
 });

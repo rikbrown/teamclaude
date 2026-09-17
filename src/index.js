@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawnSync } from 'node:child_process';
+import { homedir } from 'node:os';
 import { createInterface } from 'node:readline';
 import { createWriteStream } from 'node:fs';
 import { readFile } from 'node:fs/promises';
@@ -242,8 +243,13 @@ async function serverCommand() {
   const logTo = argValue('--log-to');
   if (logTo) config.logDir = logTo;
 
-  // --activity-log <file>
-  const activityLogPath = argValue('--activity-log') || null;
+  // --activity-log <file>, else `activityLog` from the config. The flag lasts
+  // one launch; the config key is what survives a restart, which is the case
+  // that matters. The TUI replaces console.log (see tui.js), so with it running
+  // these lines — rotation, upstream errors, 429 failover — exist nowhere but
+  // its 200-entry ring buffer, and a restart takes them with it.
+  const activityLogSetting = argValue('--activity-log') || config.activityLog || null;
+  const activityLogPath = activityLogSetting ? activityLogSetting.replace(/^~/, homedir()) : null;
 
   if (config.accounts.length === 0) {
     console.error('No accounts configured.\n');

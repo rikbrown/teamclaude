@@ -102,6 +102,7 @@ export function createDefaultConfig() {
     projection: { enabled: true, windowMinutes: 90, wasteFloor: 0.1 },
     eventLogging: 'hide',
     defaultClientMode: 'mitm',
+    activityLog: null,
     blockedModels: [],
     accounts: [],
   };

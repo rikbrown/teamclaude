@@ -1,5 +1,5 @@
 // Reflect the active account and the running build in the terminal title (e.g.
-// "teamclaude 2/4 work 1.1.20-rik.11"), so a backgrounded or tabbed
+// "teamclaude 2/4 work 1.1.20-rik.12+acc19b3"), so a backgrounded or tabbed
 // `teamclaude server` is glanceable without switching to it. Pure/side-effect-
 // free here so it can be unit-tested; the caller owns the TTY gate and the
 // interval.
@@ -32,9 +32,13 @@ function truncate(s, max) {
 export function formatTerminalTitle({ index = 0, total = 0, name = null, version = null } = {}) {
   const pos = total > 0 ? `${index + 1}/${total}` : '0/0';
   const who = name ? ` ${truncate(name, 24)}` : '';
-  // Bounded like the account name, for the same reason: a tab strip gives a
-  // title a few dozen columns at best, and neither string was chosen here.
-  const build = version ? ` ${truncate(version, 20)}` : '';
+  // Bounded like the account name, at the same width and for the same reason: a
+  // tab strip gives a title a few dozen columns at best, and neither string was
+  // chosen here. 24 rather than 20 because a checkout names both halves of what
+  // it runs — `1.1.20-rik.12+acc19b3`, 21 columns — and cutting that at 20 ends
+  // the title in half a sha, which names no commit while reading like it does.
+  // A label still long enough to be cut at 24 was never one of ours.
+  const build = version ? ` ${truncate(version, 24)}` : '';
   return `teamclaude ${pos}${who}${build}`;
 }
 

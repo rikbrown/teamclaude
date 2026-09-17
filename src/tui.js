@@ -222,6 +222,12 @@ const HEAD_GAP = 2;
 // widths is the honest answer.
 const HEAD_LABEL_MIN = 4;
 
+// Clear space the footer keeps between the last key hint and the build label.
+// The same two columns the header keeps around its own copy, and for the same
+// reason: any closer and the label reads as one more hint, which is the one
+// thing it must not look like — there is no key that does it.
+const FOOT_GAP = 2;
+
 // Which pair of bars a row draws: the subscription buckets (Ses/Wk, plus the
 // S7/F7 family bars) when any unified reading exists, else the metered Tok/Req
 // pair an API-key account reports. The account row budget is drawn per
@@ -2377,12 +2383,25 @@ export class TUI {
     }
   }
 
-  /** @param {number} [W]  columns to compose against; only the drain line uses it */
+  /** The footer line: the mode's key hints from the left, the build label set
+   *  against the right edge.
+   *  @param {number} [W]  columns to compose against */
   _renderFooter(W = process.stdout.columns || 80) {
     // A restart drain outranks every mode: the keys this line would otherwise
     // advertise are all refused while one runs (see _key), and how far the
     // drain has got is the only thing on screen worth the row.
+    //
+    // It is also the one footer drawn without the build label. The line lives
+    // for at most the deadline, the build cannot change under it, and when the
+    // restart is an update the label names the build being replaced — so those
+    // columns go to the escape hatch, which is what the line is read for.
     if (this._restartDrain) return this._restartDrainFooter(this._restartDrain, W);
+    return this._footerWithVersion(this._footerHints(), W);
+  }
+
+  /** What the keyboard does on the screen the operator is looking at. Composed
+   *  without regard to width: fitting it to the line is _renderFooter's job. */
+  _footerHints() {
     switch (this.mode) {
       case 'normal':
         return this.remote
@@ -2418,6 +2437,40 @@ export class TUI {
       default:
         return '';
     }
+  }
+
+  /**
+   * `hints` with the build label set against the right edge of a W-column line.
+   *
+   * Composed to exactly W, never less. The paint loop pads every short line out
+   * to the terminal width and truncates the tail of every long one (fitLine), so
+   * a label merely appended is pushed out of the corner it was put in, and a
+   * line built past W has that same corner eaten. Both failures are silent, and
+   * both look like the label was never drawn at all.
+   *
+   * The hints are never cut to make room. They are the only thing on this line
+   * that says what the keyboard does: a build the operator cannot read costs
+   * them nothing, a key they cannot read costs them the screen. So the label is
+   * fitted to whatever the hints leave over — fitHeadLabel spends the build sha
+   * first and then the head of the version, the same ladder the header runs, so
+   * the two lines never disagree about what a shortened label means — and it is
+   * dropped whole when what is left will not carry it.
+   *
+   * @param {string} hints
+   * @param {number} W
+   */
+  _footerWithVersion(hints, W) {
+    // The header's source, so an attached dashboard names the server's build
+    // down here too, and stays blank until its first poll rather than naming
+    // this machine's. `??` on purpose: '' is that deliberate blank, not a miss.
+    const label = this.am.versionLabel ?? this.versionLabel;
+    if (!label) return hints;
+    const hw = vw(hints);
+    // One column of margin at the edge — what the rule drawn above this line
+    // and the header's port block both leave.
+    const text = fitHeadLabel(label, W - hw - FOOT_GAP - 1);
+    if (!text) return hints;
+    return `${hints}${' '.repeat(W - hw - vw(text) - 1)}${dim(text)} `;
   }
 
   /**

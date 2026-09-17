@@ -84,6 +84,24 @@ test('the update marker is a second triangle, drawn only when an update is known
   assert.equal(count(off, '▲'), 1);
 });
 
+// Centring on the LINE is a position, not a fit: with two blocks of different
+// widths a label small enough for the gap can still land inside one of them,
+// and the label was then dropped entirely — so the header stopped naming the
+// build every time the session segment grew, which is most of the time.
+test('a label that will not centre is shortened and shifted rather than dropped', () => {
+  const line = header(makeTUI({ am: fakeAm(3), versionLabel: '1.1.20-rik.11' }), 48);
+  assert.equal(displayWidth(line), 48);
+  assert.match(line, /rik\.11/, 'the tail is what tells one build from the next');
+  assert.match(line, /…/, 'and it says it was cut');
+  assert.ok(line.endsWith('Port 1 ▲ '), `right block clipped — ${JSON.stringify(line.slice(-12))}`);
+});
+
+test('shortening keeps the update marker, which is the actionable half', () => {
+  const line = header(makeTUI({ am: fakeAm(3), versionLabel: '1.1.20-rik.11', updateAvailable: true }), 52);
+  assert.equal(displayWidth(line), 52);
+  assert.equal(count(line, '▲'), 2);
+});
+
 test('a header too narrow for the label drops it whole, falling back verbatim', () => {
   const narrow = header(makeTUI({ am: fakeAm(3), versionLabel: '1.1.20-pr378', updateAvailable: true }), 40);
   assert.doesNotMatch(narrow, /1\.1\.20/);

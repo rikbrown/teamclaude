@@ -1,17 +1,18 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { TUI, displayWidth } from '../src/tui.js';
+import { TUI, displayWidth, fitHeadLabel } from '../src/tui.js';
 import { RemoteAccountManager } from '../src/tui-remote.js';
 
-// The build label lives in two places: centred in the header, and in the
-// bottom-right corner of the footer — which is where it was actually asked for,
-// and the one an operator finds without being told where to look.
+// The bottom-right corner of the footer is where the build is named — and,
+// since the header stopped carrying a copy of it, the only place. The marker
+// that says an update is waiting for that build is down here with it.
 //
-// The footer is the harder of the two. It is composed per mode, the hints it
-// carries are the only thing on screen saying what the keyboard does, and the
-// paint loop both pads short lines and truncates long ones. So every case below
-// is one of three assertions: the line is exactly the terminal width, the label
-// is against the right edge, and the hints came through untouched.
+// It is the harder of the two places to put one. The line is composed per mode,
+// the hints it carries are the only thing on screen saying what the keyboard
+// does, and the paint loop both pads short lines and truncates long ones. So
+// every case below is one of three assertions: the line is exactly the terminal
+// width, the label is against the right edge, and the hints came through
+// untouched.
 
 function fakeAm(sessions = 0) {
   return {
@@ -216,6 +217,23 @@ test('the same ladder, run by narrowing a real terminal', () => {
       `label grew from ${JSON.stringify(seen[i - 1])} to ${JSON.stringify(seen[i])}`);
     if (!seen[i - 1]) assert.equal(seen[i], '', 'a dropped label came back at a narrower width');
   }
+});
+
+// The ladder on its own, without the footer's arithmetic in the way.
+
+test('fitHeadLabel spends build metadata before it cuts the version', () => {
+  assert.equal(fitHeadLabel(LABEL, 21), LABEL);
+  assert.equal(fitHeadLabel(LABEL, 20), BARE);
+  assert.equal(fitHeadLabel(LABEL, 13), BARE);
+  assert.equal(fitHeadLabel(LABEL, 9), '…0-rik.12');
+  assert.equal(fitHeadLabel(LABEL, 3), '');
+});
+
+test('fitHeadLabel leaves a label with no build metadata exactly as it was', () => {
+  assert.equal(fitHeadLabel('v1.2.3', 100), 'v1.2.3');
+  assert.equal(fitHeadLabel(BARE, 13), BARE);
+  assert.equal(fitHeadLabel(BARE, 9), '…0-rik.12');
+  assert.equal(fitHeadLabel(BARE, 3), '');
 });
 
 // ── the update marker ────────────────────────────────────────

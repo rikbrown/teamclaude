@@ -213,10 +213,14 @@ const BAR_MAX = 20;
 // terminal lays the table out exactly as it did before the column could grow.
 const NAME_MIN = 12;
 
-// Clear space the centred version label needs on each side before it is drawn
-// at all. Below that it reads as a collision with the title or the port block,
-// so the whole label is dropped rather than squeezed.
+// Clear space the version label needs on each side before it is drawn at all.
+// Below that it reads as a collision with the title or the port block.
 const HEAD_GAP = 2;
+
+// Narrowest label still worth drawing: an ellipsis and three columns of build.
+// Under that the header goes back to naming no build at all, which at those
+// widths is the honest answer.
+const HEAD_LABEL_MIN = 4;
 
 // Which pair of bars a row draws: the subscription buckets (Ses/Wk, plus the
 // S7/F7 family bars) when any unified reading exists, else the metered Tok/Req
@@ -279,6 +283,23 @@ export function fitLine(s, w) {
   }
   if (v < w) return s + ' '.repeat(w - v);
   return s;
+}
+
+/** The build label at `max` columns, or '' when nothing legible fits.
+ *
+ *  Cut from the LEFT, unlike every other truncation here, because what tells
+ *  one build from the next is its tail: `…rik.11` still identifies the build,
+ *  `1.1.2…` identifies the three before it just as well. Sliced by code unit
+ *  against a display-width budget — a version or a sha is ASCII, and a label
+ *  arriving over the wire is measured again by the caller before it is placed,
+ *  so a wide glyph costs the label its slot rather than the header its width.
+ *  @param {string} label
+ *  @param {number} max */
+export function fitHeadLabel(label, max) {
+  const w = vw(label);
+  if (max >= w) return label;
+  if (max < HEAD_LABEL_MIN) return '';
+  return `…${label.slice(label.length - (max - 1))}`;
 }
 
 function formatReset(resetTs) {
@@ -411,6 +432,10 @@ function timestamp() {
 
 export class TUI {
   constructor({ accountManager, config, saveConfig, syncAccounts, onQuit, sx = null, probeQuota = null, activityLogPath = null,
+    // `u`: drain and come back on the new build. Null when nothing would
+    // relaunch the process, which is what stops a key offering an update from
+    // meaning "kill the proxy and every session on it".
+    onRestart = /** @type {(() => void)|null} */ (null),
     // Supervised sidecar state for the conduit lines. A getter, not a snapshot:
     // the supervisor respawns on its own schedule and the TUI redraws on a timer.
     getSidecars = null,
@@ -435,6 +460,7 @@ export class TUI {
     this.saveConfig = saveConfig;
     this.syncAccounts = syncAccounts;
     this.onQuit = onQuit;
+    this.onRestart = onRestart; // drain-and-restart, when something supervises us
     this.sx = sx;            // sx.org proxy manager (may be null)
     this.sxBalance = null;   // last fetched sx.org balance, for the settings screen
     this.probeQuota = probeQuota; // on-demand fleet-wide quota refresh (may be null)
@@ -704,6 +730,7 @@ export class TUI {
       this.mode = 'select'; this.selAction = 'toggle'; this.selIdx = this.am.currentIndex; this.selReturn = 'normal';
     }
     else if (k === 'p' && this.am.accounts.length > 0) { this._doProbe(); }
+    else if (k === 'u' && this.onRestart) { this._doRestart(); }
     else if (k === 'g') { this.mode = 'settings'; this.setIdx = 0; this._loadSxBalance(); }
   }
 
@@ -1138,6 +1165,17 @@ export class TUI {
     }
   }
 
+  // `u`: pick up a new build now instead of waiting for the next lull. The
+  // server owns what happens next — it drains, then exits asking to be
+  // relaunched — and it stops this TUI first, so the line below is on screen
+  // only for the instant before the display goes and the drain reports itself
+  // in plain text.
+  _doRestart() {
+    if (!this.onRestart) return;
+    this._addLog('Draining before restart...');
+    this.onRestart();
+  }
+
   // ── Network settings ───────────────────────────────
 
   /**
@@ -1497,8 +1535,15 @@ export class TUI {
     // server's. A local AccountManager has neither property.
     const label = this.am.versionLabel ?? this.versionLabel;
     const upd = this.am.updateAvailable ?? this.updateAvailable;
-    const mid = label ? dim(label) + (upd ? ` ${green('▲')}` : '') : '';
-    const lw = vw(left), rw = vw(right), mw = vw(mid);
+    const lw = vw(left), rw = vw(right);
+    // Columns left between the two blocks, and what the label may take of them.
+    // The marker is budgeted before the label is cut, so a shortened label and
+    // its marker still fit the room they were measured against.
+    const room = W - lw - rw;
+    const markerW = upd ? 2 : 0;
+    const text = label ? fitHeadLabel(label, room - 2 * HEAD_GAP - markerW) : '';
+    const mid = text ? dim(text) + (upd ? ` ${green('▲')}` : '') : '';
+    const mw = vw(mid);
     // Centred on the line, not in the gap between the two blocks, so the label
     // holds still as the session segment comes and goes.
     const start = Math.floor((W - mw) / 2);
@@ -1507,9 +1552,20 @@ export class TUI {
     // branch can never produce the over-wide line the other branch can, so the
     // two are not interchangeable.
     const midFits = mw > 0 && start - lw >= HEAD_GAP && (W - rw) - (start + mw) >= HEAD_GAP;
+    // Line-centring is a position, not a fit. The two blocks are different
+    // widths, so a label small enough for the gap can still be pushed inside
+    // one of them by where the centre of the LINE falls — and that, not width,
+    // is what used to drop the label every time the session segment grew,
+    // leaving a header that silently stopped naming the build it exists to
+    // name. Centre it in the GAP instead, which is exact by construction: the
+    // two runs below sum to `room`. The label moves when sessions come and go,
+    // which is the price; being able to read it is what that buys.
+    const gapPad = mw > 0 && room - mw >= 2 * HEAD_GAP ? Math.floor((room - mw) / 2) : -1;
     lines.push(midFits
       ? left + ' '.repeat(start - lw) + mid + ' '.repeat(W - rw - start - mw) + right
-      : left + ' '.repeat(Math.max(1, W - lw - rw)) + right);
+      : gapPad >= 0
+        ? left + ' '.repeat(gapPad) + mid + ' '.repeat(room - mw - gapPad) + right
+        : left + ' '.repeat(Math.max(1, W - lw - rw)) + right);
     lines.push(' ' + dim('─'.repeat(W - 2)));
 
     const footerH = 2;
@@ -2293,7 +2349,7 @@ export class TUI {
       case 'normal':
         return this.remote
           ? ` ${bold('s')}witch  ${bold('R')}eload  ${bold('q')}uit`
-          : ` ${bold('s')}witch  ${bold('d')}isable  ${bold('p')}robe quota  ${bold('R')}eload  ${bold('g')} settings  ${bold('q')}uit`;
+          : ` ${bold('s')}witch  ${bold('d')}isable  ${bold('p')}robe quota  ${bold('R')}eload${this.onRestart ? `  ${bold('u')}pdate` : ''}  ${bold('g')} settings  ${bold('q')}uit`;
       case 'settings':
         return ` ${dim('↑↓')} navigate  ${dim('←→')} change  ${bold('Enter')} edit  ${bold('Esc')} back`;
       case 'routes':

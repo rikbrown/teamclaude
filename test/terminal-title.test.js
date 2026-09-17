@@ -22,6 +22,30 @@ test('truncates a long account name so the title stays short', () => {
   assert.ok(out.endsWith('…'), out);
 });
 
+// The title is the only surface left readable when the window is behind
+// something else, which is exactly the state a server is in when an unattended
+// restart swaps the build under it.
+test('the title names the build that is running', () => {
+  assert.equal(formatTerminalTitle({ index: 0, total: 4, name: 'work', version: '1.1.20-rik.11' }),
+    'teamclaude 1/4 work 1.1.20-rik.11');
+  assert.equal(formatTerminalTitle({ index: 1, total: 2, version: 'f265cb7' }), 'teamclaude 2/2 f265cb7');
+});
+
+test('a title with no version is the title as it was before there was one', () => {
+  assert.equal(formatTerminalTitle({ index: 0, total: 4, name: 'work' }), 'teamclaude 1/4 work');
+  assert.equal(formatTerminalTitle({ index: 0, total: 4, name: 'work', version: null }), 'teamclaude 1/4 work');
+});
+
+test('a long name and a long version together cannot run away with the tab', () => {
+  const out = formatTerminalTitle({
+    index: 0, total: 1,
+    name: 'user@example.com (Some Very Long Org Name)',
+    version: 'v1.2.3-rc.1+build.20260917.deadbeef',
+  });
+  assert.ok(out.length <= 'teamclaude 1/1 '.length + 24 + 1 + 20, `runaway title: ${out}`);
+  assert.ok(out.endsWith('…'), `the version is what gets cut: ${out}`);
+});
+
 test('titleSequence wraps in OSC 0 ... BEL', () => {
   assert.equal(titleSequence('teamclaude 1/4 work'), '\x1b]0;teamclaude 1/4 work\x07');
 });

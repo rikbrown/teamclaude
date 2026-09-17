@@ -101,6 +101,7 @@ export function createDefaultConfig() {
     sessionTitles: { enabled: false, width: 18 },
     projection: { enabled: true, windowMinutes: 90, wasteFloor: 0.1 },
     eventLogging: 'hide',
+    activityLog: null,
     blockedModels: [],
     accounts: [],
   };

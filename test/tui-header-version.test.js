@@ -1,18 +1,24 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { TUI, displayWidth, fitHeadLabel } from '../src/tui.js';
+import { TUI, displayWidth } from '../src/tui.js';
 import { RemoteAccountManager } from '../src/tui-remote.js';
 
-// The header is one line built from three pieces that must add up to exactly
-// the terminal width: the title, a centred version label, and the port block
-// pinned to the right edge. Every case below is really the same assertion —
-// the arithmetic holds, or the right edge drifts and fitLine eats the liveness
-// marker.
+// The header names no build. It did once, centred between the title and the
+// port block, and holding it there was most of what this file used to test; the
+// build is named once now, in the corner of the footer (tui-footer-version).
+//
+// What survives is the invariant all that arithmetic existed to protect, and
+// which a simpler header can break just as quietly: the line is exactly the
+// terminal width. Short, and the paint loop pads it; long, and fitLine takes
+// the tail — which is the port block and the liveness marker on the end of it.
+//
+// The rest of the file is here to keep the label from coming back.
 
-function fakeAm(sessions) {
+function fakeAm({ sessions = 0, connected } = {}) {
   return {
     accounts: [],
     currentIndex: -1, switchThreshold: 0.98,
+    connected,
     getRoutes() { return []; },
     sessionStats() { return { active: sessions, known: sessions }; },
     refreshExpiredQuotas() {},
@@ -20,7 +26,7 @@ function fakeAm(sessions) {
   };
 }
 
-function makeTUI({ am = fakeAm(0), ...opts } = {}) {
+function makeTUI({ am = fakeAm(), ...opts } = {}) {
   return new TUI({
     accountManager: am, config: { proxy: { port: 1 }, accounts: [], routes: [] }, sx: null,
     saveConfig: async () => {}, syncAccounts: async () => 0, onQuit: () => {}, probeQuota: null,
@@ -38,7 +44,9 @@ function renderRaw(tui, W) {
   try {
     tui._paint = buf => { frame = buf; };
     tui.running = true;
-    tui.render(true);
+    // An object, not `true`: the signature is `render({ force = false } = {})`,
+    // so a boolean destructures to nothing and forces no paint whatsoever.
+    tui.render({ force: true });
   } finally {
     if (cols) Object.defineProperty(process.stdout, 'columns', cols);
     if (rows) Object.defineProperty(process.stdout, 'rows', rows);
@@ -53,12 +61,17 @@ const count = (s, ch) => [...s].filter(c => c === ch).length;
 
 const WIDTHS = [40, 44, 50, 60, 80, 100, 120, 200];
 
-test('the header is exactly the terminal width at every size, with or without a label', () => {
+// Labels spanning the ladder this line used to run: one that fit anywhere, one
+// that had to be cut, and a checkout label carrying build metadata to spend.
+// None of them may reach the header now.
+const LABELS = ['', 'v1.2.3', '1.1.20-pr378', '1.1.20-rik.12+acc19b3'];
+
+test('the header is exactly the terminal width at every size', () => {
   for (const W of WIDTHS) {
     for (const sessions of [0, 3]) {
       for (const updateAvailable of [false, true]) {
-        for (const versionLabel of ['', 'v1.2.3', '1.1.20-pr378', '1.1.20-rik.12+acc19b3']) {
-          const line = header(makeTUI({ am: fakeAm(sessions), versionLabel, updateAvailable }), W);
+        for (const versionLabel of LABELS) {
+          const line = header(makeTUI({ am: fakeAm({ sessions }), versionLabel, updateAvailable }), W);
           const where = `W=${W} sess=${sessions} upd=${updateAvailable} label=${versionLabel || '(none)'}`;
           assert.equal(displayWidth(line), W, `${where}: width ${displayWidth(line)}`);
           assert.ok(line.endsWith('Port 1 ▲ '), `${where}: right block clipped — ${JSON.stringify(line.slice(-12))}`);
@@ -68,96 +81,60 @@ test('the header is exactly the terminal width at every size, with or without a 
   }
 });
 
-test('the label is centred on the line and does not move when sessions appear', () => {
-  const at = sessions => header(makeTUI({ am: fakeAm(sessions), versionLabel: 'v1.2.3' }), 100).indexOf('v1.2.3');
-  assert.equal(at(0), Math.floor((100 - 'v1.2.3'.length) / 2));
-  assert.equal(at(3), at(0));
+test('and it names no build at any of them', () => {
+  for (const W of WIDTHS) {
+    for (const sessions of [0, 3]) {
+      for (const versionLabel of LABELS.filter(Boolean)) {
+        const line = header(makeTUI({ am: fakeAm({ sessions }), versionLabel, updateAvailable: true }), W);
+        const where = `W=${W} sess=${sessions} label=${versionLabel}`;
+        assert.doesNotMatch(line, /1\.1\.20|1\.2\.3|acc19b3/, `${where}: ${JSON.stringify(line)}`);
+        assert.doesNotMatch(line, /…/, `${where}: a label cut down is still a label`);
+      }
+    }
+  }
 });
 
-test('the update marker is a second triangle, drawn only when an update is known', () => {
-  const on = header(makeTUI({ versionLabel: 'v1.2.3', updateAvailable: true }), 100);
-  assert.match(on, /v1\.2\.3 ▲/);
-  assert.equal(count(on, '▲'), 2);
-
-  const off = header(makeTUI({ versionLabel: 'v1.2.3', updateAvailable: false }), 100);
-  assert.match(off, /v1\.2\.3(?! ▲)/);
-  assert.equal(count(off, '▲'), 1);
+test('the label changes nothing at all about the line it used to sit on', () => {
+  for (const W of WIDTHS) {
+    for (const sessions of [0, 3]) {
+      const bare = header(makeTUI({ am: fakeAm({ sessions }) }), W);
+      for (const versionLabel of LABELS) {
+        for (const updateAvailable of [false, true]) {
+          const line = header(makeTUI({ am: fakeAm({ sessions }), versionLabel, updateAvailable }), W);
+          assert.equal(line, bare,
+            `W=${W} sess=${sessions} upd=${updateAvailable} label=${versionLabel || '(none)'}`);
+        }
+      }
+    }
+  }
 });
 
-// Centring on the LINE is a position, not a fit: with two blocks of different
-// widths a label small enough for the gap can still land inside one of them,
-// and the label was then dropped entirely — so the header stopped naming the
-// build every time the session segment grew, which is most of the time.
-test('a label that will not centre is shortened and shifted rather than dropped', () => {
-  const line = header(makeTUI({ am: fakeAm(3), versionLabel: '1.1.20-rik.11' }), 48);
-  assert.equal(displayWidth(line), 48);
-  assert.match(line, /rik\.11/, 'the tail is what tells one build from the next');
-  assert.match(line, /…/, 'and it says it was cut');
-  assert.ok(line.endsWith('Port 1 ▲ '), `right block clipped — ${JSON.stringify(line.slice(-12))}`);
+// This line carried two green ▲ for a while: the liveness marker beside the
+// port, and the update marker beside the label. One of them is gone, and the
+// one left means what it always meant.
+test('the only triangle left on the line is the liveness marker', () => {
+  for (const updateAvailable of [false, true]) {
+    const line = header(makeTUI({ versionLabel: '1.1.20-rik.12+acc19b3', updateAvailable }), 100);
+    assert.equal(count(line, '▲'), 1, `upd=${updateAvailable}: ${JSON.stringify(line)}`);
+  }
+  // And it still turns over when contact is lost, which is the whole of its job.
+  const lost = header(makeTUI({ am: fakeAm({ connected: false }), updateAvailable: true }), 100);
+  assert.equal(count(lost, '▲'), 0);
+  assert.equal(count(lost, '▼'), 1);
 });
 
-test('shortening keeps the update marker, which is the actionable half', () => {
-  const line = header(makeTUI({ am: fakeAm(3), versionLabel: '1.1.20-rik.11', updateAvailable: true }), 52);
-  assert.equal(displayWidth(line), 52);
-  assert.equal(count(line, '▲'), 2);
-});
-
-// ── a checkout label, which is two answers joined ────────────
-//
-// `<version>+<sha>` answers two different questions, and the header has room
-// for both only some of the time. The version is what survives: a sha says
-// which commit, never which build, and "which build am I on" is the question
-// the header exists to answer.
-
-test('a checkout label is drawn whole when the header has the room', () => {
-  const line = header(makeTUI({ am: fakeAm(3), versionLabel: '1.1.20-rik.12+acc19b3' }), 100);
-  assert.equal(displayWidth(line), 100);
-  assert.match(line, /1\.1\.20-rik\.12\+acc19b3/);
-});
-
-test('a checkout label too wide for the header loses the sha, not the version', () => {
-  const line = header(makeTUI({ am: fakeAm(3), versionLabel: '1.1.20-rik.12+acc19b3' }), 56);
-  assert.equal(displayWidth(line), 56);
-  assert.match(line, /1\.1\.20-rik\.12/, 'the version arrives intact');
-  assert.doesNotMatch(line, /acc19b3|\+/, 'and the sha is what paid for it');
-  assert.doesNotMatch(line, /…/, 'dropping metadata is not a cut of the version');
-});
-
-test('a checkout label narrower still keeps the version tail, never the sha', () => {
-  const line = header(makeTUI({ am: fakeAm(3), versionLabel: '1.1.20-rik.12+acc19b3' }), 48);
-  assert.equal(displayWidth(line), 48);
-  assert.match(line, /rik\.12/, 'the tail is what tells one build from the next');
-  assert.match(line, /…/, 'and it says it was cut');
-  assert.doesNotMatch(line, /acc19b3/);
-  assert.ok(line.endsWith('Port 1 ▲ '), `right block clipped — ${JSON.stringify(line.slice(-12))}`);
-});
-
-// The ladder on its own, without the header arithmetic in the way.
-test('fitHeadLabel spends build metadata before it cuts the version', () => {
-  const label = '1.1.20-rik.12+acc19b3';
-  assert.equal(fitHeadLabel(label, 21), label);
-  assert.equal(fitHeadLabel(label, 20), '1.1.20-rik.12');
-  assert.equal(fitHeadLabel(label, 13), '1.1.20-rik.12');
-  assert.equal(fitHeadLabel(label, 9), '…0-rik.12');
-  assert.equal(fitHeadLabel(label, 3), '');
-});
-
-test('fitHeadLabel leaves a label with no build metadata exactly as it was', () => {
-  assert.equal(fitHeadLabel('v1.2.3', 100), 'v1.2.3');
-  assert.equal(fitHeadLabel('1.1.20-rik.12', 13), '1.1.20-rik.12');
-  assert.equal(fitHeadLabel('1.1.20-rik.12', 9), '…0-rik.12');
-  assert.equal(fitHeadLabel('1.1.20-rik.12', 3), '');
-});
-
-test('a header too narrow for the label drops it whole, falling back verbatim', () => {
-  const narrow = header(makeTUI({ am: fakeAm(3), versionLabel: '1.1.20-pr378', updateAvailable: true }), 40);
-  assert.doesNotMatch(narrow, /1\.1\.20/);
-  assert.equal(count(narrow, '▲'), 1);
-  assert.equal(narrow, header(makeTUI({ am: fakeAm(3) }), 40));
-});
-
-test('a TUI given no label renders the header it rendered before there was one', () => {
-  assert.equal(header(makeTUI(), 80), header(makeTUI({ versionLabel: '' }), 80));
+test('a header the two blocks alone overrun is cut, not thrown', () => {
+  // ' '.repeat(-1) throws, so the one padding run left on this line is floored
+  // rather than trusted. At 40 columns a distributing session segment leaves
+  // the title and the port block wider than the line between them: fitLine
+  // takes the tail, as it does for any over-long line, and the header is still
+  // exactly the width. The right block is what pays, which is why this case
+  // makes no claim about the end of the line.
+  const am = fakeAm({ sessions: 3 });
+  am.distributeSessions = true;
+  am.distributionMode = 'adaptive';
+  const line = header(makeTUI({ am, versionLabel: '1.1.20-rik.12+acc19b3' }), 40);
+  assert.equal(displayWidth(line), 40);
 });
 
 // ── attach mode ──────────────────────────────────────────────
@@ -173,30 +150,20 @@ function remoteTUI(server, opts = {}) {
   return makeTUI({ am, remote: true, applySwitch: async () => {}, ...opts });
 }
 
-test('the attached dashboard names the server build, not its own', () => {
+test('an attached dashboard names no build up here either, local or server', () => {
   const line = header(remoteTUI(
     { version: '1.0.0', versionLabel: 'v9.9.9', updateAvailable: true },
     { versionLabel: 'ignored-local', updateAvailable: false },
   ), 100);
-  assert.match(line, /v9\.9\.9 ▲/);
-  assert.doesNotMatch(line, /ignored-local/);
-});
-
-test('a server that only sends version still gets a label, and no update marker', () => {
-  const line = header(remoteTUI({ version: '1.0.0' }), 100);
-  assert.match(line, /1\.0\.0/);
-  assert.equal(count(line, '▲'), 1);
-});
-
-test('a server that sends no version block leaves the header as it was', () => {
-  const line = header(remoteTUI(null), 100);
   assert.equal(displayWidth(line), 100);
+  assert.doesNotMatch(line, /9\.9\.9|1\.0\.0|ignored-local/);
   assert.equal(count(line, '▲'), 1);
 });
 
-test('a version label off the wire cannot put an escape sequence in the frame', () => {
-  const frame = renderRaw(remoteTUI({ versionLabel: 'v1\x1b[2J\x1b]52;c;aGk=\x07evil' }), 100);
-  const rest = stripSgr(frame).replace(cursorCodes, '');
-  assert.doesNotMatch(rest, /[\x1b\x07\x9b]/);
-  assert.match(rest, /v1/);
+test('a hostile label off the wire leaves the header exactly as it was', () => {
+  // The corner sanitizes what it draws, and tui-footer-version holds it to
+  // that. The header's defence is simpler: it draws none of it.
+  const line = header(remoteTUI({ versionLabel: 'v1\x1b[2J\x1b]52;c;aGk=\x07evil' }), 100);
+  assert.equal(line, header(remoteTUI(null), 100));
+  assert.doesNotMatch(line, /evil/);
 });

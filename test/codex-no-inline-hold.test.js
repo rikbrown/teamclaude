@@ -25,19 +25,24 @@ function listen(server) {
 const RETRY_AFTER_WELL_UNDER_THE_ABSORB_CAP = '5';
 
 /** One request through the proxy against an upstream that always 429s. */
-async function run({ provider, path }) {
+async function run({ provider, path, retryAfter = RETRY_AFTER_WELL_UNDER_THE_ABSORB_CAP, accounts = 1 }) {
   let upstreamHits = 0;
   const upstream = http.createServer((_req, res) => {
     upstreamHits++;
-    res.writeHead(429, { 'retry-after': RETRY_AFTER_WELL_UNDER_THE_ABSORB_CAP, 'content-type': 'application/json' });
+    // Without retry-after (and without any anthropic-ratelimit-* header) this is
+    // a HEADERLESS 429 — the shape that draws the retry-once path rather than
+    // the throttle path.
+    const headers = { 'content-type': 'application/json' };
+    if (retryAfter != null) headers['retry-after'] = retryAfter;
+    res.writeHead(429, headers);
     res.end(JSON.stringify({ type: 'error', error: { type: 'rate_limit_error' } }));
   });
   const upstreamPort = await listen(upstream);
 
-  const am = new AccountManager([{
-    name: 'a', type: 'oauth', provider, accessToken: 't', refreshToken: 'r',
+  const am = new AccountManager(Array.from({ length: accounts }, (_unused, i) => ({
+    name: `a${i}`, type: 'oauth', provider, accessToken: 't', refreshToken: 'r',
     expiresAt: Date.now() + 3600_000, upstream: `http://127.0.0.1:${upstreamPort}`,
-  }], 0.98);
+  })), 0.98);
   const proxy = createProxyServer(am, { proxy: { apiKey: 'k' }, upstream: `http://127.0.0.1:${upstreamPort}` });
   const proxyPort = await listen(proxy);
 
@@ -92,4 +97,25 @@ test('holdsConnection: only the provider whose client actually waits', () => {
   assert.equal(holdsConnection(undefined), true);
   assert.equal(holdsConnection(null), true);
   assert.equal(holdsConnection('nonsense'), true);
+});
+
+// The retry-once path for a HEADERLESS 429 (no retry-after, no
+// anthropic-ratelimit-*) waits before re-asking, so it owes the same debt to
+// holdsConnection as the absorb above. Both of its branches are pinned here:
+// with no sibling to hop to, and after the hop has already moved the request.
+
+test('a headerless Codex 429 is answered now, not retried after a wait', async () => {
+  const r = await run({ provider: 'codex', path: '/backend-api/codex/responses', retryAfter: null });
+  assert.equal(r.status, 429);
+  assert.equal(r.upstreamHits, 1, 'the retry must not run for a caller that will not wait');
+  assert.ok(r.elapsed < 1500, `answered in ${r.elapsed}ms; the retry would have added a 2s wait first`);
+});
+
+test('nor after the failover hop, with a sibling to hop to', async () => {
+  const r = await run({ provider: 'codex', path: '/backend-api/codex/responses', retryAfter: null, accounts: 2 });
+  assert.equal(r.status, 429);
+  // The hop itself is fine — it costs no wait. What must not follow is the
+  // timed retry on top of it.
+  assert.ok(r.upstreamHits <= 2, `upstream saw ${r.upstreamHits} attempts; the hop may try twice, the timed retry must not make it three`);
+  assert.ok(r.elapsed < 1500, `answered in ${r.elapsed}ms; expected no 2s wait`);
 });

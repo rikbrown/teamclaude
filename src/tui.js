@@ -287,19 +287,31 @@ export function fitLine(s, w) {
 
 /** The build label at `max` columns, or '' when nothing legible fits.
  *
- *  Cut from the LEFT, unlike every other truncation here, because what tells
- *  one build from the next is its tail: `…rik.11` still identifies the build,
- *  `1.1.2…` identifies the three before it just as well. Sliced by code unit
- *  against a display-width budget — a version or a sha is ASCII, and a label
- *  arriving over the wire is measured again by the caller before it is placed,
- *  so a wide glyph costs the label its slot rather than the header its width.
+ *  Build metadata is spent before anything is cut. A checkout labels itself
+ *  `<version>+<sha>`, and of the two it is the version the header is read for;
+ *  the sha only says which build of it. Shortening the sha instead would be
+ *  worse than losing it — four hex digits name no commit, and are read as if
+ *  they did.
+ *
+ *  What is left is cut from the LEFT, unlike every other truncation here,
+ *  because what tells one build from the next is its tail: `…rik.11` still
+ *  identifies the build, `1.1.2…` identifies the three before it just as well.
+ *  Sliced by code unit against a display-width budget — a version or a sha is
+ *  ASCII, and a label arriving over the wire is measured again by the caller
+ *  before it is placed, so a wide glyph costs the label its slot rather than
+ *  the header its width.
  *  @param {string} label
  *  @param {number} max */
 export function fitHeadLabel(label, max) {
-  const w = vw(label);
-  if (max >= w) return label;
+  if (max >= vw(label)) return label;
+  // Everything after the last `+` is semver build metadata, which is by
+  // definition not the identity — so it is what gets spent first. `> 0` keeps a
+  // label that is nothing but metadata from being spent down to nothing.
+  const plus = label.lastIndexOf('+');
+  const bare = plus > 0 ? label.slice(0, plus) : label;
+  if (max >= vw(bare)) return bare;
   if (max < HEAD_LABEL_MIN) return '';
-  return `…${label.slice(label.length - (max - 1))}`;
+  return `…${bare.slice(bare.length - (max - 1))}`;
 }
 
 function formatReset(resetTs) {

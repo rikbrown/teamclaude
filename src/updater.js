@@ -31,7 +31,7 @@ const LABEL_MAX = 32;
 const pexec = promisify(execFile);
 
 /** Package root = one directory above this file's src/ directory. */
-function packageRoot() {
+export function packageRoot() {
   return resolve(dirname(fileURLToPath(import.meta.url)), '..');
 }
 

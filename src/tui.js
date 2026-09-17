@@ -504,6 +504,15 @@ export class TUI {
     this.frame = 0;
     this.running = false;
     this.timer = null;
+    // Set while THIS PROCESS is draining to be relaunched: when the wait
+    // started, what bounds it, and how to ask how much is still running.
+    // Deliberately not named `draining`: the header's `drain N` marker and the
+    // account manager's drainingCount() are SESSION draining — sessions being
+    // moved off an account during a rotation — and the two have nothing to do
+    // with each other. One is a request finishing somewhere else; this one is
+    // the process going away.
+    /** @type {{ startedAt: number, deadlineMs: number, inFlight: () => number }|null} */
+    this._restartDrain = null;
     // Injectable so a test can drive the repaint tick by hand instead of
     // sleeping through real 500ms/5s intervals.
     this._setTimeout = setTimeout;
@@ -582,8 +591,11 @@ export class TUI {
     this._scheduleTick();
   }
 
-  /** Fast while something is animating, slow when there is nothing to animate. */
-  _tickDelay() { return this.active.size > 0 ? SPIN_MS : IDLE_TICK_MS; }
+  /** Fast while something is animating, slow when there is nothing to animate.
+   *  A restart drain counts as animating: an idle tick is five seconds, and an
+   *  elapsed counter that moves once every five of them reads as a frozen
+   *  screen — which is the complaint keeping the display up exists to answer. */
+  _tickDelay() { return (this.active.size > 0 || this._restartDrain) ? SPIN_MS : IDLE_TICK_MS; }
 
   _scheduleTick() {
     if (!this.running) return;
@@ -636,6 +648,28 @@ export class TUI {
     // costs nothing.
     try { process.stdin.setRawMode(false); } catch {}
     process.stdin.pause();
+  }
+
+  /**
+   * The server has begun draining to be relaunched: its listener is closed and
+   * it is waiting out the requests still running before it exits on 75.
+   *
+   * The display stays up for all of it, and this is what puts the drain on it.
+   * The wait is up to 30 seconds the operator asked for by pressing `u`, and
+   * the two things they want from it — how long it has run, and what is still
+   * holding it — are already here. The dashboard used to come down first, so
+   * the answer to both was a blank console for the duration.
+   *
+   * There is no matching "ended": the process exits at the end of the drain,
+   * and stop() is what takes the screen back (index.js, immediately before the
+   * exit and on every abrupt way out of one).
+   *
+   * @param {{ deadlineMs: number, inFlight: () => number }} drain
+   */
+  restartDrainStarted({ deadlineMs, inFlight }) {
+    this._restartDrain = { startedAt: Date.now(), deadlineMs, inFlight };
+    this._retick();   // idle cadence → something to animate again
+    if (this.running) this.render();
   }
 
   // A title lookup costs a directory scan and a file read, so it stays off the
@@ -713,6 +747,17 @@ export class TUI {
 
   _key(k) {
     if (k === 'ctrl-c') { this.stop(); this.onQuit?.(); return; }
+
+    // Draining to a restart: the listener is closed and this process is on its
+    // way out, so switching, disabling, probing, syncing or editing anything
+    // would act on state that is about to be discarded, and `u` is already
+    // running. Ctrl-c above stays the one key that means something — the escape
+    // from the wait — and the footer says so, which is why nothing is logged
+    // for the rest: a line per keypress would push the drain's own progress out
+    // of the pane. `q` is not an exception on purpose. An unattended restart
+    // can begin while the operator is typing into a prompt, and a letter key
+    // that quietly became "quit" is a poor way to find that out.
+    if (this._restartDrain) return;
 
     switch (this.mode) {
       case 'normal': this._keyNormal(k); break;
@@ -1169,12 +1214,15 @@ export class TUI {
 
   // `u`: pick up a new build now instead of waiting for the next lull. The
   // server owns what happens next — it drains, then exits asking to be
-  // relaunched — and it stops this TUI first, so the line below is on screen
-  // only for the instant before the display goes and the drain reports itself
-  // in plain text.
+  // relaunched — and it now keeps this TUI up for the whole drain, which is
+  // where the progress goes (restartDrainStarted, and the footer). Its own
+  // "draining, up to 30s" line lands in the pane beside the counter, so there
+  // is nothing left for this to announce.
+  //
+  // A second `u` is not a second restart: the server guards on its own flag and
+  // would do nothing at all, so a log line here would be a claim that it had.
   _doRestart() {
-    if (!this.onRestart) return;
-    this._addLog('Draining before restart...');
+    if (!this.onRestart || this._restartDrain) return;
     this.onRestart();
   }
 
@@ -1724,7 +1772,7 @@ export class TUI {
 
     // ── Footer
     lines.push(' ' + dim('─'.repeat(W - 2)));
-    lines.push(this._renderFooter());
+    lines.push(this._renderFooter(W));
 
     // Write buffer
     let buf = `${ESC}H`;
@@ -2329,7 +2377,12 @@ export class TUI {
     }
   }
 
-  _renderFooter() {
+  /** @param {number} [W]  columns to compose against; only the drain line uses it */
+  _renderFooter(W = process.stdout.columns || 80) {
+    // A restart drain outranks every mode: the keys this line would otherwise
+    // advertise are all refused while one runs (see _key), and how far the
+    // drain has got is the only thing on screen worth the row.
+    if (this._restartDrain) return this._restartDrainFooter(this._restartDrain, W);
     switch (this.mode) {
       case 'normal':
         return this.remote
@@ -2365,5 +2418,31 @@ export class TUI {
       default:
         return '';
     }
+  }
+
+  /**
+   * The footer while this process drains to a restart: how long the wait has
+   * run against the bound it cannot exceed, what is still holding it, and the
+   * way out of it.
+   *
+   * Elapsed against the deadline, not a countdown. The drain ends when the last
+   * request does, which is usually long before 30s, so a number counting down
+   * to a moment that will not arrive would be the wrong kind of wrong — worse
+   * than one counting up to a bound that may never be reached.
+   *
+   * Whole seconds: the frame is composed twice a second while a drain runs, and
+   * tenths would buy a full repaint every time for a digit nobody reads.
+   *
+   * Cut by dropping a whole clause rather than by leaving it to fitLine, which
+   * truncates the tail — and at 40 columns the tail is the escape hatch.
+   *
+   * @param {{ startedAt: number, deadlineMs: number, inFlight: () => number }} drain
+   * @param {number} W
+   */
+  _restartDrainFooter(drain, W) {
+    const secs = Math.max(0, Math.round((Date.now() - drain.startedAt) / 1000));
+    const state = `${yellow('Restarting')}  ${secs}s/${Math.round(drain.deadlineMs / 1000)}s  ${drain.inFlight()} in flight`;
+    const lines = [` ${state}  ${dim('ctrl-c to go now')}`, ` ${state}`];
+    return lines.find(line => vw(line) <= W) ?? lines[lines.length - 1];
   }
 }

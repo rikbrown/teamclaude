@@ -775,11 +775,27 @@ async function serverCommand() {
   // instead of re-running teardown, which would re-arm server.close() and leak a
   // 'close' listener on the server each time (MaxListenersExceededWarning).
   let shuttingDown = false;
-  async function shutdown() {
-    if (shuttingDown) process.exit(0); // second ctrl-c: stop waiting, just go
-    shuttingDown = true;
+  // Everything this process borrowed from the terminal, given back: at most
+  // once, never throwing, and on every path that leaves. shutdown() does it
+  // first, as it always has. A restart drain now keeps the display up to the
+  // last moment and does it last — which makes the guard below, the "stop
+  // waiting, just go" path, the one that would otherwise walk out of a drain
+  // leaving the operator on the alternate screen with raw mode still on and a
+  // terminal they cannot type into.
+  const restoreTerminal = () => {
     try { tui?.stop(); } catch { /* terminal already restored */ }
+    // Stopping the title belongs here rather than at the top of a drain: while
+    // one runs the title still names the build that is running, which is the
+    // whole reason it carries the build at all.
     stopTitle();
+  };
+  async function shutdown() {
+    // Second ctrl-c, or a signal arriving during a restart drain: stop waiting,
+    // just go — but hand the terminal back first, because nothing after this
+    // line runs and on the drain path the display is still up.
+    if (shuttingDown) { restoreTerminal(); process.exit(0); }
+    shuttingDown = true;
+    restoreTerminal();
     if (!tui) console.log('\n[TeamClaude] Shutting down...');
     prober?.stop();
     warmer?.stop();
@@ -810,6 +826,12 @@ async function serverCommand() {
   // stops accepting while the connections already open keep serving; then the
   // bounded wait; then the sidecar, whose replacement the next process spawns;
   // then quota state, exactly as shutdown() persists it. Exit 75 is the ask.
+  //
+  // The display is the other difference. shutdown() tears it down first; this
+  // keeps it to the end. A drain is up to thirty seconds of waiting the
+  // operator asked for, and taking the dashboard away at the start of it left
+  // them watching plain console lines with no way to tell how far it had got or
+  // what was holding it.
   let draining = false;
   hooks.isDraining = () => draining;
   /** @param {string} why  what put the restart in motion, for the line on the way out */
@@ -817,12 +839,19 @@ async function serverCommand() {
     if (shuttingDown) return; // ctrl-c beat us here, or a second trigger did
     shuttingDown = true;
     draining = true;
-    try { tui?.stop(); } catch { /* terminal already restored */ }
-    stopTitle();
+    tui?.restartDrainStarted({
+      deadlineMs: DRAIN_DEADLINE_MS,
+      inFlight: () => accountManager.inFlightRequests(),
+    });
+    // Under the TUI console.log IS the log pane (tui.js), so this line and the
+    // two the drain ends with report themselves on screen beside the live
+    // counter, and nothing extra has to be written for them.
     console.log(`\n[TeamClaude] ${why} — draining, up to ${Math.round(DRAIN_DEADLINE_MS / 1000)}s for requests in flight.`);
     prober?.stop();
     warmer?.stop();
     eventLoopMonitor.stop();
+    /** @type {string|null} */
+    let failure = null;
     // Nothing below may throw its way out. Neither caller awaits this — the TUI
     // key returns to its handler and the watcher fires from a timer — so an
     // escaping rejection would be an unhandled one, and crash-log.js turns that
@@ -840,11 +869,21 @@ async function serverCommand() {
       if (quotaSaveInterval) clearInterval(quotaSaveInterval);
       await persistQuotaState();
     } catch (err) {
-      // Committed from the moment the display came down and the listener
-      // closed: there is no serving state left to return to, so say what broke
-      // and let the relaunch be the recovery.
-      console.error(`[TeamClaude] Drain failed: ${err.message}`);
+      // Committed from the moment the listener closed: there is no serving
+      // state left to return to, so record what broke and let the relaunch be
+      // the recovery. Read off `err` defensively because throwing HERE is the
+      // one thing the try above cannot absorb, and an unhandled rejection out
+      // of this function is exit 1 — a crash, on the path whose whole purpose
+      // is to come back.
+      failure = /** @type {any} */ (err)?.message || String(err);
+    } finally {
+      // The last thing before the exit, and in a finally because the catch is
+      // not the only way out of the block above.
+      restoreTerminal();
     }
+    // After the restore, so it lands on the screen the relaunch comes back to
+    // rather than in a log pane that goes with the alternate screen.
+    if (failure) console.error(`[TeamClaude] Drain failed: ${failure}`);
     process.exit(RESTART_EXIT_CODE);
   }
 

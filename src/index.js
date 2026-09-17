@@ -37,6 +37,8 @@ import { SessionTitles } from './session-titles.js';
 import { RemoteControl, createAttachSession } from './tui-remote.js';
 import { SxManager } from './sx.js';
 import { autoUpdate, checkForUpdate, currentVersion, resolveVersionLabel, runUpdate, installKind, updateAvailableFromCache, PKG_NAME } from './updater.js';
+import { drainServer, superviseServer, DRAIN_DEADLINE_MS, RESTART_COUNT_ENV, RESTART_EXIT_CODE, SUPERVISED_ENV } from './restart.js';
+import { createVersionSource, UpdateWatcher } from './update-watch.js';
 import { renderStatus, formatPercent } from './status-renderer.js';
 import { sanitizeText } from './safe-text.js';
 import { ClientUsageTracker, UsageDimensionTracker } from './client-usage.js';
@@ -223,6 +225,12 @@ switch (command) {
 // ── server ──────────────────────────────────────────────────
 
 async function serverCommand() {
+  // --supervise: this process supervises, it does not serve. The config, the
+  // accounts, the certificates and the terminal all belong to the child it
+  // starts, so this branch comes before any of them is touched.
+  if (args.includes('--supervise')) {
+    process.exit(await superviseServer());
+  }
   // Installed first: the server is the long-lived process, it runs under a TUI
   // that repaints over anything Node prints on the way out, and a crash here
   // takes every routed session with it. Without this, a proxy that vanished
@@ -331,6 +339,7 @@ async function serverCommand() {
   const persistQuotaState = () =>
     saveState({ quota: accountManager.exportQuotaState(), clients: clientUsage.export(), usageDimensions: dimensionUsage.export(), sidecars: sidecar?.exportPids() || savedState?.sidecars || {} })
       .catch(err => console.error(`[TeamClaude] Failed to save quota state: ${err.message}`));
+  /** @type {ReturnType<typeof setInterval>|null} */
   let quotaSaveInterval = null;
 
   // Persist refreshed tokens back to config (re-read from disk to avoid clobbering
@@ -376,12 +385,23 @@ async function serverCommand() {
   const headless = args.includes('--headless') || args.includes('--no-tui');
   const useTUI = !headless && process.stdout.isTTY && process.stdin.isTTY;
 
+  // Is anything waiting to relaunch this process? Exit 75 is a request, not a
+  // mechanism: with nothing supervising, it is merely an exit. So the two things
+  // that can ask for one — the `u` key and autoRestart — are wired only when the
+  // answer is yes. `teamclaude server --supervise` sets this on its child, and
+  // the shell loop in docs/usage.md exports it for the same reason.
+  const supervised = process.env[SUPERVISED_ENV] === '1';
+  const restartCount = Number(process.env[RESTART_COUNT_ENV]) || 0;
+
   // Opt-in background quota probe (config.quotaProbeSeconds, default 0 = off).
+  /** @type {Prober|null} */
   let prober = null;
   // Opt-in keep-warm scheduler (interval or persisted reset-target schedule).
+  /** @type {Warmer|null} */
   let warmer = null;
   // Supervised sidecar processes (config.sidecars, default none) — e.g. a local
   // Anthropic→OpenAI translating proxy that a third-party account routes to.
+  /** @type {Sidecar|null} */
   let sidecar = null;
   const serverStartedAt = Date.now();
   // Read once here, not per request: `teamclaude update` swaps package.json on
@@ -493,7 +513,9 @@ async function serverCommand() {
   };
 
   let tui = null;
-  /** @type {Object} */
+  // A bag of optional callbacks the application installs on a shared object the
+  // server, the MITM listener and the control endpoints all read through.
+  /** @type {Record<string, any>} */
   let hooks = {};
 
   if (useTUI) {
@@ -534,6 +556,10 @@ async function serverCommand() {
       // POSIX signals (defined below). In raw mode ctrl-c never reaches the OS as
       // a signal, so without this the process would only tear down via keypress.
       onQuit: () => shutdown(),
+      // `u`. Null without a supervisor: draining to an exit nothing acts on
+      // would take the proxy — and every session on it — down, which is the
+      // opposite of what a key labelled "update" offers.
+      onRestart: supervised ? () => { drainAndRestart('Restart requested'); } : null,
     });
     hooks = {
       onRequestStart: (id, info) => tui.onRequestStart(id, info),
@@ -665,13 +691,14 @@ async function serverCommand() {
     }
     if (tui) {
       tui.start();
-      console.log(`Listening on port ${port} with ${accounts.length} account(s)`);
+      console.log(`Listening on port ${port} with ${accounts.length} account(s) on ${versionLabel}`);
     } else {
       const sep = '='.repeat(60);
       console.log('');
       console.log(sep);
       console.log('  TeamClaude Proxy');
       console.log(sep);
+      console.log(`  Version:    ${versionLabel}`);
       console.log(`  Bind:       ${bindHost}:${port}${bindHost === '127.0.0.1' ? ' (localhost only)' : ' (reachable off-box — ensure proxy.apiKey is set)'}`);
       console.log(`  Accounts:   ${accounts.length}`);
       console.log(`  Threshold:  ${(threshold * 100).toFixed(0)}%`);
@@ -686,11 +713,20 @@ async function serverCommand() {
       console.log(sep);
       console.log('');
     }
+    // Said once, plainly. The complaint this whole path exists to answer is
+    // that the build changes under a window nobody is watching and nothing
+    // anywhere admits it: the title carries the version from here on, and this
+    // line is the moment it changed.
+    if (restartCount > 0) {
+      console.log(`[TeamClaude] Restarted on ${versionLabel} — relaunch #${restartCount} of this supervised run.`);
+    }
   });
 
-  // Reflect the active account in the terminal title so a backgrounded/tabbed
-  // server is glanceable. Works in both TUI and headless modes.
-  const stopTitle = startTerminalTitleUpdater(accountManager);
+  // Reflect the active account and the running build in the terminal title so a
+  // backgrounded/tabbed server is glanceable. Works in both TUI and headless
+  // modes, and is the surface an unattended restart announces itself on: the
+  // title is all that is readable when the window is not the one in front.
+  const stopTitle = startTerminalTitleUpdater(accountManager, versionLabel);
 
   // Persist quota every minute; unref so it never keeps the process alive.
   quotaSaveInterval = setInterval(persistQuotaState, 60_000);
@@ -763,6 +799,82 @@ async function serverCommand() {
   }
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
+
+  // The graceful counterpart to shutdown(), for the other request an operator
+  // can make: not "stop now" but "come back on the new build". shutdown() is
+  // left exactly as it is — destroying live streams is the right answer to
+  // ctrl-c — while this path has to cost the fleet nothing, because the point
+  // of automating it is that it happens while nobody is watching.
+  //
+  // Order matters and is not the same as shutdown()'s. The flag goes up FIRST,
+  // so every answer still to be written carries the header that retires its
+  // socket (markDraining, server.js) — that, not the waiting, is what stops a
+  // restart from breaking sessions that were only ever idle. Then the listener
+  // stops accepting while the connections already open keep serving; then the
+  // bounded wait; then the sidecar, whose replacement the next process spawns;
+  // then quota state, exactly as shutdown() persists it. Exit 75 is the ask.
+  let draining = false;
+  hooks.isDraining = () => draining;
+  /** @param {string} why  what put the restart in motion, for the line on the way out */
+  async function drainAndRestart(why) {
+    if (shuttingDown) return; // ctrl-c beat us here, or a second trigger did
+    shuttingDown = true;
+    draining = true;
+    try { tui?.stop(); } catch { /* terminal already restored */ }
+    stopTitle();
+    console.log(`\n[TeamClaude] ${why} — draining, up to ${Math.round(DRAIN_DEADLINE_MS / 1000)}s for requests in flight.`);
+    prober?.stop();
+    warmer?.stop();
+    eventLoopMonitor.stop();
+    // Nothing below may throw its way out. Neither caller awaits this — the TUI
+    // key returns to its handler and the watcher fires from a timer — so an
+    // escaping rejection would be an unhandled one, and crash-log.js turns that
+    // into exit 1: the supervisor would read a crash and stop, on the one path
+    // whose entire purpose is to come back.
+    try {
+      const { drained, waitedMs, inFlight } = await drainServer({
+        server,
+        inFlight: () => accountManager.inFlightRequests(),
+      });
+      console.log(drained
+        ? `[TeamClaude] Drained in ${(waitedMs / 1000).toFixed(1)}s. Restarting on the new build.`
+        : `[TeamClaude] ${inFlight} request(s) still in flight after ${(waitedMs / 1000).toFixed(0)}s — restarting anyway.`);
+      sidecar?.stop();
+      if (quotaSaveInterval) clearInterval(quotaSaveInterval);
+      await persistQuotaState();
+    } catch (err) {
+      // Committed from the moment the display came down and the listener
+      // closed: there is no serving state left to return to, so say what broke
+      // and let the relaunch be the recovery.
+      console.error(`[TeamClaude] Drain failed: ${err.message}`);
+    }
+    process.exit(RESTART_EXIT_CODE);
+  }
+
+  // Opt-in, and only where a restart would actually happen. Nothing below runs
+  // on a default config, so the install probe behind createVersionSource is not
+  // paid for by anyone who did not ask for this.
+  if (config.autoRestart && !supervised) {
+    console.error('[TeamClaude] autoRestart is set, but nothing will relaunch this process — start it with "teamclaude server --supervise". Auto-restart is off for this run.');
+  } else if (config.autoRestart) {
+    const source = await createVersionSource();
+    if (!source) {
+      console.error('[TeamClaude] autoRestart is set, but this copy is a local or npx install — nothing rewrites it, so a restart would come back on the same build. Auto-restart is off for this run.');
+    } else {
+      new UpdateWatcher({
+        source,
+        // Nothing running and no session still counted active: a restart now
+        // costs a reconnect and nothing else.
+        isIdle: () => accountManager.inFlightRequests() === 0 && accountManager.sessionStats().active === 0,
+        onRestart: ({ build, forced }) => {
+          drainAndRestart(forced
+            ? `Build ${build} is waiting and the fleet has not gone idle`
+            : `Build ${build} is waiting`);
+        },
+      }).start();
+      console.log(`[TeamClaude] Auto-restart is on, watching ${source.describes}.`);
+    }
+  }
 }
 
 // ── import ──────────────────────────────────────────────────
@@ -2214,6 +2326,9 @@ Options:
   --log-to DIR        Log requests/responses to DIR (server, one file per request)
   --activity-log FILE Append TUI activity lines to FILE (server; works in headless mode too)
   --headless          Run the server without the interactive TUI (for backgrounding)
+  --supervise         (server) run the proxy as a child process and relaunch it
+                      whenever it drains for a new build (the TUI's 'u' key, or
+                      the autoRestart setting). Without it neither can restart
   --no-mitm           (run) skip the forward proxy; route via ANTHROPIC_BASE_URL only
   --auto-fallback     (run) if the proxy is down, launch claude directly instead
                       of erroring out (bypasses the proxy: no rotation)
@@ -2425,13 +2540,19 @@ function argValue(flag) {
   return (i >= 0 && args[i + 1]) ? args[i + 1] : null;
 }
 
-// Keep the terminal title in sync with the active account (e.g. "teamclaude 2/4
-// work") so a backgrounded or tabbed `teamclaude server` is glanceable. TTY-only
+// Keep the terminal title in sync with the active account and the running build
+// (e.g. "teamclaude 2/4 work 1.1.20-rik.11") so a backgrounded or tabbed
+// `teamclaude server` is glanceable — and so a restart onto a new build is
+// visible there without anyone going looking. TTY-only
 // — never emit escapes into a pipe, a `--log-to` redirect, or a systemd journal;
 // opt out entirely with TEAMCLAUDE_NO_TITLE. Polls (rather than hooking every
 // currentIndex mutation) and writes only when the title actually changes.
 // Returns an idempotent stop() that restores the shell's previous title.
-function startTerminalTitleUpdater(accountManager) {
+/**
+ * @param {AccountManager} accountManager
+ * @param {string|null} [version]
+ */
+function startTerminalTitleUpdater(accountManager, version = null) {
   const out = process.stdout;
   if (!out.isTTY || process.env.TEAMCLAUDE_NO_TITLE) return () => {};
 
@@ -2440,7 +2561,7 @@ function startTerminalTitleUpdater(accountManager) {
     const total = accountManager.accounts.length;
     const index = Math.min(accountManager.currentIndex || 0, Math.max(0, total - 1));
     const name = accountManager.accounts[index]?.name || null;
-    const title = formatTerminalTitle({ index, total, name });
+    const title = formatTerminalTitle({ index, total, name, version });
     if (title !== last) { last = title; out.write(titleSequence(title)); }
   };
 

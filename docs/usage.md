@@ -227,6 +227,21 @@ When TeamClaude is installed globally via npm, it self-updates in the background
 
 Disable it with `TEAMCLAUDE_DISABLE_AUTOUPDATE=1` or `"autoUpdate": false` in the config.
 
+## Drain and restart
+
+An update only takes effect on the next start, and restarting the proxy by hand means `ctrl-c` — which destroys every streaming response going through it, by design. `teamclaude server --supervise` makes the restart graceful instead: it runs the proxy as a child process and relaunches it whenever it asks to be restarted (exit code `75`). The ask comes from the TUI's `u` key, or, with [`autoRestart`](configuration.md#fields) on, from the server noticing a new build by itself.
+
+What makes it safe to do while sessions are running is the **drain**. The server stops accepting new connections but keeps serving the requests already in flight, and every response it writes from that point carries `Connection: close` — so clients retire their pooled keep-alive sockets themselves instead of discovering them dead on the next request, which is what "a restart breaks my session" usually turns out to be. A request still running after 30 seconds is left behind and the restart proceeds: a stuck stream must not be able to hold a deployment forever. `ctrl-c` is untouched and still means stop now.
+
+A supervised child comes up saying which build it came up on, and the terminal title carries it too (`teamclaude 2/4 work 1.1.20-rik.11`) — the title being the only part of a backgrounded window you can still read.
+
+Neither `u` nor `autoRestart` does anything without a supervisor: exit 75 is a request, and with nothing waiting to act on it the proxy would simply stop. The TUI hides the `u` hint, and a server started with `autoRestart` set says so and leaves it off for that run. If you would rather supervise it yourself, export the marker and loop on the code:
+
+```bash
+export TEAMCLAUDE_SUPERVISED=1
+while true; do teamclaude server; [ "$?" -eq 75 ] || break; done
+```
+
 ## Request logging
 
 Log request/response details to a directory, one file per logged request:

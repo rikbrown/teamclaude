@@ -44,9 +44,22 @@ export function currentVersion(root = packageRoot()) {
 
 /**
  * How the running copy identifies itself, for display: the exact tag when the
- * checkout sits on one, else the short sha, else the shipped package.json
- * version, else the literal `local`. `git` reports a checkout — npm cannot
- * update one, so nothing should offer to.
+ * checkout sits on one, else the package.json version joined to the short sha,
+ * else whichever of those two is readable, else the literal `local`. `git`
+ * reports a checkout — npm cannot update one, so nothing should offer to.
+ *
+ * A checkout needs both halves. The sha is here because package.json alone
+ * cannot tell a published release from a local tarball built out of it, so the
+ * sha is what marks a checkout at a glance. But it answers "which commit", and
+ * the question asked after a restart is "which build" — which a sha never
+ * answers, and which is the whole reason this label exists. The two are joined
+ * with `+`, semver's build metadata, because that is precisely what the sha is:
+ * the same version, pinned to the build that produced it. It also tells a
+ * caller short of columns which end to spend, build metadata being by
+ * definition the part that is not the identity.
+ *
+ * A tag still wins outright, and alone: it names a release and a commit at
+ * once, so appending the sha to it would say the same thing twice.
  *
  * The git calls are pinned to the package root. `teamclaude server` is started
  * from the operator's own project directory, and resolving against the process
@@ -59,18 +72,22 @@ export function currentVersion(root = packageRoot()) {
  */
 export async function resolveVersionLabel({ root = packageRoot(), exec = pexec } = {}) {
   const git = existsSync(join(root, '.git'));
+  const version = currentVersion(root);
   if (git) {
     /** @type {{ cwd: string, encoding: 'utf8', timeout: number }} */
     const opts = { cwd: root, encoding: 'utf8', timeout: 2000 };
-    const probes = [['describe', '--tags', '--exact-match', 'HEAD'], ['rev-parse', '--short', 'HEAD']];
-    for (const args of probes) {
+    /** @param {string[]} args */
+    const ask = async (args) => {
       try {
-        const label = safeLine((await exec('git', args, opts)).stdout, LABEL_MAX);
-        if (label) return { label, git };
-      } catch { /* not on a tag, a shallow or broken checkout, or no git binary */ }
-    }
+        return safeLine((await exec('git', args, opts)).stdout, LABEL_MAX);
+      } catch { return ''; /* not on a tag, a shallow or broken checkout, or no git binary */ }
+    };
+    const tag = await ask(['describe', '--tags', '--exact-match', 'HEAD']);
+    if (tag) return { label: tag, git };
+    const sha = await ask(['rev-parse', '--short', 'HEAD']);
+    if (sha) return { label: safeLine(version ? `${version}+${sha}` : sha, LABEL_MAX), git };
   }
-  return { label: safeLine(currentVersion(root) || 'local', LABEL_MAX), git };
+  return { label: safeLine(version || 'local', LABEL_MAX), git };
 }
 
 /** Numeric compare of x.y.z, then the pre-release tail. >0 if a is newer.

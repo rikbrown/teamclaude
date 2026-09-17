@@ -262,7 +262,9 @@ function gitStub(answers, seen = []) {
   };
 }
 
-test('resolveVersionLabel prefers the tag HEAD sits on', async () => {
+// A tag names a release and a commit at once, so it stands alone — the sha is
+// on offer here and is deliberately not appended to it.
+test('resolveVersionLabel prefers the tag HEAD sits on, and nothing else', async () => {
   const root = labelRoot({ git: true, version: '1.1.20' });
   try {
     const exec = gitStub({ describe: 'v1.1.20\n', 'rev-parse': 'b8bbfcc\n' });
@@ -270,8 +272,20 @@ test('resolveVersionLabel prefers the tag HEAD sits on', async () => {
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test('resolveVersionLabel falls back to the short sha off a tag', async () => {
+// Off a tag a checkout says both halves. The sha alone answers "which commit"
+// and never "which build"; the version alone cannot tell a published release
+// from a local tarball built out of it. `+` is semver build metadata, which is
+// what the sha is.
+test('resolveVersionLabel joins the version to the short sha off a tag', async () => {
   const root = labelRoot({ git: true, version: '1.1.20' });
+  try {
+    const exec = gitStub({ 'rev-parse': 'b8bbfcc\n' });
+    assert.deepEqual(await resolveVersionLabel({ root, exec }), { label: '1.1.20+b8bbfcc', git: true });
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('resolveVersionLabel reports the sha alone when package.json is unreadable', async () => {
+  const root = labelRoot({ git: true });
   try {
     const exec = gitStub({ 'rev-parse': 'b8bbfcc\n' });
     assert.deepEqual(await resolveVersionLabel({ root, exec }), { label: 'b8bbfcc', git: true });

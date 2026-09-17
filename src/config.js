@@ -116,6 +116,7 @@ export function createDefaultConfig() {
     // credits are scarce, so nothing spends one until this is switched on.
     autoRedeemResets: false,
     activityLog: null,
+    autoRestart: false,
     blockedModels: [],
     stripOverageHeaders: false,
     synthesizeQuotaHeaders: false,

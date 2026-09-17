@@ -3477,14 +3477,17 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
         // it. A request that finds no sibling, retries, and only then finds one
         // to hop onto reaches both sites, and two flags would let it wait twice.
         //
-        // Every provider gets it. The wait is one delay of a couple of seconds,
-        // once per request and inside the retry budget — far shorter than the
-        // inline absorb and the exhaustion hold, which hold every caller alike.
+        // Only for a caller that actually waits. A Codex one does not: it gives
+        // the response head 60s, then retries the whole request itself (see
+        // holdsConnection, and the incident recorded in
+        // test/codex-no-inline-hold.test.js). Holding it here would stack our
+        // wait underneath its own, which is the trade that file exists to refuse.
         // A delay of 0 (TEAMCLAUDE_HEADERLESS_429_RETRY_DELAY_MS=0) turns the
         // retry off and the 429 goes back at once.
         const retryDelayMs = resolveHeaderless429RetryDelayMs();
+        const callerWaits = holdsConnection(ctx.provider);
         if (retryDelayMs > 0 && !ctx.requestScopedRetried && !switchingToSx && retryCount < maxRetries
-          && !res.headersSent && !clientGone(res) && !ctx.signal?.aborted) {
+          && !res.headersSent && !clientGone(res) && !ctx.signal?.aborted && callerWaits) {
           // Once per request: a retry that is refused too has made the point.
           ctx.requestScopedRetried = true;
           console.log(`[TeamClaude] 429 followed the request onto "${account.name}" with no rate-limit headers — retrying it once on the same account in ${retryDelayMs}ms`
@@ -3494,7 +3497,9 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
           ctx.hopTo = account.index;
           return forwardRequest(req, res, body, accountManager, upstream, retryCount + 1, hooks, reqId, ctx, logDir, sx, route);
         }
-        console.log(`[TeamClaude] 429 followed the request onto "${account.name}" with no rate-limit headers — it is about the request, not the accounts; returning it to the client`
+        console.log(`[TeamClaude] 429 followed the request onto "${account.name}" with no rate-limit headers — `
+          + (callerWaits ? 'it is about the request, not the accounts' : `${ctx.provider} caller does not wait`)
+          + '; returning it to the client'
           + (refusal ? ` (${safeLine(refusal)})` : ''));
       } else if (ctx.rateLimitHopped) {
         // Second 429 this request, on a different account. Say so once: the
@@ -3526,9 +3531,12 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
       if (requestScoped) {
         // The same number as the post-hop retry above, and the same one-wait
         // budget: one phenomenon, one delay, one env var to move both — and 0
-        // switches this retry off along with that one.
+        // switches this retry off along with that one. Same caller rule too, and
+        // the inline absorb below draws it as well: a wait is only invisible to
+        // a caller that waits longer than we do.
         const retryDelayMs = resolveHeaderless429RetryDelayMs();
-        if (retryDelayMs > 0 && !ctx.rateLimitHopped && !ctx.requestScopedRetried && retryCount < maxRetries) {
+        if (retryDelayMs > 0 && !ctx.rateLimitHopped && !ctx.requestScopedRetried && retryCount < maxRetries
+          && holdsConnection(ctx.provider)) {
           ctx.requestScopedRetried = true;
           console.log(`[TeamClaude] 429 with no rate-limit headers on "${account.name}" — retrying once in ${retryDelayMs}ms${refusal ? ` (${safeLine(refusal)})` : ''}`);
           await waitForRetry(retryDelayMs, ctx.signal);

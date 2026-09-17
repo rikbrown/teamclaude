@@ -2418,10 +2418,11 @@ export class TUI {
     // advertise are all refused while one runs (see _key), and how far the
     // drain has got is the only thing on screen worth the row.
     //
-    // It is also the one footer drawn without the build label. The line lives
-    // for at most the deadline, the build cannot change under it, and when the
-    // restart is an update the label names the build being replaced — so those
-    // columns go to the escape hatch, which is what the line is read for.
+    // It is also the one footer drawn without the build label or its update
+    // marker. The line lives for at most the deadline, the build cannot change
+    // under it, and when the restart is an update the label names the build
+    // being replaced and the marker points at the thing already happening — so
+    // those columns go to the escape hatch, which is what the line is read for.
     if (this._restartDrain) return this._restartDrainFooter(this._restartDrain, W);
     return this._footerWithVersion(this._footerHints(), W);
   }
@@ -2467,7 +2468,10 @@ export class TUI {
   }
 
   /**
-   * `hints` with the build label set against the right edge of a W-column line.
+   * `hints` with the build label — and, when one is waiting, an update marker —
+   * set against the right edge of a W-column line. This is the only place the
+   * display names either: the header carries its title and the port block and
+   * nothing else.
    *
    * Composed to exactly W, never less. The paint loop pads every short line out
    * to the terminal width and truncates the tail of every long one (fitLine), so
@@ -2479,25 +2483,37 @@ export class TUI {
    * that says what the keyboard does: a build the operator cannot read costs
    * them nothing, a key they cannot read costs them the screen. So the label is
    * fitted to whatever the hints leave over — fitHeadLabel spends the build sha
-   * first and then the head of the version, the same ladder the header runs, so
-   * the two lines never disagree about what a shortened label means — and it is
-   * dropped whole when what is left will not carry it.
+   * first and then the head of the version — and it is dropped whole when what
+   * is left will not carry it.
    *
    * @param {string} hints
    * @param {number} W
    */
   _footerWithVersion(hints, W) {
-    // The header's source, so an attached dashboard names the server's build
-    // down here too, and stays blank until its first poll rather than naming
-    // this machine's. `??` on purpose: '' is that deliberate blank, not a miss.
+    // In attach mode the dashboard names the server's build, not this
+    // process's, so the account manager's answer wins for both. It arrives
+    // sanitized (applyStatus) and starts empty, which keeps the corner blank
+    // until the first poll rather than briefly naming the local checkout as if
+    // it were the server's. A local AccountManager has neither property.
+    // `??` on purpose: '' is that deliberate blank, not a miss.
     const label = this.am.versionLabel ?? this.versionLabel;
+    const upd = this.am.updateAvailable ?? this.updateAvailable;
+    // The marker rides with the label and is never drawn without it. Alone in
+    // the corner a bare glyph names nothing it could be an update TO, and reads
+    // as one more key hint — the one thing this end of the line must not look
+    // like. It would also be the wrong answer for an attached dashboard that
+    // has not polled yet: no server label, but this process's update flag.
     if (!label) return hints;
     const hw = vw(hints);
-    // One column of margin at the edge — what the rule drawn above this line
-    // and the header's port block both leave.
-    const text = fitHeadLabel(label, W - hw - FOOT_GAP - 1);
+    // Budgeted before the label is cut, so a shortened label and its marker
+    // still fit the room they were measured against.
+    const markerW = upd ? 2 : 0;
+    // One column of margin at the edge — what the rule under the header and
+    // the header's port block both leave.
+    const text = fitHeadLabel(label, W - hw - FOOT_GAP - markerW - 1);
     if (!text) return hints;
-    return `${hints}${' '.repeat(W - hw - vw(text) - 1)}${dim(text)} `;
+    const marker = upd ? ` ${green('▲')}` : '';
+    return `${hints}${' '.repeat(W - hw - vw(text) - markerW - 1)}${dim(text)}${marker} `;
   }
 
   /**

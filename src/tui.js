@@ -213,19 +213,14 @@ const BAR_MAX = 20;
 // terminal lays the table out exactly as it did before the column could grow.
 const NAME_MIN = 12;
 
-// Clear space the version label needs on each side before it is drawn at all.
-// Below that it reads as a collision with the title or the port block.
-const HEAD_GAP = 2;
-
 // Narrowest label still worth drawing: an ellipsis and three columns of build.
-// Under that the header goes back to naming no build at all, which at those
+// Under that the footer goes back to naming no build at all, which at those
 // widths is the honest answer.
 const HEAD_LABEL_MIN = 4;
 
 // Clear space the footer keeps between the last key hint and the build label.
-// The same two columns the header keeps around its own copy, and for the same
-// reason: any closer and the label reads as one more hint, which is the one
-// thing it must not look like — there is no key that does it.
+// Any closer and the label reads as one more hint, which is the one thing it
+// must not look like — there is no key that does it.
 const FOOT_GAP = 2;
 
 // Which pair of bars a row draws: the subscription buckets (Ses/Wk, plus the
@@ -294,7 +289,7 @@ export function fitLine(s, w) {
 /** The build label at `max` columns, or '' when nothing legible fits.
  *
  *  Build metadata is spent before anything is cut. A checkout labels itself
- *  `<version>+<sha>`, and of the two it is the version the header is read for;
+ *  `<version>+<sha>`, and of the two it is the version the footer is read for;
  *  the sha only says which build of it. Shortening the sha instead would be
  *  worse than losing it — four hex digits name no commit, and are read as if
  *  they did.
@@ -305,7 +300,7 @@ export function fitLine(s, w) {
  *  Sliced by code unit against a display-width budget — a version or a sha is
  *  ASCII, and a label arriving over the wire is measured again by the caller
  *  before it is placed, so a wide glyph costs the label its slot rather than
- *  the header its width.
+ *  the footer its width.
  *  @param {string} label
  *  @param {number} max */
 export function fitHeadLabel(label, max) {
@@ -1594,44 +1589,15 @@ export class TUI {
     // mode): what is on screen is the last snapshot, not the current state.
     const live = this.am.connected === false ? red('▼') : green('▲');
     const right = `${sessStr}Port ${port} ${live} `;
-    // In attach mode the dashboard names the server's build, not this process's,
-    // so the account manager's answer wins. It arrives sanitized (applyStatus)
-    // and starts empty, which keeps the label hidden until the first poll rather
-    // than briefly showing the local checkout's version as if it were the
-    // server's. A local AccountManager has neither property.
-    const label = this.am.versionLabel ?? this.versionLabel;
-    const upd = this.am.updateAvailable ?? this.updateAvailable;
-    const lw = vw(left), rw = vw(right);
-    // Columns left between the two blocks, and what the label may take of them.
-    // The marker is budgeted before the label is cut, so a shortened label and
-    // its marker still fit the room they were measured against.
-    const room = W - lw - rw;
-    const markerW = upd ? 2 : 0;
-    const text = label ? fitHeadLabel(label, room - 2 * HEAD_GAP - markerW) : '';
-    const mid = text ? dim(text) + (upd ? ` ${green('▲')}` : '') : '';
-    const mw = vw(mid);
-    // Centred on the line, not in the gap between the two blocks, so the label
-    // holds still as the session segment comes and goes.
-    const start = Math.floor((W - mw) / 2);
-    // Load-bearing, not cosmetic: both padding runs below would be negative
-    // without it, and ' '.repeat(-1) throws. Satisfying it also means the mid
-    // branch can never produce the over-wide line the other branch can, so the
-    // two are not interchangeable.
-    const midFits = mw > 0 && start - lw >= HEAD_GAP && (W - rw) - (start + mw) >= HEAD_GAP;
-    // Line-centring is a position, not a fit. The two blocks are different
-    // widths, so a label small enough for the gap can still be pushed inside
-    // one of them by where the centre of the LINE falls — and that, not width,
-    // is what used to drop the label every time the session segment grew,
-    // leaving a header that silently stopped naming the build it exists to
-    // name. Centre it in the GAP instead, which is exact by construction: the
-    // two runs below sum to `room`. The label moves when sessions come and go,
-    // which is the price; being able to read it is what that buys.
-    const gapPad = mw > 0 && room - mw >= 2 * HEAD_GAP ? Math.floor((room - mw) / 2) : -1;
-    lines.push(midFits
-      ? left + ' '.repeat(start - lw) + mid + ' '.repeat(W - rw - start - mw) + right
-      : gapPad >= 0
-        ? left + ' '.repeat(gapPad) + mid + ' '.repeat(room - mw - gapPad) + right
-        : left + ' '.repeat(Math.max(1, W - lw - rw)) + right);
+    // Title, padding, port block — and nothing between them. The build this
+    // checkout runs is named once, in the corner of the footer.
+    //
+    // That padding run is the whole of the line's arithmetic now, and it is
+    // floored rather than trusted: a wide session segment on a narrow terminal
+    // can leave the two blocks alone wider than the line, and ' '.repeat(-1)
+    // throws. There the header overruns and fitLine takes its tail, as it has
+    // since long before there was a label to lose.
+    lines.push(left + ' '.repeat(Math.max(1, W - vw(left) - vw(right))) + right);
     lines.push(' ' + dim('─'.repeat(W - 2)));
 
     const footerH = 2;

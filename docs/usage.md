@@ -398,7 +398,7 @@ teamclaude server --log-to /tmp/requests
 
 Bodies are truncated past a size cap, and files older than the retention window are deleted — see [`logLevel`, `logMaxBodyBytes` and `logRetentionHours`](configuration.md#fields) to widen or disable them. The first start after upgrading sweeps whatever in that directory is already older than the window.
 
-`--activity-log FILE` appends the TUI activity lines to a file instead, and works in headless mode too.
+`--activity-log FILE` appends the TUI activity lines to a file instead, and works in headless mode too. The flag lasts one launch; set [`activityLog`](configuration.md#fields) in the config to keep it across restarts.
 
 A request line whose response reported token usage ends with its prompt-cache figures: `cache r180k w3k in1k` is tokens read from the cache, written to it, and sent uncached (`k` from 1000 up). By the share read from the cache, r / (r + w + in), the TUI paints it green at 0.90 or more (hit), yellow from 0.50 (partial) and red below (miss), and dims it when the request neither read nor wrote the cache. A miss also ends with ` MISS`, so it can be found with grep in a log file, which has no colour. After a failover or a retry the figures are the last attempt's.
 

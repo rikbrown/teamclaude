@@ -114,6 +114,7 @@ export function createDefaultConfig() {
     // setting whose default matters most: a redemption cannot be undone and the
     // credits are scarce, so nothing spends one until this is switched on.
     autoRedeemResets: false,
+    activityLog: null,
     blockedModels: [],
     stripOverageHeaders: false,
     accounts: [],

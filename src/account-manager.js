@@ -1438,6 +1438,26 @@ export class AccountManager {
   }
 
   /**
+   * Client requests running right now, fleet-wide. What a drain waits on.
+   *
+   * Two counters, because neither one spans a whole request. A session's hold
+   * is taken across the ENTIRE client request, a multi-minute stream included
+   * (see beginSession), which is precisely what a restart must not cut — but it
+   * is only taken for a request that carries a session id. An account's
+   * `inFlight` covers the rest, though only as far as the response headers:
+   * storm control releases that slot there so streaming bodies do not tie up
+   * concurrency. Summing them double-counts a session's request while it is
+   * upstream-bound, which can only make a drain wait longer than it strictly
+   * must — and the drain deadline bounds that.
+   */
+  inFlightRequests() {
+    // The tracker is a plain object to the checker here (see the constructor),
+    // so the cast is how its counter is reached — not a claim about the value.
+    const sessions = /** @type {any} */ (this.sessionTracker).inFlightCount();
+    return sessions + this.accounts.reduce((n, a) => n + (a.inFlight || 0), 0);
+  }
+
+  /**
    * Like getActiveAccount, but if the selected account's OAuth token has ALREADY
    * expired it blocks on a refresh before returning — so a caller that injects
    * the token immediately (the MITM relay) never sends a dead token and eats a

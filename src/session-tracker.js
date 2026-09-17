@@ -341,6 +341,20 @@ export class SessionTracker {
     return s.inFlight > 0 || now - s.lastSeen <= this.activeTtlMs;
   }
 
+  /** Requests in flight across every session, for a drain to wait on.
+   *
+   *  The hold this counts spans the whole client request, a long stream
+   *  included (see beginRequest), so zero here means no client is mid-answer —
+   *  which is the one thing a restart has to be sure of. Counted on demand
+   *  rather than kept as a running total: this is asked a few times a second
+   *  during a drain and never otherwise, while the map is bounded by MAX_SESSIONS.
+   */
+  inFlightCount() {
+    let n = 0;
+    for (const s of this.sessions.values()) n += s.inFlight;
+    return n;
+  }
+
   // Expired = idle past the known window AND nothing in flight (a long-running
   // request keeps the session alive no matter how old lastSeen is).
   _isExpired(s, now) {

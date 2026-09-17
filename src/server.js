@@ -144,6 +144,36 @@ const CONNECTION_SPECIFIC_HEADERS = new Set([
   'proxy-connection', 'te', 'trailer',
 ]);
 
+/**
+ * While the server is draining, tell this response's client that the socket is
+ * finished with.
+ *
+ * The cooperative half of a restart (see restart.js). A process that simply
+ * stops leaves every pooled keep-alive socket a corpse the client discovers
+ * only by writing to it — the failure this proxy has now been bitten by twice,
+ * and the reason a restart "breaks running sessions" even when the drain waits
+ * politely for the requests it can see. `Connection: close` retires the socket
+ * from the client's pool the moment this response lands, so the next request
+ * opens a fresh connection into the relaunched process.
+ *
+ * Set with setHeader rather than in a writeHead object: every answer below
+ * builds its own header object, and `connection` is stripped from all of them
+ * as hop-by-hop, so this survives the merge on each of the dozen exits instead
+ * of having to be added to each.
+ *
+ * HTTP/2 is left alone — the header is illegal there (Node refuses it) and a
+ * MITM tunnel's h2 session goes away with the CONNECT socket regardless.
+ *
+ * @param {import('node:http').IncomingMessage} req
+ * @param {import('node:http').ServerResponse} res
+ * @param {any} hooks  the application's hook bag; `isDraining` is optional
+ */
+export function markDraining(req, res, hooks) {
+  if (!hooks.isDraining?.()) return;
+  if ((req.httpVersionMajor || 1) >= 2) return;
+  try { res.setHeader('Connection', 'close'); } catch { /* already answered */ }
+}
+
 // Constant-time proxy-API-key comparison (both the HTTP gate and the CONNECT
 // gate use it). Returns false on any type/length mismatch without leaking timing.
 export function safeKeyEqual(a, b) {
@@ -270,6 +300,9 @@ export function createProxyServer(accountManager, config, hooks = {}, sx = null,
 
   const requestHandler = async (req, res) => {
     try {
+      // Before any exit below writes a head, control endpoints included: a
+      // status poll and a dashboard refresh hold pooled sockets too.
+      markDraining(req, res, hooks);
       // Dashboard page — served BEFORE the auth gate on purpose. The page is a
       // static asset containing no data: everything it shows comes from
       // /teamclaude/status, which stays behind the gate and is fetched by the
@@ -873,6 +906,9 @@ export function clientSessionId(headers) {
 export function createProxyRequestListener({ accountManager, upstream, logDir = null, hooks = {}, sx = null, holdMs = 0, config = {}, forcedPin = null, egress = null, clientUsage = null, forcedClient = null, dimensionUsage = null }) {
   let counter = 0;
   return async (req, res) => {
+    // Again here, not only in the base server's wrapper: this listener is also
+    // the MITM tunnel's, where nothing above it has seen the request.
+    markDraining(req, res, hooks);
     // The activity entry this request opened, while it is still open. Every
     // consumer holds the row until it is told the request ended, so exactly one
     // path must close it. Each closing site clears this first, which is how the

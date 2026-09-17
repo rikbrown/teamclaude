@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { TUI, displayWidth } from '../src/tui.js';
+import { TUI, displayWidth, fitHeadLabel } from '../src/tui.js';
 import { RemoteAccountManager } from '../src/tui-remote.js';
 
 // The header is one line built from three pieces that must add up to exactly
@@ -57,7 +57,7 @@ test('the header is exactly the terminal width at every size, with or without a 
   for (const W of WIDTHS) {
     for (const sessions of [0, 3]) {
       for (const updateAvailable of [false, true]) {
-        for (const versionLabel of ['', 'v1.2.3', '1.1.20-pr378']) {
+        for (const versionLabel of ['', 'v1.2.3', '1.1.20-pr378', '1.1.20-rik.12+acc19b3']) {
           const line = header(makeTUI({ am: fakeAm(sessions), versionLabel, updateAvailable }), W);
           const where = `W=${W} sess=${sessions} upd=${updateAvailable} label=${versionLabel || '(none)'}`;
           assert.equal(displayWidth(line), W, `${where}: width ${displayWidth(line)}`);
@@ -100,6 +100,53 @@ test('shortening keeps the update marker, which is the actionable half', () => {
   const line = header(makeTUI({ am: fakeAm(3), versionLabel: '1.1.20-rik.11', updateAvailable: true }), 52);
   assert.equal(displayWidth(line), 52);
   assert.equal(count(line, '▲'), 2);
+});
+
+// ── a checkout label, which is two answers joined ────────────
+//
+// `<version>+<sha>` answers two different questions, and the header has room
+// for both only some of the time. The version is what survives: a sha says
+// which commit, never which build, and "which build am I on" is the question
+// the header exists to answer.
+
+test('a checkout label is drawn whole when the header has the room', () => {
+  const line = header(makeTUI({ am: fakeAm(3), versionLabel: '1.1.20-rik.12+acc19b3' }), 100);
+  assert.equal(displayWidth(line), 100);
+  assert.match(line, /1\.1\.20-rik\.12\+acc19b3/);
+});
+
+test('a checkout label too wide for the header loses the sha, not the version', () => {
+  const line = header(makeTUI({ am: fakeAm(3), versionLabel: '1.1.20-rik.12+acc19b3' }), 56);
+  assert.equal(displayWidth(line), 56);
+  assert.match(line, /1\.1\.20-rik\.12/, 'the version arrives intact');
+  assert.doesNotMatch(line, /acc19b3|\+/, 'and the sha is what paid for it');
+  assert.doesNotMatch(line, /…/, 'dropping metadata is not a cut of the version');
+});
+
+test('a checkout label narrower still keeps the version tail, never the sha', () => {
+  const line = header(makeTUI({ am: fakeAm(3), versionLabel: '1.1.20-rik.12+acc19b3' }), 48);
+  assert.equal(displayWidth(line), 48);
+  assert.match(line, /rik\.12/, 'the tail is what tells one build from the next');
+  assert.match(line, /…/, 'and it says it was cut');
+  assert.doesNotMatch(line, /acc19b3/);
+  assert.ok(line.endsWith('Port 1 ▲ '), `right block clipped — ${JSON.stringify(line.slice(-12))}`);
+});
+
+// The ladder on its own, without the header arithmetic in the way.
+test('fitHeadLabel spends build metadata before it cuts the version', () => {
+  const label = '1.1.20-rik.12+acc19b3';
+  assert.equal(fitHeadLabel(label, 21), label);
+  assert.equal(fitHeadLabel(label, 20), '1.1.20-rik.12');
+  assert.equal(fitHeadLabel(label, 13), '1.1.20-rik.12');
+  assert.equal(fitHeadLabel(label, 9), '…0-rik.12');
+  assert.equal(fitHeadLabel(label, 3), '');
+});
+
+test('fitHeadLabel leaves a label with no build metadata exactly as it was', () => {
+  assert.equal(fitHeadLabel('v1.2.3', 100), 'v1.2.3');
+  assert.equal(fitHeadLabel('1.1.20-rik.12', 13), '1.1.20-rik.12');
+  assert.equal(fitHeadLabel('1.1.20-rik.12', 9), '…0-rik.12');
+  assert.equal(fitHeadLabel('1.1.20-rik.12', 3), '');
 });
 
 test('a header too narrow for the label drops it whole, falling back verbatim', () => {

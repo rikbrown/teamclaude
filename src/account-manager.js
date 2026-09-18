@@ -214,6 +214,13 @@ function makeAccount(acct, index) {
     hasClaudeMax: acct.hasClaudeMax ?? null,
     hasClaudePro: acct.hasClaudePro ?? null,
     priority: acct.priority || 0,
+    // Where this account sits in the list the TUI draws, arranged by the
+    // operator from the settings screen. Presentation only: nothing but
+    // _displayOrder in tui.js reads it, and it is emphatically NOT `priority`
+    // above — that one decides which account rotation spends next, and the two
+    // answer different questions about the same fleet. `null` means never
+    // placed, which sorts after every account that has been.
+    displayOrder: Number.isFinite(acct.displayOrder) ? acct.displayOrder : null,
     disabled: acct.disabled || false,
     maxUsage: acct.maxUsage ?? null,
     upstream: acct.upstream || null,

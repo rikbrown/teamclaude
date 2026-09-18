@@ -223,6 +223,17 @@ const HEAD_LABEL_MIN = 4;
 // must not look like — there is no key that does it.
 const FOOT_GAP = 2;
 
+// Where an account sits in the list the operator arranged — the sort key behind
+// _displayOrder, written by _doMoveAccount and by nothing else.
+//
+// An account with no `displayOrder` has never been placed: every account on a
+// config that predates the field, and every account added since the last
+// arrangement. Those sort after every account that has one, which is where a
+// new account already appeared back when this list was raw array order — so
+// the answer to "where does the one I just logged in with go" does not change
+// with the feature, and there is nothing to migrate.
+const listRank = (/** @type {any} */ a) => (Number.isFinite(a?.displayOrder) ? a.displayOrder : Infinity);
+
 // Which pair of bars a row draws: the subscription buckets (Ses/Wk, plus the
 // S7/F7 family bars) when any unified reading exists, else the metered Tok/Req
 // pair an API-key account reports. The account row budget is drawn per
@@ -491,7 +502,7 @@ export class TUI {
     this.mode = 'normal';    // normal | select | add | input | settings | pick
     this.pick = null;        // active list picker (routes editor accounts/bucket/color)
     this.pickReturn = 'routes'; // mode to fall back to when the picker closes
-    this.selAction = null;   // switch | remove | toggle
+    this.selAction = null;   // switch | remove | toggle | reorder
     this.selIdx = 0;
     this.selRoute = null;    // in switch mode: null = global default, else a getRoutes() entry to pin
     this.selReturn = 'normal'; // mode to fall back to when select mode closes
@@ -911,6 +922,18 @@ export class TUI {
       });
     }
 
+    // Two rows is the least that can be arranged. Below that the row would open
+    // a screen on which no key does anything.
+    if (this._displayOrder().length > 1) {
+      fields.push({
+        id: 'orderAccounts',
+        label: 'Reorder accounts',
+        hint: 'Enter to arrange',
+        value: () => dim('—'),
+        enter: () => { this.mode = 'select'; this.selAction = 'reorder'; this.selIdx = this._displayOrder()[0] ?? 0; this.selReturn = 'settings'; },
+      });
+    }
+
     fields.push({
       id: 'upstreamProxy',
       label: 'Upstream proxy',
@@ -1074,11 +1097,22 @@ export class TUI {
     // can only ask for the default account — leaves these keys alone.
     else if ((k === 'tab' || k === 'right') && this.selAction === 'switch' && !this.remote) this._cycleSelRoute(+1);
     else if (k === 'left' && this.selAction === 'switch' && !this.remote) this._cycleSelRoute(-1);
+    // ←→ in reorder mode move the ACCOUNT, not the cursor. ↑↓ already walk the
+    // rows, so this is the pair left over, and ←→ is what "change the thing the
+    // cursor is on" already means on the settings screen this is opened from.
+    // The cursor does not move with the key: `selIdx` names the account being
+    // dragged, and the row it marks travels with it.
+    else if ((k === 'left' || k === 'h') && this.selAction === 'reorder') this._doMoveAccount(-1);
+    else if ((k === 'right' || k === 'l') && this.selAction === 'reorder') this._doMoveAccount(+1);
     else if (k === 'enter') {
       if (this.selAction === 'switch') {
         this._doSwitchSelection();
       } else if (this.selAction === 'toggle') {
         this._doToggleDisabled(this.selIdx);
+      } else if (this.selAction === 'reorder') {
+        // Every move has already been saved, so Enter only means "done" — and
+        // it has to be caught here, ahead of the remove branch below, which is
+        // what an unlisted action falls into.
       } else {
         this._doRemove(this.selIdx);
       }
@@ -1505,6 +1539,48 @@ export class TUI {
     this._addLog(`${next ? 'Disabled' : 'Enabled'} account "${acct.name}"`);
   }
 
+  /** Move the selected account `delta` rows through the list as drawn.
+   *
+   *  The array is NOT permuted. `selIdx` is a manager index, and so are route
+   *  pins, session pins, `currentIndex`, `TC_ACCT` and the disable/switch CLI
+   *  paths — reordering `am.accounts` would silently repoint every one of them
+   *  at a different account. So the rows are sorted by a field instead and each
+   *  account keeps the slot it has held since startup.
+   *
+   *  It is not `priority` either. That field is rotation preference and only
+   *  one account in a fleet usually carries a non-default value — a
+   *  deliberately deprioritised local backend, say. Deriving it from where a
+   *  row sits on screen would re-rank the fleet as a side effect of tidying the
+   *  display, which is a routing change nobody asked for.
+   *
+   *  Every displayed account is renumbered from its new position rather than
+   *  only the two that moved: before the first move there are no numbers to
+   *  insert between, and a dense 0..n-1 is the form that reads in a hand-edited
+   *  config. Local backends are excluded throughout — _displayOrder filters
+   *  them out before this ever sees them, so they hold no position and their
+   *  array slots are simply skipped over.
+   */
+  async _doMoveAccount(delta) {
+    const order = this._displayOrder();
+    const from = order.indexOf(this.selIdx);
+    const to = from + delta;
+    if (from < 0 || to < 0 || to >= order.length) return; // already at the end it was pushed against
+    order.splice(to, 0, ...order.splice(from, 1));
+    order.forEach((mgrIdx, pos) => {
+      this.am.accounts[mgrIdx].displayOrder = pos;
+      // Onto this account's own entry: a manager index is not a config index
+      // (account-pairing.js), and an account whose entry the config no longer
+      // holds keeps its position on screen with nothing to persist.
+      const cfgIdx = configIndexFor(this.config.accounts, this.am.accounts, mgrIdx);
+      if (cfgIdx >= 0) this.config.accounts[cfgIdx].displayOrder = pos;
+    });
+    // Nothing is logged on success. The row visibly moves, which is the whole
+    // feedback a drag needs, and a held arrow key would otherwise push the
+    // activity pane out from under the list being arranged.
+    try { await this.saveConfig(this.config); }
+    catch (e) { this._addLog(`Failed to save: ${e.message}`); }
+  }
+
   // ── rendering ──────────────────────────────────────
 
   render({ force = false } = {}) {
@@ -1793,11 +1869,21 @@ export class TUI {
    *  Display only. `selIdx`, `currentIndex`, session pins and route entries all
    *  stay manager indices, so nothing about selection or routing moves with the
    *  rows — see _keySelect, which walks this order but still stores an index.
+   *
+   *  Which is also why the operator's arrangement is a sort key and not a
+   *  permutation of `am.accounts`: see _doMoveAccount.
    */
   _displayOrder() {
     return this.am.accounts
       .map((/** @type {any} */ _, /** @type {number} */ i) => i)
-      .filter(i => !isLocalUpstream(this.am.accounts[i]));
+      .filter(i => !isLocalUpstream(this.am.accounts[i]))
+      .sort((/** @type {number} */ a, /** @type {number} */ b) => {
+        const ra = listRank(this.am.accounts[a]);
+        const rb = listRank(this.am.accounts[b]);
+        // Infinity !== Infinity is false, so two unplaced accounts fall through
+        // to the index rather than subtracting to NaN.
+        return ra === rb ? a - b : ra - rb;
+      });
   }
 
   /** Manager indices of the local backends, in config order. */
@@ -2051,9 +2137,10 @@ export class TUI {
     lines.push(row(byId('blocklist')));
     lines.push('');
     // ── Accounts
-    lines.push(bold('  Accounts') + dim('  — add (import / API key) or remove an account'));
+    lines.push(bold('  Accounts') + dim('  — add (import / API key), remove, or set the order they list in'));
     lines.push(row(byId('addAccount')));
     if (byId('removeAccount')) lines.push(row(byId('removeAccount')));
+    if (byId('orderAccounts')) lines.push(row(byId('orderAccounts')));
     lines.push('');
     // ── Network
     // Drawn before the sx.org block, which returns early when sx is unavailable:
@@ -2420,6 +2507,12 @@ export class TUI {
             ? routeColorFn(this.selRoute.color)(`route ${this.selRoute.name}`)
             : 'default';
           return ` ${dim('↑↓')} select  ${dim('←→')} target: ${target}  ${bold('Enter')} pin  ${bold('Esc')} cancel`;
+        }
+        // Both keys leave, because each move has already been saved: there is
+        // no pending change for one to commit and the other to throw away, and
+        // offering "cancel" would promise an undo this screen does not have.
+        if (this.selAction === 'reorder') {
+          return ` ${dim('↑↓')} select  ${dim('←→')} move  ${bold('Enter')}/${bold('Esc')} done`;
         }
         const act = this.selAction === 'toggle' ? 'enable/disable' : 'remove';
         return ` ${dim('↑↓')} select  ${bold('Enter')} ${act}  ${bold('Esc')} cancel`;

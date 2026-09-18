@@ -1536,6 +1536,8 @@ export class TUI {
    *  config. Local backends are excluded throughout — _displayOrder filters
    *  them out before this ever sees them, so they hold no position and their
    *  array slots are simply skipped over.
+   *
+   *  @param {number} delta  rows to travel: -1 up the list, +1 down it
    */
   async _doMoveAccount(delta) {
     const order = this._displayOrder();
@@ -1543,7 +1545,7 @@ export class TUI {
     const to = from + delta;
     if (from < 0 || to < 0 || to >= order.length) return; // already at the end it was pushed against
     order.splice(to, 0, ...order.splice(from, 1));
-    order.forEach((mgrIdx, pos) => {
+    order.forEach((/** @type {number} */ mgrIdx, /** @type {number} */ pos) => {
       this.am.accounts[mgrIdx].displayOrder = pos;
       // Onto this account's own entry: a manager index is not a config index
       // (account-pairing.js), and an account whose entry the config no longer
@@ -1555,7 +1557,7 @@ export class TUI {
     // feedback a drag needs, and a held arrow key would otherwise push the
     // activity pane out from under the list being arranged.
     try { await this.saveConfig(this.config); }
-    catch (e) { this._addLog(`Failed to save: ${e.message}`); }
+    catch (/** @type {any} */ e) { this._addLog(`Failed to save: ${e.message}`); }
   }
 
   // ── rendering ──────────────────────────────────────

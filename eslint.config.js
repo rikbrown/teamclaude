@@ -16,6 +16,7 @@ export default [
         Buffer: 'readonly',
         TextDecoder: 'readonly',
         fetch: 'readonly',
+        structuredClone: 'readonly',
         AbortController: 'readonly',
         AbortSignal: 'readonly',
       },

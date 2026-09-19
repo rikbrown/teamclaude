@@ -29,6 +29,7 @@ import { ensureAccountIds } from './account-id.js';
 import * as alias from './alias.js';
 import { ensureCerts, mitmHosts } from './mitm.js';
 import { Prober } from './prober.js';
+import { ResetCreditRedeemer } from './codex-reset-credits.js';
 import { Warmer } from './warmer.js';
 import { createRollingWarmupSchedule, formatWarmupScheduleConfirmation, resolveWarmupConfig, resolveWarmupSchedule } from './warmup-schedule.js';
 import { Sidecar, SIDECAR_DRAIN_GRACE_MS, SIDECAR_SHUTDOWN_GRACE_MS } from './sidecar.js';
@@ -476,6 +477,11 @@ async function serverCommand() {
     config.eventLogging = diskConfig.eventLogging || 'hide';
     // Read by `run`/`env` from disk, but the TUI settings screen shows it live.
     config.defaultClientMode = diskConfig.defaultClientMode === 'base-url' ? 'base-url' : 'mitm';
+    // The fleet switch for spending Codex reset credits. The redeemer reads it
+    // off this object per rejection, so the assignment is the whole application
+    // — and this one has to hot-apply in particular: the config now lives on a
+    // remote host, and "stop spending credits" must not wait for a restart.
+    config.autoRedeemResets = diskConfig.autoRedeemResets === true;
     config.blockedModels = Array.isArray(diskConfig.blockedModels) ? diskConfig.blockedModels : [];
     config.projection = diskConfig.projection;
     accountManager.setProjection(config.projection);
@@ -540,6 +546,7 @@ async function serverCommand() {
         // the edit never reached disk and was silently undone by the next start.
         if (config.eventLogging != null) diskConfig.eventLogging = config.eventLogging;
         if (config.defaultClientMode != null) diskConfig.defaultClientMode = config.defaultClientMode;
+        if (config.autoRedeemResets != null) diskConfig.autoRedeemResets = config.autoRedeemResets;
         if (config.blockedModels != null) diskConfig.blockedModels = config.blockedModels;
         if (config.sessionTitles != null) diskConfig.sessionTitles = config.sessionTitles;
         // Persist the route table (edited from the TUI routes screen).
@@ -614,6 +621,15 @@ async function serverCommand() {
 
   // Expose reload to the proxy's control endpoint (works with or without TUI).
   hooks.reload = reloadAccounts;
+  // A quota rejection on a Codex account asks this whether one of the account's
+  // free rate-limit reset credits should be spent to undo it. Wired as a hook
+  // rather than reached from the request path directly: the forwarding path
+  // stays ignorant of a provider's billing features, and a server built without
+  // it (every test that is not about redemption) simply rotates as before.
+  // The shared config, so the fleet switch (`autoRedeemResets`) is read live —
+  // a TUI toggle or a reload binds on the next rejection, not the next restart.
+  const redeemer = new ResetCreditRedeemer(accountManager, { config });
+  hooks.redeemCodexReset = (/** @type {Record<string, any>} */ account) => redeemer.maybeRedeem(account);
   hooks.getStatusExtra = () => ({
     // Read live from the shared config (not a startup snapshot) so the TUI's
     // blocklist editor shows up in `status` immediately, the same way the

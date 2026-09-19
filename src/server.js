@@ -2384,13 +2384,37 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
       // account is futile — switch to another account now (updateQuota above
       // already recorded the spent bucket's utilization from the headers).
       const rl = rateLimitHeaders;
+      // A spent Codex window on a sidecar-backed account is the same shape as a
+      // rejected unified status: a durable quota rejection, not a transient
+      // throttle. Named separately because a Codex rejection is also the only
+      // one a free reset credit can undo — see below.
+      const codexRejected = codexQuotaRejected(rl);
       const generalRejected = rl['anthropic-ratelimit-unified-5h-status'] === 'rejected'
         || rl['anthropic-ratelimit-unified-7d-status'] === 'rejected'
-        // A spent Codex window on a sidecar-backed account is the same shape:
-        // a durable quota rejection, not a transient throttle.
-        || codexQuotaRejected(rl);
+        || codexRejected;
       const fableRejected = rl['anthropic-ratelimit-unified-7d_oi-status'] === 'rejected' && !generalRejected;
       if ((generalRejected || fableRejected) && retryCount < maxRetries) {
+        // A spent Codex WEEKLY window is the only exhaustion here that can be
+        // undone rather than waited out: OpenAI grants these accounts the
+        // occasional free rate-limit reset credit, and this rejection is the
+        // moment one is worth something. The policy that guards it is strict
+        // and lives in codex-reset-credits.js — a 5-hour window, a pool with
+        // headroom, or an account holding nothing all return here having made
+        // no upstream request at all, and fall through to the rotation below.
+        if (codexRejected && hooks.redeemCodexReset) {
+          let redeemed = false;
+          try {
+            redeemed = !!(await hooks.redeemCodexReset(account))?.redeemed;
+          } catch { /* a failed redemption must never cost this request its rotation */ }
+          if (redeemed) {
+            // Retry the SAME account: unthrottled, and deliberately not added to
+            // ctx.tried. The windows upstream just reset are the ones that
+            // rejected this request, so rotating away now would leave the credit
+            // spent on an account nothing went on to use.
+            if (clientGone(res)) { ctx.abandoned = true; return; }
+            return forwardRequest(req, res, body, accountManager, upstream, retryCount + 1, hooks, reqId, ctx, logDir, sx, route);
+          }
+        }
         // A Fable-only rejection leaves the account fine for other models, so we
         // do NOT throttle it globally — the recorded Fable utilization makes
         // selection skip it for Fable requests only. A general rejection spends a

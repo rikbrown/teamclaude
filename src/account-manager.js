@@ -100,6 +100,23 @@ const PERSISTED_QUOTA_FIELDS = [
   'unifiedStatus', 'unifiedStatusSeenAt',
   'tokensLimit', 'tokensRemaining', 'requestsLimit', 'requestsRemaining', 'resetsAt',
   'scopedWeekly',
+  // Codex free rate-limit reset credits, `{ available, applicable, seenAt }`.
+  // Worth persisting although it is not a quota: the usage probe is off by
+  // default, so without this a restart forgets that an account holds a credit
+  // until something next reads /wham/usage — and the row that says so is the
+  // only place an operator sees one at all.
+  'resetCredits',
+  // The Codex subscription tier, a string from the response headers or the
+  // usage payload. Both sources are traffic, so without this a restarted server
+  // cannot name an account's plan until it next serves a request — and a plan
+  // an account is on does not change over a restart.
+  'planType',
+  // Codex's model-scoped weekly buckets, `{ [slug]: { name, utilization,
+  // resetAt, seenAt } }`. Learned the same way and just as lossy on restart,
+  // and the per-entry `seenAt` is load-bearing beyond the reading itself: it is
+  // what orders the eviction that keeps the table under its cap, so dropping
+  // the table also drops the history that decides what makes room next.
+  'codexModelBuckets',
 ];
 
 // The family (Fable/Sonnet) weekly buckets and the field holding when each was
@@ -126,6 +143,22 @@ function parseResetAt(value) {
   const parsed = Date.parse(value);
   return Number.isNaN(parsed) ? null : parsed;
 }
+
+/**
+ * The quota fields a Codex account only ever LEARNS — from a `/wham/usage`
+ * payload or from the state restored off disk — so `emptyQuota` below does not
+ * seed them. Absent is meaningful for each: it says nothing has been read yet,
+ * which a seeded null would spell the same way as "read, and empty".
+ *
+ * Declared here so the few places that write them can say so (`@type` on the
+ * local that holds the quota), rather than each one reading as a property that
+ * does not exist.
+ *
+ * @typedef {object} CodexLearnedQuota
+ * @property {string} [planType]  the Codex subscription tier
+ * @property {{available: number, applicable: number|null, seenAt: number}} [resetCredits]  free rate-limit reset credits held, and when that was last seen
+ * @property {Record<string, {name: string, utilization: number, resetAt: number|null, seenAt: number}>} [codexModelBuckets]  model-scoped weekly buckets, keyed by slug
+ */
 
 function emptyQuota() {
   return {
@@ -223,6 +256,17 @@ function makeAccount(acct, index) {
     displayOrder: Number.isFinite(acct.displayOrder) ? acct.displayOrder : null,
     disabled: acct.disabled || false,
     maxUsage: acct.maxUsage ?? null,
+    // Whether this account is EXEMPT from spending one of its free Codex
+    // rate-limit reset credits (see codex-reset-credits.js). Negative-only, and
+    // the polarity is the opposite of what the name suggests: the switch that
+    // arms anything is the fleet-wide `autoRedeemResets`, because the policy it
+    // arms ("only when the whole Codex pool is dry") is a statement about the
+    // fleet. All this key can say is "never this one", so `true` and an absent
+    // key mean exactly the same thing here. Meaningless on an Anthropic
+    // account, which has no such credits — the redeemer checks the provider
+    // rather than making the field's default depend on it, so a config moved
+    // between providers keeps saying the same thing.
+    autoRedeemReset: acct.autoRedeemReset !== false,
     upstream: acct.upstream || null,
     modelMap: acct.modelMap || null,
     // Fields to drop from request bodies for this account (third-party upstreams
@@ -3796,6 +3840,9 @@ export class AccountManager {
   applyCodexUsageData(accountIndex, usage) {
     const account = this.accounts[accountIndex];
     if (!account || !usage || usage.error) return;
+    // The three Codex-learned fields below are written here for the first time,
+    // so the empty-quota shape does not carry them. See CodexLearnedQuota.
+    /** @type {typeof account.quota & CodexLearnedQuota} */
     const q = account.quota;
     if (usage.fiveHour) {
       q.unified5h = usage.fiveHour.utilization;
@@ -3806,6 +3853,10 @@ export class AccountManager {
       q.unified7dReset = usage.sevenDay.resetAt ?? null;
     }
     if (usage.planType) q.planType = safeLine(usage.planType, 64);
+    // Stamped, because nothing else refreshes it: a payload that mentions no
+    // credits leaves the last reading alone rather than blanking it, so the
+    // age is the only thing that says how much the number is worth.
+    if (usage.resetCredits) q.resetCredits = { ...usage.resetCredits, seenAt: Date.now() };
     if (Array.isArray(usage.modelBuckets)) {
       q.codexModelBuckets = Object.fromEntries(usage.modelBuckets.slice(0, MAX_CODEX_MODEL_BUCKETS)
         .filter(bucket => bucket?.slug)
@@ -4131,6 +4182,20 @@ export class AccountManager {
       if (!match || !match.quota) continue;
       for (const f of PERSISTED_QUOTA_FIELDS) {
         if (match.quota[f] != null) account.quota[f] = match.quota[f];
+      }
+      // Both writers of the Codex bucket table cap it, because its keys are
+      // upstream header names; restoring is the one way in that never passed a
+      // cap. A file we wrote cannot be over the ceiling, but an edited or
+      // half-written one can, and it would then stand until some slug this
+      // server has never seen turns up to evict the surplus. Newest readings
+      // kept, which is the same order the eviction there works in.
+      /** @type {typeof account.quota & CodexLearnedQuota} */
+      const quota = account.quota;
+      const restoredBuckets = quota.codexModelBuckets;
+      if (restoredBuckets && Object.keys(restoredBuckets).length > MAX_CODEX_MODEL_BUCKETS) {
+        quota.codexModelBuckets = Object.fromEntries(Object.entries(restoredBuckets)
+          .sort((a, b) => (b[1]?.seenAt || 0) - (a[1]?.seenAt || 0))
+          .slice(0, MAX_CODEX_MODEL_BUCKETS));
       }
       for (const field of ['organizationType', 'rateLimitTier', 'seatTier', 'hasClaudeMax', 'hasClaudePro']) {
         if (match.profile?.[field] != null) account[field] = match.profile[field];

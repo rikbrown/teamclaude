@@ -7,6 +7,10 @@ function oauth(name, extra = {}) {
   return { name, type: 'oauth', accessToken: 't', refreshToken: 'r', expiresAt: Date.now() + 3600_000, ...extra };
 }
 
+function codex(name, extra = {}) {
+  return oauth(name, { provider: 'codex', accountId: 'acct-' + name, ...extra });
+}
+
 test('exportQuotaState carries only persistable fields and identity, no credentials', () => {
   const am = new AccountManager([oauth('a', { accountUuid: 'p1', orgUuid: 'o1', orgName: 'Acme' })], 0.98);
   am.accounts[0].quota.unified7d = 0.42;
@@ -70,6 +74,50 @@ test('quota tier metadata survives an export → restore round-trip', () => {
   assert.equal(am2.accounts[0].organizationType, 'claude_team');
   assert.equal(am2.accounts[0].rateLimitTier, 'default_raven');
   assert.equal(am2.accounts[0].seatTier, 'team_standard');
+});
+
+// Both of these are learned from traffic alone — a response header or the usage
+// probe — so a restart that forgets them leaves the account's plan nameless and
+// its per-model weeklies empty until the fleet happens to serve those models
+// again from that account.
+test('Codex plan and model buckets survive an export → restore round-trip', () => {
+  const future = Date.now() + 3600_000;
+  const am1 = new AccountManager([codex('a')], 0.98);
+  am1.applyCodexUsageData(0, {
+    planType: 'pro',
+    sevenDay: { utilization: 0.4, resetAt: future },
+    modelBuckets: [{ slug: 'gpt-6-astra', name: 'GPT-6 Astra', utilization: 0.7, resetAt: future }],
+  });
+
+  const saved = JSON.parse(JSON.stringify(am1.exportQuotaState()));
+  const am2 = new AccountManager([codex('a')], 0.98);
+  am2.restoreQuotaState(saved);
+
+  const quota = am2.accounts[0].quota;
+  assert.equal(quota.planType, 'pro');
+  assert.equal(quota.codexModelBuckets['gpt-6-astra'].name, 'GPT-6 Astra');
+  assert.equal(quota.codexModelBuckets['gpt-6-astra'].utilization, 0.7);
+  // `seenAt` is the half that decides which entry makes room when the table is
+  // full, so a round-trip that kept the reading but dropped its age would
+  // restore the numbers and lose the ordering.
+  assert.equal(typeof quota.codexModelBuckets['gpt-6-astra'].seenAt, 'number');
+});
+
+// The bucket table is capped where it is written, because its keys are upstream
+// header names. Restoring is the one way in that never passed that cap, so it
+// imposes it again rather than trusting the file it read.
+test('a restored bucket table over the cap is trimmed to the newest readings', () => {
+  const now = Date.now();
+  const buckets = {};
+  for (let i = 0; i < 40; i++) buckets[`m${i}`] = { name: `m${i}`, utilization: 0.1, resetAt: null, seenAt: now + i };
+
+  const am = new AccountManager([codex('a')], 0.98);
+  am.restoreQuotaState([{ accountId: 'acct-a', provider: 'codex', name: 'a', quota: { codexModelBuckets: buckets } }]);
+
+  const kept = Object.keys(am.accounts[0].quota.codexModelBuckets);
+  assert.equal(kept.length, 32);
+  assert.ok(kept.includes('m39'), 'the newest reading is kept');
+  assert.ok(!kept.includes('m0'), 'the stalest readings are what make room');
 });
 
 test('restore matches by identity, not array position', () => {

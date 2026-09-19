@@ -104,6 +104,10 @@ export function createDefaultConfig() {
     defaultClientMode: 'mitm',
     activityLog: null,
     autoRestart: false,
+    // Written out rather than left absent, so a fresh config states the one
+    // setting whose default matters most: a redemption cannot be undone and the
+    // credits are scarce, so nothing spends one until this is switched on.
+    autoRedeemResets: false,
     blockedModels: [],
     accounts: [],
   };

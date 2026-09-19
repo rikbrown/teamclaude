@@ -88,6 +88,58 @@ test('the threshold also overrides the windowless raw scale', () => {
   assert.match(bar(0.65, 10, undefined, undefined, 0.6), /\x1b\[41;97m/);
 });
 
+// ── the label overlaid on the bar ───────────────────────────────────────────
+
+// The label carries both the fill and the countdown when the bar is wide enough
+// to hold them — as the CLI's quota line always has — and the countdown alone
+// when it is not. What must never happen is a truncated countdown: `2h3` is a
+// different number, not a shorter one.
+
+const plain = (/** @type {string} */ s) => s.replace(/\x1b\[[0-9;]*m/g, '').trim();
+
+const H = 3600_000;
+/** 2h30m away: the longest ordinary form formatReset produces. */
+const inTwoAndAHalfHours = () => Date.now() + 2.5 * H;
+
+test('a wide bar carries the percentage and the countdown, separated by a dot', () => {
+  assert.equal(plain(bar(0.97, 20, inTwoAndAHalfHours())), '97% \u00b7 2h30m');
+});
+
+// The widest label this produces is 12 columns, so the widest bars are the ones
+// that show both — and a bar at the default width does not. That is the price
+// of the house separator, and it is the one the fallback exists to pay.
+test('a bar exactly wide enough for both keeps both', () => {
+  assert.equal(plain(bar(1, 12, inTwoAndAHalfHours())), '100% \u00b7 2h30m');
+});
+
+test('one column short, the percentage yields and the countdown stays whole', () => {
+  assert.equal(plain(bar(1, 11, inTwoAndAHalfHours())), '2h30m');
+  assert.equal(plain(bar(0.97, 10, inTwoAndAHalfHours())), '2h30m');
+});
+
+// BAR_MIN..BAR_MAX, plus the widths below BAR_MIN the narrow-terminal backstop
+// can force. Whatever is drawn is one of the two fields entire, never a prefix
+// of one.
+test('no width ever produces a half-drawn countdown', () => {
+  for (let w = 5; w <= 20; w++) {
+    const label = plain(bar(0.97, w, inTwoAndAHalfHours()));
+    assert.ok(label === '97% \u00b7 2h30m' || label === '2h30m',
+      `width ${w} drew "${label}", which is neither field whole`);
+  }
+});
+
+test('with no countdown to show, the percentage is the label', () => {
+  assert.equal(plain(bar(0.45, 10)), '45%');
+  assert.equal(plain(bar(0.45, 10, Date.now() - 60_000)), '45%');
+});
+
+test('a bar with no reading at all is unchanged', () => {
+  assert.equal(plain(bar(null, 10)), '-');
+  assert.equal(plain(bar(NaN, 10)), '-');
+  // No percentage exists to pair with the countdown, so it stands alone.
+  assert.equal(plain(bar(null, 10, inTwoAndAHalfHours())), '2h30m');
+});
+
 // The row renderer has to hand the live threshold to every bar it draws, or the
 // clamp above never reaches the screen. Rendered, not called directly: the
 // argument list is the thing under test.

@@ -424,9 +424,23 @@ export function bar(ratio, w = 10, resetTs, windowMs, threshold) {
   const f = Math.round(ratio * w);
   const { bg, fg } = barColor(ratio, resetTs, windowMs, threshold);
 
-  // Build the label to overlay: show reset time if available, else percentage
+  // Both fields when the bar is wide enough to hold them, the countdown alone
+  // when it is not. The CLI's own quota line (formatQuotaLine in
+  // status-renderer.js) has always drawn percentage and reset together, so the
+  // bar showing only one of them was a divergence, not a decision.
+  //
+  // Which field yields is, though: a row too narrow to draw in full "loses the
+  // reset countdown its tail carries" (see the backstop further down), so the
+  // countdown is the field already judged load-bearing when space is scarce and
+  // the percentage is the addition. Nothing is ever truncated to fit — half a
+  // countdown reads as a different number, which is worse than either field on
+  // its own.
+  //
+  // `' · '` is the separator used throughout tui.js and dashboard.js, so this
+  // label composes the way every other string in the UI does.
   const pct = (ratio * 100).toFixed(0) + '%';
-  const label = rst || pct;
+  const both = rst ? `${pct} · ${rst}` : '';
+  const label = both && both.length <= w ? both : (rst || pct);
   const text = label.slice(0, w);
   const pad = w - text.length;
   const lp = Math.floor(pad / 2);

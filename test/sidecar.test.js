@@ -11,8 +11,20 @@ class FakeChild extends EventEmitter {
     this.pid = pid;
     this.kills = [];
     this.stderr = new EventEmitter();
+    // Which signal, counted, this child finally goes on — 1 for "the first one
+    // is enough", 2 for the real sidecar, null for one that ignores them all.
+    // Default null so every test written before stop() could wait is untouched.
+    this.diesOnKill = null;
   }
-  kill(sig) { this.kills.push(sig || 'SIGTERM'); }
+  kill(sig) {
+    this.kills.push(sig || 'SIGTERM');
+    // Asynchronously, like a real child: a synchronous exit here would be
+    // delivered before the caller could subscribe, which is exactly the bug
+    // the ordering inside _stopChild is written to avoid.
+    if (this.diesOnKill != null && this.kills.length >= this.diesOnKill) {
+      setImmediate(() => this.emit('exit', null, sig || 'SIGTERM'));
+    }
+  }
 }
 
 // Records each spawn spec and hands out FakeChildren in order.
@@ -121,6 +133,86 @@ test('stop() cancels a pending respawn timer', async () => {
   sc.stop();
   await wait(30);
   assert.equal(spawn.calls.length, 1);
+});
+
+// ── stop: the grace, and the escalation ──────────────────────────────────────
+
+// The sidecar (claude-code-proxy v0.1.40+) reads the first SIGTERM as "begin a
+// graceful shutdown" and only forces its exit on a second. One polite signal
+// and an immediate process.exit() therefore left it running on its port.
+
+test('stop() resolves when the child has actually gone, not when the signal is sent', async () => {
+  const spawn = fakeSpawner();
+  const sc = makeSidecar([{ name: 'codex', command: ['ccp'] }], spawn);
+  sc.start();
+  spawn.children[0].diesOnKill = 1;
+
+  const started = Date.now();
+  await sc.stop({ graceMs: 5_000 });
+  assert.deepEqual(spawn.children[0].kills, ['SIGTERM']);
+  assert.ok(Date.now() - started < 1_000, 'a child that goes at once must not serve out the grace');
+});
+
+test('stop() gives up when the grace expires rather than waiting for ever', async () => {
+  const spawn = fakeSpawner();
+  const sc = makeSidecar([{ name: 'codex', command: ['ccp'] }], spawn);
+  sc.start();
+
+  await sc.stop({ graceMs: 20 });   // this child never exits
+  assert.deepEqual(spawn.children[0].kills, ['SIGTERM'], 'a patient caller escalates to nothing');
+});
+
+test('stop({force}) escalates to the forcing signal when the grace expires', async () => {
+  const spawn = fakeSpawner();
+  const sc = makeSidecar([{ name: 'codex', command: ['ccp'] }], spawn);
+  sc.start();
+  spawn.children[0].diesOnKill = 2;   // the real sidecar's semantics
+
+  await sc.stop({ graceMs: 20, force: true });
+  assert.deepEqual(spawn.children[0].kills, ['SIGTERM', 'SIGTERM']);
+});
+
+test('stop({force}) falls back to SIGKILL if even the forcing signal is ignored', async () => {
+  const spawn = fakeSpawner();
+  const sc = makeSidecar([{ name: 'codex', command: ['ccp'] }], spawn);
+  sc.start();
+
+  await sc.stop({ graceMs: 20, force: true });
+  // The backstop is not about today's sidecar — it is what keeps this working
+  // when upstream changes the meaning of a signal again.
+  assert.deepEqual(spawn.children[0].kills, ['SIGTERM', 'SIGTERM', 'SIGKILL']);
+});
+
+test('stop() with no grace signals synchronously and waits for nothing', async () => {
+  const spawn = fakeSpawner();
+  const sc = makeSidecar([{ name: 'codex', command: ['ccp'] }], spawn);
+  sc.start();
+
+  const stopped = sc.stop();   // this child never exits
+  assert.deepEqual(spawn.children[0].kills, ['SIGTERM'], 'the signal goes out before any await');
+  await stopped;               // and the promise still settles
+});
+
+test('stop() waits on every child, and settles when there is none to wait for', async () => {
+  const spawn = fakeSpawner();
+  const sc = makeSidecar([
+    { name: 'codex', command: ['ccp'] },
+    { name: 'other', command: ['other-proxy'] },
+  ], spawn);
+  sc.start();
+  spawn.children[0].diesOnKill = 1;
+  spawn.children[1].diesOnKill = 2;
+
+  await sc.stop({ graceMs: 20, force: true });
+  assert.deepEqual(spawn.children[0].kills, ['SIGTERM']);
+  assert.deepEqual(spawn.children[1].kills, ['SIGTERM', 'SIGTERM']);
+
+  // Already down, so there is no child to signal and nothing to wait for. A
+  // shutdown that hung here would hang on the one case it cannot fix.
+  const down = makeSidecar([{ name: 'codex', command: ['ccp'] }], fakeSpawner());
+  down.start();
+  down.states[0].child.emit('exit', 1, null);
+  await down.stop({ graceMs: 5_000, force: true });
 });
 
 // ── status ───────────────────────────────────────────────────────────────────

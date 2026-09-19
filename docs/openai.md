@@ -12,14 +12,27 @@ translating proxy — handles the translation; TeamClaude supervises it and rout
 `/v1/messages` on the front, the Codex Responses API on the back, authenticates via Codex OAuth
 against your ChatGPT subscription, and accepts raw `gpt-*` model ids.
 
+**Install the fork, not the upstream build.** Two things this page relies on are not upstream:
+the sidecar forwards Codex's quota headers, without which every bar on the account reads
+`unknown`, and its header timeout is configurable, without which a long reasoning turn dies at
+60 seconds. Both live in
+[rikbrown/claude-code-proxy](https://github.com/rikbrown/claude-code-proxy), which tracks
+upstream and publishes its own releases.
+
 ## Setup
 
 1. Install and authenticate the sidecar (one-time):
 
    ```bash
-   brew install raine/claude-code-proxy/claude-code-proxy
+   curl -fsSL https://raw.githubusercontent.com/rikbrown/claude-code-proxy/rik/main/scripts/install.sh | bash
    claude-code-proxy codex auth login
    ```
+
+   The installer verifies the checksum and clears the macOS quarantine attribute. It lands the
+   binary in `/usr/local/bin` or `~/.local/bin`; `CLAUDE_CODE_PROXY_INSTALL_DIR` overrides that.
+   **Give `sidecars[].command` an absolute path** if the install directory is not on the `PATH`
+   a service sees — a launchd-started server gets a bare `PATH` and will not resolve
+   `claude-code-proxy` by name.
 
 2. Configure TeamClaude — four pieces in `~/.config/teamclaude.json`:
 
@@ -97,10 +110,37 @@ Getting the headers that far takes a patch to the sidecar — one module and fou
 keeps the newest snapshot and stamps it onto every Codex response under the names Codex itself
 uses. Both transports are covered: the HTTP one carries the headers, the WebSocket one carries the
 same numbers as a `codex.rate_limits` event ahead of the first output, so a response reports the
-request it answers. Until it lands upstream, build the branch and point `sidecars[].command` at
-`target/release/claude-code-proxy` instead of the Homebrew binary. Without the patch the account
-still works; its bars just read `unknown`, and exhaustion shows up only as a 429 with
-`retry-after`.
+request it answers. It is offered upstream as
+[raine/claude-code-proxy#127](https://github.com/raine/claude-code-proxy/pull/127) and, until that
+merges, ships in the [fork release](https://github.com/rikbrown/claude-code-proxy/releases) the
+[Setup](#setup) step installs. Upstream's build still works; its bars just read `unknown`, and
+exhaustion shows up only as a 429 with `retry-after`.
+
+## Timeouts
+
+A `gpt-*` request waits on **two** header timeouts, and the shorter one wins. TeamClaude's
+`headersTimeoutMs` bounds how long it waits on the account; the sidecar separately bounds how long
+it waits on Codex. Raising one and not the other just moves which of them fires.
+
+The sidecar's wait defaults to **60 seconds**, which a long reasoning turn exceeds — the turn dies
+with no output rather than a useful error. Upstream hardcodes it; the fork build makes it
+configurable, so set it on the `sidecars` entry alongside any `headersTimeoutMs` you set on the
+accounts:
+
+```json
+{ "name": "codex",
+  "command": ["/Users/you/.local/bin/claude-code-proxy", "serve", "--no-monitor", "--port", "18765"],
+  "env": { "CCP_CODEX_HEADER_TIMEOUT_MS": "300000" } }
+```
+
+`codex.headerTimeoutMs` in `~/.config/claude-code-proxy/config.json` does the same thing; the
+environment variable wins, and either is ignored below 1000. `sidecars[].env` is read once at
+startup, so restart the server rather than reloading.
+
+Two other fork-only options live in that same config, both off by default and neither needed for a
+standard setup: `codex.contextManagement` (with `contextManagementThreshold`) manages a long
+conversation's context on the Codex side, and `codex.fullLane` puts the lite-lane models on the
+full Responses lane. Each has a `CCP_CODEX_`-prefixed environment variable of the same name.
 
 ## Why not the built-in Codex provider?
 

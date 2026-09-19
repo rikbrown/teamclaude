@@ -3229,6 +3229,18 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
           // does not yet skip the account for this model family afterwards, so a
           // later request for it pays one refusal here before it rotates.
           console.log(`[TeamClaude] ${safeLine(spentCodexWindows.join(', '), 80)} spent on "${account.name}" — switching account for this request`);
+        } else if (accountManager.isCodexConduit(account)) {
+          // A conduit has no quota of its own: it translates, and this rejection
+          // came from whichever pooled account served its back leg — which has
+          // already recorded the spent window against itself. Holding the
+          // conduit would file a copy of someone else's state, and copies go
+          // stale: the pool can recover within the hold's term (a reset credit
+          // redeemed, a window rolled over) while the hold keeps every gpt-*
+          // request out, because the conduit is the only account its route can
+          // use on the way in. Tracking the exhaustion once, where it is true,
+          // costs a loopback round trip per refused request and buys recovery
+          // the instant the pool has it.
+          console.log(`[TeamClaude] Quota rejection (429) relayed by "${account.name}" — the limit belongs to the pooled account behind it, not the conduit`);
         } else {
           const hold = Math.min(Math.max(retryAfter, 1), 3600);
           // Name the spent window when the headers said which: "which one" is

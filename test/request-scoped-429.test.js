@@ -193,6 +193,33 @@ test('with the reply already on the wire, the retry is skipped', async () => {
   } finally { restore(); host.close(); upstream.close(); }
 });
 
+// The two retry branches read as mutually exclusive — one runs after a hop, the
+// other only when there was nobody to hop to — and they are not. A request that
+// finds every sibling paused takes the no-sibling retry, and by the time that
+// wait is over a sibling can be idle again, so the retried attempt hops and
+// lands in the post-hop branch. One flag between them is what keeps the client's
+// bill at one wait; a flag each made it four attempts and two waits.
+test('a request that reaches both retry sites still waits only once', async () => {
+  const RETRY_DELAY_MS = 400;
+  const restore = withRetryDelay(RETRY_DELAY_MS);
+  try {
+    await withFleet(['a', 'b', 'c'], async ({ am, proxyPort, seen }) => {
+      // No idle sibling at the first refusal, and one by the second. Set
+      // directly rather than through pauseAccount, which also teaches the
+      // concurrency learner and arms a ramp — neither is what this is about.
+      am.accounts[1].pausedUntil = Date.now() + RETRY_DELAY_MS / 2;
+      am.accounts[2].pausedUntil = Date.now() + RETRY_DELAY_MS / 2;
+      const r = await post(proxyPort);
+      assert.equal(r.status, 429);
+      assert.equal(seen.length, 3,
+        `upstream saw ${seen.length} attempts: the first refusal, the retry, and the hop after it. `
+        + 'A fourth means the post-hop branch spent a second wait the request had already used');
+      assert.ok(r.ms < RETRY_DELAY_MS * 2,
+        `answered in ${r.ms}ms — one wait of ${RETRY_DELAY_MS}ms, not two`);
+    });
+  } finally { restore(); }
+});
+
 test('with no sibling, a headerless 429 gets one short retry and then reaches the client', async () => {
   await withFleet(['a'], async ({ am, proxyPort, seen }) => {
     const r = await post(proxyPort);

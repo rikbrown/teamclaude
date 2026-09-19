@@ -2643,6 +2643,13 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
         // retry below still owns it: when it is armed it goes first, for free,
         // and this retry takes the attempt after it.
         //
+        // ctx.requestScopedRetried is the SAME flag the no-sibling retry below
+        // sets: one headerless-429 wait per request, whichever of the two spends
+        // it. The two branches read as mutually exclusive and are not — a request
+        // that finds no idle sibling, retries, and only THEN finds one to hop
+        // onto reaches both sites, and a flag each let it wait twice over four
+        // attempts.
+        //
         // Only for a caller that actually waits. A Codex one does not: it gives
         // the response head 60s, then retries the whole request itself (see
         // holdsConnection, and the incident recorded in
@@ -2650,10 +2657,10 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
         // wait underneath its own, which is the trade that file exists to refuse.
         const retryDelayMs = resolveHeaderless429RetryDelayMs();
         const callerWaits = holdsConnection(ctx.provider);
-        if (!ctx.headerless429Retried && !switchingToSx && retryCount < maxRetries
+        if (!ctx.requestScopedRetried && !switchingToSx && retryCount < maxRetries
           && !res.headersSent && !clientGone(res) && !ctx.signal?.aborted && callerWaits) {
           // Once per request: a retry that is refused too has made the point.
-          ctx.headerless429Retried = true;
+          ctx.requestScopedRetried = true;
           console.log(`[TeamClaude] 429 followed the request onto "${account.name}" with no rate-limit headers — retrying it once on the same account in ${retryDelayMs}ms`
             + (refusal ? ` (${safeLine(refusal)})` : ''));
           await waitForRetry(retryDelayMs, ctx.signal);
@@ -2690,7 +2697,10 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
       // short retry covers a momentary blip, and then it is the client's turn.
       if (requestScoped) {
         // Same rule as the post-hop retry and the inline absorb below: a wait is
-        // only invisible to a caller that waits longer than we do.
+        // only invisible to a caller that waits longer than we do. And the same
+        // one-wait budget, through the same flag — this site can run first and
+        // the post-hop one after it, on a request whose siblings recover during
+        // the wait.
         if (!ctx.rateLimitHopped && !ctx.requestScopedRetried && retryCount < maxRetries
           && holdsConnection(ctx.provider)) {
           ctx.requestScopedRetried = true;

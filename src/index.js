@@ -1360,11 +1360,14 @@ async function runCommand() {
     if (settings && !claudeArgs.includes('--settings')) claudeArgs.push('--settings', settings);
     // Dispatchable subagents per custom model — the Agent tool's `model`
     // parameter is an alias enum, so only a named agent definition can carry a
-    // custom model id into a subagent. `customModelAgents: false` skips them for
-    // operators with their own ~/.claude/agents definitions: the plain agents
-    // invite an effort-less dispatch, and a file-based agent's `model:` reaches
-    // the proxy without them.
-    const agents = config.customModelAgents === false ? null : buildCustomModelAgents(config.customModels);
+    // custom model id into a subagent. Opt-in (`customModelAgents: true`),
+    // because these plain agents pin no effort: dispatching one runs the model
+    // at whatever effort the parent session happens to be on. They also arrive
+    // via `--agents`, the second-highest agent precedence there is, so they list
+    // above the effort-pinned agents of the rikclaude-agents plugin (plugin
+    // agents are the lowest) and duplicate them, one model at a time. Turn them
+    // on for a fleet that defines no agents of its own — see docs/agents.md.
+    const agents = config.customModelAgents === true ? buildCustomModelAgents(config.customModels) : null;
     if (agents && !claudeArgs.includes('--agents')) claudeArgs.push('--agents', agents);
   }
 

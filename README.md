@@ -65,6 +65,7 @@ Already logged into Claude Code? `teamclaude import` takes its credentials inste
 - Pools OpenAI Codex subscriptions alongside Claude accounts (experimental): the Codex CLI is routed through the same proxy, by config or transparently through the MITM proxy, and rotates on its own quota.
 - Takes any Anthropic-compatible API (DeepSeek, GLM) as a low-priority fallback for when the Claude accounts are done.
 - Serves OpenAI models next to Claude ones — a supervised local sidecar translates `gpt-*` requests onto a ChatGPT subscription, with real model names in `/model` and GPT subagents dispatchable from a Claude parent (`sidecars` + `customModels`, this fork).
+- Ships those subagents as a Claude Code plugin: one named agent per model **and effort level**, which the Agent tool's `model` parameter cannot express (`/plugin install rikclaude-agents@rikclaude`, this fork).
 - No dependencies. Node built-ins only.
 
 ## Everyday commands
@@ -152,10 +153,10 @@ At launch, `teamclaude run` — and the `claude` alias, which passes through `ru
 | Row field | Where it ends up |
 | --- | --- |
 | `model`, `label`, `description` | A `/model` picker row under the **real** model id (`--settings`), so `/model gpt-5.6-sol` works picked or typed |
-| `model` | A dispatchable subagent named after the model (`--agents`), so "dispatch a `gpt-5.6-terra` subagent" works from a Claude parent. Set `"customModelAgents": false` to skip these if you define your own agents in `~/.claude/agents/` |
+| `model` | Nothing by default. Set `"customModelAgents": true` and each row also becomes a plain subagent named after the model (`--agents`), so "dispatch a `gpt-5.6-terra` subagent" works from a Claude parent. Off because those agents pin no effort and outrank every agent file on disk — prefer the effort-pinned [plugin agents](docs/agents.md) |
 | `contextTokens` | `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, set to the largest value across rows, so Claude Code compacts at the real window instead of assuming 200k |
 
-For tools that spawn `claude` themselves, `teamclaude env` can set only environment variables. It carries the window and `ANTHROPIC_CUSTOM_MODEL_OPTION` for the **first** row. For GPT subagents under `env`, create `~/.claude/agents/<name>.md` with `model: gpt-5.6-terra` in its frontmatter.
+For tools that spawn `claude` themselves, `teamclaude env` can set only environment variables. It carries the window and `ANTHROPIC_CUSTOM_MODEL_OPTION` for the **first** row. Agents do not depend on either mode: they are read from disk, whether they come from the [`rikclaude-agents` plugin](docs/agents.md) or from a `~/.claude/agents/<name>.md` you write with `model: gpt-5.6-terra` in its frontmatter.
 
 Each request is routed by the model name in its body, so one session can freely mix models: use `claude --model gpt-5.6-sol` for a whole session, `/model gpt-5.6-sol` during a session, or a Claude parent that dispatches a GPT subagent.
 
@@ -240,6 +241,7 @@ This feature is on by default. Each account row shows which window binds first: 
 | [Routing](docs/routing.md) | Rotation, the two kinds of 429, storm control, model routes, session spreading, pinning, prompt cache |
 | [Quota](docs/quota.md) | Quota probe, keep-warm, holding on exhaustion |
 | [OpenAI models](docs/openai.md) | Codex sidecar setup, custom model registration, GPT subagents, limitations |
+| [Subagents](docs/agents.md) | The `rikclaude-agents` plugin: effort-pinned agents per model, installing it, seeding it for a team |
 | [Configuration](docs/configuration.md) | Config format, every field, environment variables, network tuning |
 | [Proxy modes](docs/proxy-modes.md) | MITM forward proxy, sx.org residential egress |
 | [Remote host](docs/remote.md) | Running the fleet on an always-on box: reaching it, moving the accounts, service supervision, pointing clients at it |

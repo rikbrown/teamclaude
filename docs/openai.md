@@ -76,18 +76,22 @@ traffic to Claude accounts, so the only way to reach a GPT model is to ask for o
   labels).
 - Correct context sizing: `CLAUDE_CODE_MAX_CONTEXT_TOKENS` is set to the largest `contextTokens`,
   so Claude Code compacts at the model's real window instead of assuming 200k.
-- **Dispatchable GPT subagents**: `run` injects one agent definition per custom model, named after
-  the model — "dispatch a `gpt-5.6-terra` subagent" works in any session. (The Agent tool's `model`
-  *parameter* is an alias enum and cannot carry a custom id; only an agent definition can.)
-  `"customModelAgents": false` turns these off when your own `~/.claude/agents/` definitions
-  already name the models.
+- **Dispatchable GPT subagents**: an agent definition whose frontmatter `model:` names a custom id
+  reaches the sidecar like any other request. (The Agent tool's `model` *parameter* is an alias
+  enum and cannot carry a custom id; only a definition can.) The
+  [`rikclaude-agents` plugin](agents.md) ships one per model **and effort level**, which the
+  parameter could not express either. `"customModelAgents": true` instead injects one plain,
+  effort-less agent per model at launch (`--agents`) — for a fleet that defines no agents of its
+  own.
 - Mixed sessions: a Claude parent freely dispatches GPT subagents and vice versa; the proxy routes
   each request by the model in its body.
 
 For tools that spawn `claude` themselves, `teamclaude env` carries the env-var subset: window
 sizing, plus `ANTHROPIC_CUSTOM_MODEL_OPTION` for the **first** custom model. Env vars cannot
-express picker rows or agent definitions. For GPT subagents under `env`, create
-`~/.claude/agents/<name>.md` with `model: gpt-5.6-terra` frontmatter.
+express picker rows or agent definitions. Agents are unaffected by this: install the
+[`rikclaude-agents` plugin](agents.md), or write your own
+`~/.claude/agents/<name>.md` with `model: gpt-5.6-terra` frontmatter. Either is read from disk, so
+both work under `env` as well as `run`.
 
 ## Quota
 

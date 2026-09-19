@@ -1,0 +1,17 @@
+{
+  "description": "Prints the subagent routing policy into every session, since a plugin's CLAUDE.md is not loaded as context.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cat \"${CLAUDE_PLUGIN_ROOT}/hooks/subagents.md\" 2>/dev/null || true",
+            "timeout": 5,
+            "statusMessage": "Loading subagent routing policy"
+          }
+        ]
+      }
+    ]
+  }
+}

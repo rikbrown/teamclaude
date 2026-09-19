@@ -3492,7 +3492,9 @@ export class AccountManager {
     // threshold and every request fails, while a sibling sits at 0%.
     // A standalone sidecar (no Codex accounts here) is NOT a conduit: it holds
     // its own login, the forwarded numbers are its own, and they still apply.
-    if (!(isLocalUpstream(account) && this.accounts.some(a => providerOf(a) === 'codex'))) {
+    // Shares its definition with the token counters, which drop a conduit hop
+    // for the same reason: what it reports belongs to whoever served.
+    if (!this._isCodexConduit(account)) {
       for (const window of ['primary', 'secondary']) {
         const used = parseFloat(headers[`x-codex-${window}-used-percent`]);
         const minutes = parseInt(headers[`x-codex-${window}-window-minutes`], 10);
@@ -3564,11 +3566,48 @@ export class AccountManager {
   }
 
   /**
+   * Whether `account` merely RELAYS to this fleet's own Codex pool instead of
+   * holding a subscription of its own: a translating sidecar whose back leg is
+   * pointed back at this proxy, so each turn crosses this process twice — once
+   * inbound on `/v1/messages` and once outbound on `/backend-api/codex/*`
+   * (docs/openai.md, "Several ChatGPT accounts behind one sidecar").
+   *
+   * Keyed on three things, all of which the documented setup has and no other
+   * account does:
+   *
+   *   a loopback upstream   the sidecar runs on this machine.
+   *   the Anthropic wire    a conduit is reached on `/v1/messages`, so it
+   *                         carries no `provider` field — docs/openai.md warns
+   *                         that giving one `"provider": "codex"` puts it in the
+   *                         foreign-subscription partition and every `gpt-*`
+   *                         request then fails to find an account. A pooled
+   *                         ChatGPT account is therefore never a conduit,
+   *                         whatever its upstream says; it IS the pool.
+   *   a pool to relay to    a standalone sidecar holding its own ChatGPT login
+   *                         is NOT a conduit: everything it reports is its own,
+   *                         and it is the only hop there is.
+   *
+   * Still imprecise in one direction, deliberately: a fleet running BOTH a
+   * self-hosting local Anthropic backend and Codex accounts reads the former as
+   * a conduit. Narrowing that would mean correlating the two hops of one turn,
+   * which nothing here can do — they are separate requests sharing no id — and
+   * the cost of the false positive is a row that under-reports rather than one
+   * that misroutes.
+   *
+   * @param {any} account
+   */
+  _isCodexConduit(account) {
+    return isLocalUpstream(account)
+      && providerOf(account) === DEFAULT_PROVIDER
+      && this.accounts.some(a => providerOf(a) === 'codex');
+  }
+
+  /**
    * Update cumulative token usage from response body data.
    */
   updateUsage(accountIndex, inputTokens, outputTokens) {
     const account = this.accounts[accountIndex];
-    if (!account) return;
+    if (!account || this._isCodexConduit(account)) return;
     if (inputTokens) account.usage.totalInputTokens += inputTokens;
     if (outputTokens) account.usage.totalOutputTokens += outputTokens;
   }
@@ -3588,6 +3627,22 @@ export class AccountManager {
    */
   recordTokenUsage(accountIndex, sessionId, model, usage) {
     if (!usage) return;
+    // A conduit hop is the SAME tokens, translated: the sidecar rebuilt this
+    // report out of the Responses usage the pool sent it, and the pool's own hop
+    // records the original a moment later. Both scopes would double — the two
+    // account rows are distinct, but a session is one row and carries the same
+    // id on both hops, so its context and spend would read twice the truth.
+    //
+    // Dropped rather than deduplicated because there is nothing to deduplicate
+    // against: the two hops are separate requests that share no id, and the
+    // conduit spends nothing of its own anyway (its login is a stub). Booking at
+    // the hop that really spent is what keeps one turn one record.
+    //
+    // Only the ACCOUNT-scoped and SESSION-scoped counters stop here. Per-client
+    // attribution still runs on the inbound hop, in the caller, because that is
+    // the only hop that can see who asked: the outbound one comes from the
+    // sidecar on loopback and carries no client identity at all.
+    if (this._isCodexConduit(this.accounts[accountIndex])) return;
     // The same resolver routing uses, so a token total and a routing decision
     // agree about which family a request belonged to. Resolved here rather than
     // at the call sites: they parse a wire format and have no business knowing

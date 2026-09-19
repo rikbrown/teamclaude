@@ -106,6 +106,14 @@ the account that answered last. If a borrowed number crossed the switch threshol
 conduit out of service and fail every `gpt-*` request while a sibling remained at 0%, because the
 conduit is the only account that its route can use on the way in.
 
+A 429 it relays is read the same way, and for the same reason: the spent window belongs to the
+pooled account that served the back leg, which records it against itself, so a conduit is never
+throttled. The request rotates away as any quota rejection makes it, but the conduit stays
+selectable, and the next `gpt-*` request goes straight back out instead of waiting out an hour on a
+hold nothing is behind — the pool can recover well inside that term, whether by a window rolling
+over or by a [free reset credit](#free-rate-limit-reset-credits). Accounts that hold a subscription
+of their own, a standalone sidecar among them, own the 429 they are sent and are held for it.
+
 Getting the headers that far takes a patch to the sidecar — one module and four call sites, which
 keeps the newest snapshot and stamps it onto every Codex response under the names Codex itself
 uses. Both transports are covered: the HTTP one carries the headers, the WebSocket one carries the

@@ -10,7 +10,9 @@
 //
 // stdout is ignored (sidecars keep their own log files); stderr's last few
 // lines are kept in a ring buffer so `getStatus()` can say WHY a sidecar is
-// crash-looping without anyone hunting for its logs.
+// crash-looping without anyone hunting for its logs. What the sidecar has to
+// say about its own health rides along beside that, polled off its endpoint
+// rather than inferred from ours — see the readout section below.
 //
 // One failure mode earned its own handling. A sidecar binds a fixed port, so a
 // copy that outlives its server keeps that port and every later server fails to
@@ -62,6 +64,71 @@ export function isBindConflict(line) {
   return /address already in use|address in use|EADDRINUSE/i.test(String(line));
 }
 
+// The sidecar's health readout, polled off its own /monitor endpoint.
+//
+// `--no-monitor` picks the sidecar's plain serve mode, which still builds a
+// monitor handle and still registers /monitor on the same router, so this needs
+// nothing changed about how the process is spawned — verified against
+// claude-code-proxy 0.1.40 with today's `sidecars[].command`.
+//
+// It is a READOUT, not a dependency. The endpoint belongs to upstream and its
+// shape can move under any rebase, so every field here is optional and every
+// failure — no listener, a timeout, a 404, a schema that no longer matches —
+// means "no numbers this time" and leaves the process line exactly as it was
+// before this existed. Nothing in here may throw at the supervisor or the TUI.
+
+/** How often to re-read it. The screen it feeds redraws every 500ms at its
+ *  busiest and every 5s when idle, so polling faster buys nothing an operator
+ *  could see; the sidecar's own dashboard uses 250ms because it draws per-
+ *  request progress, which this line does not. */
+const MONITOR_POLL_MS = 2_000;
+/** A local process answering from memory. Anything slower than this is a
+ *  sidecar with worse problems than a missing status line. */
+const MONITOR_TIMEOUT_MS = 500;
+/** Ceiling on the reply. The body carries the whole recent ring (200 requests,
+ *  each with an upstream error string of no fixed length), and when the sidecar
+ *  is blocked the thing answering on its port is by definition NOT the sidecar. */
+const MONITOR_MAX_BYTES = 1024 * 1024;
+
+/** The port this sidecar was told to listen on, or null when the command does
+ *  not say. Read from the entry's own args rather than assuming 18765: the port
+ *  is the operator's choice, and a readout aimed at the wrong one would report
+ *  a stranger's numbers.
+ *  @param {string[]|undefined} command
+ *  @returns {number|null}
+ */
+export function monitorPort(command) {
+  const args = Array.isArray(command) ? command : [];
+  for (let i = 0; i < args.length; i++) {
+    const arg = String(args[i]);
+    const value = arg === '--port' ? args[i + 1] : arg.startsWith('--port=') ? arg.slice(7) : null;
+    if (value == null) continue;
+    const port = Number(value);
+    if (Number.isInteger(port) && port > 0 && port < 65_536) return port;
+  }
+  return null;
+}
+
+/** The two numbers the ⚙ line wants, out of whatever /monitor answered.
+ *
+ *  `active` is the requests the sidecar has in flight right now. Errors are
+ *  counted over `recent`, its ring of finished requests, which makes the number
+ *  "failing lately" rather than "failed ever" — the question an operator
+ *  glancing at a status line is actually asking, and the only one a bounded
+ *  ring can answer honestly. null means the payload did not say.
+ *  @param {any} payload
+ *  @returns {{activeRequests: number|null, recentErrors: number|null}|null}
+ */
+export function monitorCounts(payload) {
+  const snapshot = payload?.snapshot;
+  const active = Array.isArray(snapshot?.active) ? snapshot.active.length : null;
+  const recent = Array.isArray(snapshot?.recent)
+    ? snapshot.recent.filter((/** @type {any} */ r) => r?.status === 'failed').length
+    : null;
+  if (active == null && recent == null) return null;   // not a shape we know
+  return { activeRequests: active, recentErrors: recent };
+}
+
 export class Sidecar {
   constructor(entries, {
     spawnFn = defaultSpawn,
@@ -74,6 +141,8 @@ export class Sidecar {
     onPids = null,
     readProcess = defaultReadProcess,
     killFn = (pid, signal) => process.kill(pid, signal),
+    fetchFn = fetch,
+    monitorPollMs = MONITOR_POLL_MS,
   } = {}) {
     this.entries = Array.isArray(entries) ? entries : [];
     this.spawnFn = spawnFn;
@@ -88,6 +157,8 @@ export class Sidecar {
     this.onPids = onPids;
     this.readProcess = readProcess;
     this.killFn = killFn;
+    this.fetchFn = fetchFn;
+    this.monitorPollMs = monitorPollMs;
     this.stopping = false;
     // Per-entry runtime state, keyed by entry (parallel array to this.entries).
     this.states = this.entries.map(entry => ({
@@ -99,6 +170,12 @@ export class Sidecar {
       timer: null,
       stderrTail: [],
       blocked: null,   // stderr line proving the port is held, else null
+      // The health readout: where to ask, when to ask again, and the last
+      // answer (null until one arrives, and again whenever one stops arriving).
+      monitorPort: monitorPort(entry.command),
+      monitorTimer: null,
+      /** @type {{activeRequests: number|null, recentErrors: number|null}|null} */
+      monitor: null,
     }));
   }
 
@@ -134,6 +211,7 @@ export class Sidecar {
     const gone = [];
     for (const state of this.states) {
       if (state.timer) { clearTimeout(state.timer); state.timer = null; }
+      this._stopMonitor(state);
       if (state.child) gone.push(this._stopChild(state.child, graceMs, force));
     }
     await Promise.all(gone);
@@ -169,6 +247,10 @@ export class Sidecar {
       blocked: !!state.blocked,
       blockedReason: state.blocked,
       stderrTail: [...state.stderrTail],
+      // Straight off the sidecar's /monitor, and null whenever it did not
+      // answer — which a consumer must be able to tell apart from a zero.
+      activeRequests: state.monitor?.activeRequests ?? null,
+      recentErrors: state.monitor?.recentErrors ?? null,
     }));
   }
 
@@ -247,6 +329,7 @@ export class Sidecar {
       if (state.child !== child) return;
       this._onDown(state, signal ? `signal ${signal}` : `code ${code}`);
     });
+    this._scheduleMonitor(state);
   }
 
   _onDown(state, lastExit) {
@@ -255,6 +338,9 @@ export class Sidecar {
     if (state.startedAt && Date.now() - state.startedAt >= this.stableMs) state.restarts = 0;
     state.child = null;
     state.lastExit = lastExit;
+    // Nothing to poll and nothing true left to say: "2 active" printed beside
+    // "down (code 1)" describes a process that no longer exists.
+    this._stopMonitor(state);
     if (this.stopping) return;
     const delay = restartDelayMs(state.restarts, this);
     // Retrying still makes sense while blocked — a port held by a process we
@@ -269,6 +355,65 @@ export class Sidecar {
       this._spawn(state);
     }, delay);
     state.timer.unref?.();
+  }
+
+  /** Arm the next health poll for this entry, if there is anything to poll.
+   *  @param {any} state */
+  _scheduleMonitor(state) {
+    if (this.stopping || !state.child || !state.monitorPort || state.monitorTimer) return;
+    const child = state.child;
+    state.monitorTimer = setTimeout(() => {
+      state.monitorTimer = null;
+      this._readMonitor(state.monitorPort).then(counts => {
+        // Everything below is conditional on the poll still being about the
+        // same running child. It was in flight for up to a timeout, and in that
+        // window the sidecar can have died, been respawned, or been stopped —
+        // after which these numbers describe a process that is not there, and
+        // a second loop would be left polling beside the first.
+        if (this.stopping || state.child !== child) return;
+        state.monitor = counts;
+        this._scheduleMonitor(state);
+      });
+    }, this.monitorPollMs);
+    // A status line may not be the reason this process is still alive.
+    state.monitorTimer.unref?.();
+  }
+
+  /** @param {any} state */
+  _stopMonitor(state) {
+    if (state.monitorTimer) { clearTimeout(state.monitorTimer); state.monitorTimer = null; }
+    state.monitor = null;
+  }
+
+  /** Ask the endpoint once. Never rejects and never throws: a readout that
+   *  failed is a readout with nothing in it.
+   *  @param {number} port
+   *  @returns {Promise<{activeRequests: number|null, recentErrors: number|null}|null>}
+   */
+  async _readMonitor(port) {
+    try {
+      // Loopback only. The sidecar's own handler refuses a non-local peer, and
+      // asking some other host about "our" process would mean nothing anyway.
+      const res = await this.fetchFn(`http://127.0.0.1:${port}/monitor`, {
+        signal: AbortSignal.timeout(MONITOR_TIMEOUT_MS),
+      });
+      if (!res?.ok) return null;
+      // A declared length is how this reply is bounded BEFORE a byte of it is
+      // buffered. The sidecar always sends one; whatever else may be holding
+      // that port — the case `blocked` exists for — is under no such
+      // obligation, and an unbounded body read on a timer is a memory leak with
+      // a schedule. Matched rather than coerced: Number(null) and Number('')
+      // are both 0, which would wave an undeclared body past as an empty one.
+      const declared = res.headers?.get?.('content-length');
+      const bytes = /^\d+$/.test(String(declared)) ? Number(declared) : NaN;
+      if (!(bytes <= MONITOR_MAX_BYTES)) return null;
+      return monitorCounts(JSON.parse(await res.text()));
+    } catch {
+      // No listener, a timeout, a body that is not JSON, an endpoint upstream
+      // has moved: one answer covers them all, and none of them is this
+      // supervisor's to report.
+      return null;
+    }
   }
 
   _publishPids() {

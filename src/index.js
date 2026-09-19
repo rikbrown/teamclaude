@@ -417,7 +417,10 @@ async function serverCommand() {
 
   // sx.org proxy (IP-based-429 workaround). Dormant unless an API key is set in
   // config.sx.apiKey; when set we provision a proxy and route upstream through it.
-  const sx = new SxManager({ log: console.error });
+  // Resolved per line, not captured: `tui.start()` replaces `console.error`
+  // further down, and provisioning only ever logs long after that — so handing
+  // over the function object here would write to a stdout the TUI paints over.
+  const sx = new SxManager({ log: line => console.error(line) });
   if (config.sx?.apiKey) {
     const r = await sx.configure(config.sx.apiKey, config.sx.mode);
     if (!r.ok) console.error(`[TeamClaude] sx.org disabled: ${r.error}`);

@@ -413,7 +413,13 @@ export class ResetCreditRedeemer {
     consumeFn = consumeResetCredit,
     usageFn = fetchCodexUsage,
     now = Date.now,
-    log = console.log,
+    // Resolved at CALL time, never captured here. The TUI replaces `console.log`
+    // in `tui.start()`, and this redeemer is built before that runs — so a bare
+    // `console.log` default binds the pre-TUI function, writes to raw stdout and
+    // has the TUI paint straight over it. Every word about a redemption was lost
+    // that way, which is the worst line in the codebase to lose: it is the one
+    // act here that cannot be undone, and the operator's only account of it.
+    log = (/** @type {any[]} */ ...args) => console.log(...args),
     // The TOTAL budget for one attempt, not a per-call timeout.
     timeoutMs = REDEEM_BUDGET_MS,
     detailTtlMs = DETAIL_TTL_MS,
@@ -735,6 +741,12 @@ export class ResetCreditRedeemer {
   /**
    * Put the account back in service after a successful reset: drop the hold and
    * re-read its quota.
+   *
+   * Only this account's own hold needs dropping. A translating sidecar in front
+   * of the pool is never held in the first place — server.js declines to throttle
+   * a conduit, because the quota-shaped 429 it relays describes a window behind
+   * it rather than one of its own — so there is no second-hand hold left here to
+   * undo.
    *
    * Nothing here fabricates a reading. If the read fails, or upstream has not
    * caught up with its own reset yet, the account stays blocked by its stale

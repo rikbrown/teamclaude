@@ -3647,6 +3647,19 @@ export class AccountManager {
   }
 
   /**
+   * Whether this account merely relays to our own Codex pool, for a caller
+   * outside this class that must not treat a relayed reading as the account's
+   * own. The private form above is the definition; this is the same question
+   * asked from the request path, where the distinction decides whether a quota
+   * rejection describes the account in hand or one behind it.
+   *
+   * @param {any} account
+   */
+  isCodexConduit(account) {
+    return this._isCodexConduit(account);
+  }
+
+  /**
    * Update cumulative token usage from response body data.
    */
   updateUsage(accountIndex, inputTokens, outputTokens) {

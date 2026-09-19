@@ -325,6 +325,35 @@ test('a successful redemption clears the hold and re-reads the quota', async () 
   assert.equal(am.accounts[0].quota.unified7d, 0);
 });
 
+// The TUI replaces `console.log` in `tui.start()`, which runs AFTER the redeemer
+// is built. A captured default therefore binds the pre-TUI function and writes
+// to a stdout the TUI paints straight over, so every redemption happened in
+// silence — the one act here that cannot be undone, and nothing said about it.
+// Deliberately takes no `log`: the default is the thing under test.
+test('a console.log swapped in after construction is what hears about a redemption', async () => {
+  const am = new AccountManager([codex('a')], 0.98);
+  weeklySpent(am.accounts[0]);
+  const redeemer = new ResetCreditRedeemer(am, {
+    config: { ...ARMED },
+    detailsFn: async () => ({ credits: [credit()], availableCount: 1 }),
+    consumeFn: async () => ({ code: 'reset', windowsReset: 2, credit: null }),
+    usageFn: async () => ({ sevenDay: { utilization: 0, resetAt: Date.now() + 7 * DAY } }),
+  });
+  // Exactly what the TUI does, and only now that the redeemer exists.
+  const original = console.log;
+  /** @type {string[]} */
+  const lines = [];
+  console.log = (/** @type {any[]} */ ...a) => { lines.push(a.join(' ')); };
+  try {
+    assert.equal((await redeemer.maybeRedeem(am.accounts[0])).redeemed, true);
+  } finally {
+    console.log = original;
+  }
+  assert.ok(lines.some(l => l.includes('Redeeming a free Codex rate-limit reset on "a"')),
+    'the operator must be told before the irreversible call, not after');
+  assert.ok(lines.some(l => l.includes('Redeemed a free Codex rate-limit reset on "a" — 2 window(s) reset')));
+});
+
 test('the policy says no and nothing is consumed', async () => {
   // Two Codex accounts, the sibling healthy: rotation can still serve.
   const { redeemer, am, calls } = harness({ accounts: [codex('a'), codex('b')] });
@@ -879,6 +908,69 @@ test('a proxy with no redeem hook refuses a dry pool unchanged', async () => {
   const r = await forwardOneRefusedRequest({ onRedeem: null });
   assert.equal(r.status, 429);
   assert.equal(r.hits, 0);
+});
+
+/**
+ * The translating sidecar that fronts the pool (docs/openai.md, "Several
+ * ChatGPT accounts behind one sidecar"). It carries no `provider` — it is
+ * reached on the Anthropic wire — and no subscription of its own. Present here
+ * only as the fleet the back leg really arrives into; what it is and is not
+ * held for is test/codex-conduit-quota.test.js.
+ */
+function conduit(name = 'sidecar', extra = {}) {
+  return oauth(name, { upstream: 'http://127.0.0.1:18765', ...extra });
+}
+
+// The whole thing end to end, with the real redeemer rather than a stand-in: a
+// dry pool and one `gpt-*` turn's back leg arriving on it. Nothing here may
+// loop — a re-read quota only makes an account selectable again, it never
+// re-drives a request, and `ctx.resetRedeemTried` bounds the attempt to one per
+// request either way — so the proxy makes exactly one upstream attempt and
+// exactly one irreversible call.
+test('the back leg redeems once and the request it was holding up is served', async () => {
+  let hits = 0;
+  const upstream = http.createServer((_req, res) => {
+    hits++;
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end('{"ok":true}');
+  });
+  const upstreamPort = await new Promise(r => upstream.listen(0, '127.0.0.1', () => r(upstream.address().port)));
+
+  const am = new AccountManager([
+    { ...codex('a'), upstream: `http://127.0.0.1:${upstreamPort}` },
+    conduit(),
+  ], 0.98);
+  weeklySpent(am.accounts[0]);
+  // Keep the once-a-minute revalidation probe out of it: the refusal is what
+  // the overwhelming majority of requests get on a pool this dry.
+  am._nextProbeAt = Date.now() + 60 * 60 * 1000;
+
+  const calls = { consume: 0 };
+  const redeemer = new ResetCreditRedeemer(am, {
+    config: { ...ARMED },
+    log: () => {},
+    detailsFn: async () => ({ credits: [credit()], availableCount: 1 }),
+    consumeFn: async () => { calls.consume++; return { code: 'reset', windowsReset: 2, credit: null }; },
+    usageFn: async () => ({ sevenDay: { utilization: 0, resetAt: Date.now() + 7 * DAY } }),
+  });
+  const proxy = createProxyServer(am, { proxy: { apiKey: 'k' }, upstream: `http://127.0.0.1:${upstreamPort}` }, {
+    redeemCodexResetForPool: (/** @type {Record<string, any>[]} */ accounts) => redeemer.maybeRedeemForPool(accounts),
+  });
+  const proxyPort = await new Promise(r => proxy.listen(0, '127.0.0.1', () => r(proxy.address().port)));
+  try {
+    const res = await fetch(`http://127.0.0.1:${proxyPort}/backend-api/codex/responses`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-6-astra', messages: [] }),
+    });
+    await res.text();
+    assert.equal(res.status, 200);
+  } finally {
+    proxy.close();
+    upstream.close();
+  }
+  assert.equal(calls.consume, 1, 'one credit, once — a re-read quota must not re-drive the request');
+  assert.equal(hits, 1, 'exactly one upstream attempt: the one the refusal was holding up');
 });
 
 // ── what the operator sees ──────────────────────────────────────────────────

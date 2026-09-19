@@ -549,7 +549,11 @@ export function createProxyServer(accountManager, config, hooks = {}, sx = null,
 
   // Opt-in egress pin: null unless config.egress.pin is set, and then shared by
   // the base listener and the MITM one so both honour the same hold.
-  const egress = createEgressGuard(config, console.error);
+  // Wrapped rather than handed over. This server is built before `tui.start()`
+  // replaces `console.error`, so passing the function object binds the pre-TUI
+  // one — and everything below reports at request time, long after the swap, to
+  // a stdout the TUI immediately paints over.
+  const egress = createEgressGuard(config, (/** @type {string} */ line) => console.error(line));
   const forward = createProxyRequestListener({ accountManager, upstream, logDir, hooks, sx, holdMs, config, egress, clientUsage, dimensionUsage });
   const server = http.createServer(requestHandler);
   server.keepAliveTimeout = KEEP_ALIVE_TIMEOUT_MS;
@@ -592,7 +596,8 @@ export function createProxyServer(accountManager, config, hooks = {}, sx = null,
     const c = await certsPromise;
     return { key: c.leafKeyPem, cert: c.leafCertPem };
   };
-  server.on('connect', createConnectHandler({ config, accountManager, ensureLeaf, logDir, hooks, log: console.error, sx, egress, clientUsage, dimensionUsage }));
+  // Wrapped for the same reason as the egress guard's logger above.
+  server.on('connect', createConnectHandler({ config, accountManager, ensureLeaf, logDir, hooks, log: (/** @type {string} */ line) => console.error(line), sx, egress, clientUsage, dimensionUsage }));
   // Remote Control's real-time channel is a WebSocket, not a request/response
   // call — Node fires 'upgrade' for that handshake, never 'request', so it
   // needs its own listener (base-URL routing path; the MITM path wires the
@@ -2526,6 +2531,18 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
         // shared bucket, so hold the whole account for its reset window.
         if (fableRejected) {
           console.log(`[TeamClaude] Fable weekly exhausted on "${account.name}" — switching account for this Fable request`);
+        } else if (accountManager.isCodexConduit(account)) {
+          // A conduit has no quota of its own: it translates, and this rejection
+          // came from whichever pooled account served its back leg — which has
+          // already recorded the spent window against itself. Holding the
+          // conduit would file a copy of someone else's state, and copies go
+          // stale: the pool can recover within the hold's term (a reset credit
+          // redeemed, a window rolled over) while the hold keeps every gpt-*
+          // request out, because the conduit is the only account its route can
+          // use on the way in. Tracking the exhaustion once, where it is true,
+          // costs a loopback round trip per refused request and buys recovery
+          // the instant the pool has it.
+          console.log(`[TeamClaude] Quota rejection (429) relayed by "${account.name}" — the limit belongs to the pooled account behind it, not the conduit`);
         } else {
           const hold = Math.min(Math.max(retryAfter, 1), 3600);
           console.log(`[TeamClaude] Quota rejection (429) on "${account.name}" — throttling ${hold}s and switching account`);

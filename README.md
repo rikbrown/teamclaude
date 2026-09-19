@@ -242,6 +242,7 @@ This feature is on by default. Each account row shows which window binds first: 
 | [OpenAI models](docs/openai.md) | Codex sidecar setup, custom model registration, GPT subagents, limitations |
 | [Configuration](docs/configuration.md) | Config format, every field, environment variables, network tuning |
 | [Proxy modes](docs/proxy-modes.md) | MITM forward proxy, sx.org residential egress |
+| [Remote host](docs/remote.md) | Running the fleet on an always-on box: reaching it, moving the accounts, service supervision, pointing clients at it |
 | [Compliance](docs/compliance.md) | Terms of service notes |
 
 ## Releasing this fork

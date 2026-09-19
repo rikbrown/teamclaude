@@ -20,6 +20,35 @@
 
 import { spawn, spawnSync } from 'node:child_process';
 
+// How long each caller of stop() waits for a child to go, and why the two
+// differ. The sidecar (claude-code-proxy v0.1.40 and later) reads the FIRST
+// SIGTERM as "begin a graceful shutdown", which an in-flight request holds
+// open, and only forces exit on a second signal. Measured against that build:
+// idle it exits in ~30ms, even with an idle keep-alive socket still attached;
+// with one request in flight it was still serving 3s after the first signal and
+// died 4ms after the second.
+//
+// So the wait is not about the sidecar being slow — it is about whether the
+// caller has already decided to interrupt work in flight.
+//
+//   SHUTDOWN — ctrl-c. The caller destroys live client connections and
+//   hard-exits 2s later, so the sidecar's remaining work has nowhere to go
+//   anyway. Long enough for the idle exit by a wide margin, short enough that
+//   the escalation below still completes inside that 2s budget.
+//
+//   DRAIN — the restart path, which waits for the fleet to go idle first. There
+//   is nothing left in flight to interrupt and nothing is watching, so the
+//   number only has to be larger than an unhurried exit; it exists to bound the
+//   wait, not to ration it. No escalation goes with it (see stop()).
+export const SIDECAR_SHUTDOWN_GRACE_MS = 500;
+export const SIDECAR_DRAIN_GRACE_MS = 5_000;
+
+// Allowed to the forcing signal, and again to SIGKILL. Both end the process
+// where it stands — upstream's second signal is a bare process::exit(130) — so
+// this is a scheduling allowance for the exit to be observed, not a shutdown
+// budget of its own.
+const FORCE_STEP_MS = 250;
+
 /** Delay before restart attempt N (0-based): base, doubled per consecutive
  *  crash, capped. Pure so the schedule is testable without timers. */
 export function restartDelayMs(restarts, { baseRestartMs, maxRestartMs }) {
@@ -80,12 +109,52 @@ export class Sidecar {
     }
   }
 
-  stop() {
+  /** Stop every supervised child, and resolve once they are gone or the grace
+   *  runs out — whichever happens first.
+   *
+   *  A caller that does not await this gets what stop() always did: the signal
+   *  is sent synchronously and the promise is nobody's business. A caller that
+   *  DOES await it is saying the thing it is about to do next — exit — must not
+   *  happen while a child is still holding its port.
+   *
+   *  `force` is for a caller that has already chosen to be abrupt with
+   *  everything else. It escalates when the grace expires: a second SIGTERM,
+   *  which is the forcing signal for this sidecar, then SIGKILL, so this keeps
+   *  working if that ever changes again. Anything that wants the sidecar to
+   *  finish its work leaves it off and simply waits.
+   *
+   *  @param {{graceMs?: number, force?: boolean}} [opts]
+   *  @returns {Promise<void>}
+   */
+  async stop({ graceMs = 0, force = false } = {}) {
+    // Both of these before a single signal goes out: a child killed while its
+    // respawn timer is pending would be replaced by the very timer it was
+    // killed to cancel.
     this.stopping = true;
+    const gone = [];
     for (const state of this.states) {
       if (state.timer) { clearTimeout(state.timer); state.timer = null; }
-      state.child?.kill('SIGTERM');
+      if (state.child) gone.push(this._stopChild(state.child, graceMs, force));
     }
+    await Promise.all(gone);
+  }
+
+  /** Signal one child and wait it out, escalating when asked.
+   *  @param {any} child
+   *  @param {number} graceMs
+   *  @param {boolean} force
+   */
+  async _stopChild(child, graceMs, force) {
+    // Subscribed BEFORE the signal, or a child that dies instantly resolves
+    // nothing and every wait below runs to its full length.
+    const gone = childGone(child);
+    signalChild(child, 'SIGTERM');
+    if (await settledWithin(gone, graceMs)) return;
+    if (!force) return;
+    signalChild(child, 'SIGTERM');
+    if (await settledWithin(gone, FORCE_STEP_MS)) return;
+    signalChild(child, 'SIGKILL');
+    await settledWithin(gone, FORCE_STEP_MS);
   }
 
   getStatus() {
@@ -124,6 +193,12 @@ export class Sidecar {
    *  last test, and a sidecar belonging to another live server fails the second,
    *  so neither is touched. The port may take a moment to free after this; the
    *  ordinary restart backoff covers that.
+   *
+   *  One SIGTERM is still the right signal, and now for two reasons rather than
+   *  one. An orphan of a SIGKILLed server was never signalled, so this is its
+   *  first: idle, it goes at once. An orphan that outran stop()'s escalation
+   *  already has one, so this is its SECOND — the forcing signal — which is
+   *  precisely what a leftover still clinging to the port has earned.
    */
   _reapOrphan(state) {
     const pid = Number(this.savedPids[state.entry.name]?.pid);
@@ -211,6 +286,49 @@ export class Sidecar {
       state.stderrTail.splice(0, state.stderrTail.length - this.stderrTailLines);
     }
   }
+}
+
+/** A promise for "this child is no longer running".
+ *
+ *  'exit' is the event that answers the question stop() is really asking — the
+ *  port is free from that moment — but a child whose stdio outlives it emits
+ *  only 'close' afterwards, so both are taken and the first one wins.
+ *  @param {any} child
+ *  @returns {Promise<void>}
+ */
+function childGone(child) {
+  return new Promise(resolve => {
+    const done = () => resolve();
+    child.once?.('exit', done);
+    child.once?.('close', done);
+  });
+}
+
+/** True when `promise` settles within `ms`, false when the wait runs out.
+ *
+ *  The timer is deliberately NOT unref'd. Every caller here is on its way to a
+ *  specific exit code, and an unref'd wait would let an emptied event loop end
+ *  the process at 0 instead — silently turning a restart (75) into a stop. It
+ *  is bounded and cleared on the fast path, so it holds nothing open.
+ *  @param {Promise<void>} promise
+ *  @param {number} ms
+ *  @returns {Promise<boolean>}
+ */
+function settledWithin(promise, ms) {
+  if (!(ms > 0)) return Promise.resolve(false);
+  return new Promise(resolve => {
+    const timer = setTimeout(() => resolve(false), ms);
+    promise.then(() => { clearTimeout(timer); resolve(true); });
+  });
+}
+
+/** Signal a child, never throwing. A child that has already exited, or whose
+ *  handle no longer accepts the signal, IS the outcome being asked for.
+ *  @param {any} child
+ *  @param {NodeJS.Signals} signal
+ */
+function signalChild(child, signal) {
+  try { child.kill(signal); } catch { /* already gone, which is the point */ }
 }
 
 // Real spawner: stdout ignored (sidecars log to their own files), stderr piped

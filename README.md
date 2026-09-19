@@ -163,7 +163,7 @@ Each request is routed by the model name in its body, so one session can freely 
 
 1. Check that your sidecar build lists it: `curl -s http://127.0.0.1:18765/v1/models`. The sidecar has its own allow-list and rejects any id that it does not know, regardless of the TeamClaude configuration. Upgrade the sidecar if the id is missing.
 2. Add a `customModels` row. Codex publishes the window for each model as `context_window` in `~/.codex/models_cache.json`; copy it to `contextTokens`.
-3. Start a new `teamclaude run` session. The rows are read at launch, so you do not need to restart the server. If you upgraded the sidecar binary, restart the server — or send `SIGTERM` to the sidecar process and let the supervisor restart it with the new binary.
+3. Start a new `teamclaude run` session. The rows are read at launch, so you do not need to restart the server. If you upgraded the sidecar binary, restart the server — or send `SIGTERM` to the sidecar process and let the supervisor restart it with the new binary. The first `SIGTERM` only starts a graceful shutdown, which a request in flight holds open; send it a second time to force the exit.
 
 Claude Code prints one `[claude-code:unrecognized_model]` line to stderr for each custom model. This is expected; suppressing it would lose the correct context window. The quota bars for the sidecar account show `unknown` unless the sidecar forwards Codex's rate-limit headers, which the fork build in step 1 does and upstream's does not — see [Quota](docs/openai.md#quota). Keep the sidecar on loopback.
 

@@ -31,7 +31,7 @@ import { ensureCerts, mitmHosts } from './mitm.js';
 import { Prober } from './prober.js';
 import { Warmer } from './warmer.js';
 import { createRollingWarmupSchedule, formatWarmupScheduleConfirmation, resolveWarmupConfig, resolveWarmupSchedule } from './warmup-schedule.js';
-import { Sidecar } from './sidecar.js';
+import { Sidecar, SIDECAR_DRAIN_GRACE_MS, SIDECAR_SHUTDOWN_GRACE_MS } from './sidecar.js';
 import { TUI } from './tui.js';
 import { SessionTitles } from './session-titles.js';
 import { RemoteControl, createAttachSession } from './tui-remote.js';
@@ -803,7 +803,20 @@ async function serverCommand() {
     prober?.stop();
     warmer?.stop();
     eventLoopMonitor.stop();
-    sidecar?.stop();
+    // Started here, awaited at the end, so the sidecar's grace runs BESIDE the
+    // rest of this teardown instead of after it.
+    //
+    // Forcing, because this path already made that choice for everything else:
+    // it destroys live streaming connections a few lines down and hard-exits on
+    // a timer. The sidecar's first SIGTERM only BEGINS its shutdown, which an
+    // in-flight request holds open, so asking politely and leaving is how a
+    // copy of it outlived the server and kept its port — the exact orphan
+    // Sidecar._reapOrphan then had to clean up on the next start.
+    //
+    // Never rejects by construction; caught anyway, because an unhandled one
+    // between here and the await below would be this process's last word.
+    const sidecarStopped = Promise.resolve(
+      sidecar?.stop({ graceMs: SIDECAR_SHUTDOWN_GRACE_MS, force: true })).catch(() => {});
     if (quotaSaveInterval) clearInterval(quotaSaveInterval);
     await persistQuotaState();
     // Don't linger waiting on keep-alive / streaming connections: actively
@@ -811,7 +824,12 @@ async function serverCommand() {
     // short grace period in case anything still hangs.
     setTimeout(() => process.exit(0), 2000).unref?.();
     server.closeAllConnections?.();
-    server.close(() => process.exit(0));
+    const closed = new Promise(resolve => server.close(() => resolve(undefined)));
+    // Both, not the first of the two. Exiting the moment the listener closed is
+    // what walked out on the sidecar mid-kill; the timer above is still what
+    // guarantees this ends.
+    await Promise.all([closed, sidecarStopped]);
+    process.exit(0);
   }
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
@@ -868,7 +886,13 @@ async function serverCommand() {
       console.log(drained
         ? `[TeamClaude] Drained in ${(waitedMs / 1000).toFixed(1)}s. Restarting on the new build.`
         : `[TeamClaude] ${inFlight} request(s) still in flight after ${(waitedMs / 1000).toFixed(0)}s — restarting anyway.`);
-      sidecar?.stop();
+      // Patient, and awaited: the drain above already proved nothing is in
+      // flight, so one SIGTERM is all this takes and the wait is only there to
+      // bound it. Awaited because the relaunch wants the port a moment later
+      // and this is the only place that can hand it over cleanly. No forcing
+      // signal — the whole point of this path is to cost the fleet nothing, and
+      // a sidecar that somehow outlasts the grace is what _reapOrphan is for.
+      await sidecar?.stop({ graceMs: SIDECAR_DRAIN_GRACE_MS });
       if (quotaSaveInterval) clearInterval(quotaSaveInterval);
       await persistQuotaState();
     } catch (err) {

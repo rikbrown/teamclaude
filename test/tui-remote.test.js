@@ -207,6 +207,22 @@ test('a status payload fills the read surface the dashboard renders from', async
   assert.equal(am.connected, true);
 });
 
+test('sidecar health survives the wire, and its absence reads as unknown', async (t) => {
+  const { am } = await makeSession(t);
+  am.applyStatus(statusFixture({
+    sidecars: [{ name: 'codex', running: true, pid: 98018, restarts: 0, activeRequests: 2, recentErrors: 3 }],
+  }));
+  assert.deepEqual(
+    am.sidecars.map(sc => [sc.activeRequests, sc.recentErrors]), [[2, 3]]);
+
+  // A server older than the readout sends the same payload without these. Zero
+  // would be a claim the server never made — and the ⚙ line prints a zero as
+  // nothing anyway, so the only honest mapping is null.
+  am.applyStatus(statusFixture({ sidecars: [{ name: 'codex', running: true, pid: 98018 }] }));
+  assert.deepEqual(
+    am.sidecars.map(sc => [sc.activeRequests, sc.recentErrors]), [[null, null]]);
+});
+
 test('an unknown current account marks nothing current rather than guessing', async (t) => {
   const { am } = await makeSession(t);
   am.applyStatus(statusFixture({ currentAccount: 'gone' }));

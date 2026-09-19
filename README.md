@@ -167,7 +167,7 @@ Each request is routed by the model name in its body, so one session can freely 
 
 Claude Code prints one `[claude-code:unrecognized_model]` line to stderr for each custom model. This is expected; suppressing it would lose the correct context window. The quota bars for the sidecar account show `unknown` unless the sidecar forwards Codex's rate-limit headers, which the fork build in step 1 does and upstream's does not — see [Quota](docs/openai.md#quota). Keep the sidecar on loopback.
 
-The sidecar appears under the account table as a `⚙` line rather than a row because it holds no subscription, is the only account its route can use, and never rotates. The line also shows its supervised process state (`up pid 98018`, or `down (code 1) 3 restarts`).
+The sidecar appears under the account table as a `⚙` line rather than a row because it holds no subscription, is the only account its route can use, and never rotates. The line also shows its supervised process state (`up pid 98018`, or `down (code 1) 3 restarts`), followed by what the sidecar reports about itself while it is up (`2 active 3 errors`, read from its own `/monitor` endpoint; each is omitted at zero, and both are omitted if that endpoint does not answer).
 
 #### Several ChatGPT accounts
 

@@ -1918,7 +1918,13 @@ export class TUI {
               : proc ? green('up') : green('ok');
       const pid = proc?.running ? dim(` pid ${proc.pid}`) : '';
       const restarts = proc?.restarts ? yellow(` ${proc.restarts} restarts`) : '';
-      return ` ${dim('⚙')} ${a.name} ${dim('→')} ${dim(host)}  ${state}${pid}${restarts}`;
+      // What the sidecar says about itself, when it says anything: it is polled
+      // off its own /monitor and the numbers are null whenever that did not
+      // answer. Shown only when non-zero — an idle sidecar has nothing to add,
+      // and "0 active 0 errors" on every line is how a readout becomes noise.
+      const active = proc?.activeRequests ? dim(` ${proc.activeRequests} active`) : '';
+      const errors = proc?.recentErrors ? yellow(` ${proc.recentErrors} errors`) : '';
+      return ` ${dim('⚙')} ${a.name} ${dim('→')} ${dim(host)}  ${state}${pid}${restarts}${active}${errors}`;
     });
   }
 

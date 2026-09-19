@@ -288,6 +288,11 @@ export class RemoteAccountManager {
       pid: Number.isFinite(sc?.pid) ? sc.pid : null,
       restarts: Number.isFinite(sc?.restarts) ? sc.restarts : 0,
       lastExit: sc?.lastExit == null ? null : text(sc.lastExit, 48),
+      // The health readout. A server too old to send these omits them, which is
+      // already what "the sidecar did not answer" looks like, so attach mode
+      // needs no version check — it simply draws the line it always drew.
+      activeRequests: Number.isFinite(sc?.activeRequests) ? sc.activeRequests : null,
+      recentErrors: Number.isFinite(sc?.recentErrors) ? sc.recentErrors : null,
     }));
     this.status = status;
     this.connected = true;

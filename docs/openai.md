@@ -161,16 +161,19 @@ A redemption is considered at the two moments a spent weekly window turns a requ
 While it is on, a credit is spent only when **all** of this holds:
 
 1. The account's **weekly** window is exhausted. A spent 5-hour window never triggers it — that one
-   heals within the hour, and a full reset is too scarce to burn on it.
+   comes back on its own within hours, while the weekly one walls the account off for days, and a
+   full reset is too scarce to burn on the short window.
 2. The account holds a credit that is `available` **and** supported by its plan.
 3. Either every other Codex account is unavailable too — so the credit actually unblocks work
    rather than topping up an account rotation would have stepped past — or the credit expires
    within three days.
 
-Whichever of the two asked, at most one credit is spent. Refusals arriving together join a single
-attempt rather than each starting one; an account that has just redeemed holds a cooldown; and an
-account a redemption has returned to service is precisely what makes condition 3 answer "no" for
-every other account.
+Whichever of the two asked, at most one credit is spent — per dry pool rather than per account.
+Triggers arriving together join a single attempt rather than each starting one, and an attempt that
+has spent a credit — or that failed in a way that cannot rule out having spent one — holds **every**
+account off for hours afterwards, not just the one it touched. That hold is deliberately not left to
+the account a redemption returned to service making condition 3 answer "no" for the others: that
+depends on a quota re-read, and a re-read can fail.
 
 The request is then served on the account whose windows were just reset — re-selected after a
 refusal, retried in place after a rejection. The whole decision — token refresh, credit read and

@@ -510,6 +510,42 @@ test('a spent budget arms the cooldown rather than being retried per rejection',
   assert.equal(calls.consume, 0);
 });
 
+// The budget has to BIND on the token refresh, not merely be checked once it
+// returns. `ensureTokenFresh` takes no timeout and every concurrent trigger
+// joins the same one, so a refresh that hangs would otherwise hold the client
+// for as long as it liked and then be waved through by a deadline check that
+// can only report a promise already broken. This one never finishes at all.
+test('a token refresh that outlives the budget is left behind, not waited out', async () => {
+  const am = new AccountManager([codex('a')], 0.98);
+  weeklySpent(am.accounts[0]);
+  /** @type {() => void} */
+  let finishRefresh = () => {};
+  am.ensureTokenFresh = () => new Promise(resolve => { finishRefresh = resolve; });
+  const calls = { details: 0, consume: 0 };
+  const redeemer = new ResetCreditRedeemer(am, {
+    config: { ...ARMED },
+    log: () => {},
+    timeoutMs: 20,
+    detailsFn: async () => { calls.details++; return { credits: [credit()], availableCount: 1 }; },
+    consumeFn: async () => { calls.consume++; return { code: 'reset', windowsReset: 1, credit: null }; },
+    usageFn: async () => ({}),
+  });
+
+  const started = Date.now();
+  const result = await redeemer.maybeRedeemForPool([am.accounts[0]]);
+  const waited = Date.now() - started;
+  assert.equal(result.redeemed, false);
+  assert.match(result.reason, /budget/);
+  assert.ok(waited < 2000, `the refusal waited ${waited}ms on a refresh that never finished`);
+  assert.equal(calls.details, 0, 'nothing is read on a token the attempt never got');
+
+  // And it stays left behind: a refresh landing after the deadline is no longer
+  // this attempt's business.
+  finishRefresh();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls.consume, 0, 'a refresh that finished late must not reach the irreversible call');
+});
+
 test('an Anthropic account never reaches a Codex endpoint', async () => {
   const am = new AccountManager([oauth('a')], 0.98);
   weeklySpent(am.accounts[0]);
@@ -682,7 +718,7 @@ test('an account whose only credit its plan cannot spend is not a candidate', ()
 // ── the pool-dry refusal ────────────────────────────────────────────────────
 
 /** A redeemer over a pool of spent Codex accounts, each with its own rows. */
-function poolHarness({ accounts = [codex('a'), codex('b')], credits = {}, code = 'reset', config = { ...ARMED }, caughtUp = true } = {}) {
+function poolHarness({ accounts = [codex('a'), codex('b')], credits = {}, code = 'reset', config = { ...ARMED }, caughtUp = true, usageFn = null } = {}) {
   const am = new AccountManager(accounts, 0.98);
   for (const account of am.accounts) weeklySpent(account);
   const calls = { details: [], consume: [] };
@@ -699,8 +735,9 @@ function poolHarness({ accounts = [codex('a'), codex('b')], credits = {}, code =
       return typeof code === 'function' ? code(account.name) : { code, windowsReset: 1, credit: null };
     },
     // `caughtUp: false` is the re-read that still reports the window spent —
-    // upstream has not caught up with its own reset yet.
-    usageFn: async () => ({ sevenDay: { utilization: caughtUp ? 0 : 1, resetAt: Date.now() + 7 * DAY } }),
+    // upstream has not caught up with its own reset yet. `usageFn` replaces it
+    // outright, for the re-read that does not answer at all.
+    usageFn: usageFn ?? (async () => ({ sevenDay: { utilization: caughtUp ? 0 : 1, resetAt: Date.now() + 7 * DAY } })),
   });
   return { am, redeemer, calls };
 }
@@ -765,10 +802,26 @@ test('an Anthropic account offered among the candidates never reaches a Codex en
 test('a refusal and an upstream 429 on the same account spend one credit between them', async () => {
   const { am, redeemer, calls } = poolHarness({ accounts: [codex('a')] });
   assert.equal((await redeemer.maybeRedeemForPool(am.accounts)).redeemed, true);
+  // Past the fleet-wide hold, which answers first and for every account. What
+  // is left is the reading the redemption produced, and it is what ends it.
+  redeemer.now = () => Date.now() + 7 * 60 * 60 * 1000;
   const second = await redeemer.maybeRedeem(am.accounts[0]);
   assert.equal(second.redeemed, false);
   assert.equal(second.reason, 'weekly window is not exhausted');
   assert.deepEqual(calls.consume, ['a']);
+});
+
+// The same pair while the hold is still armed. The 429 path spends credits of
+// its own, so a redemption the pool-dry path has just made must stop it dead —
+// well before the quota re-read it would otherwise be relying on.
+test('and a 429 arriving moments after a redemption is held off by the fleet, not by the re-read', async () => {
+  const { am, redeemer, calls } = poolHarness({ accounts: [codex('a'), codex('b')], caughtUp: false });
+  assert.equal((await redeemer.maybeRedeemForPool(am.accounts)).redeemed, true);
+  const sibling = am.accounts.find(a => a.name !== calls.consume[0]);
+  const second = await redeemer.maybeRedeem(sibling);
+  assert.equal(second.redeemed, false);
+  assert.match(second.reason, /cooling down/);
+  assert.equal(calls.consume.length, 1, 'one dry pool, one credit');
 });
 
 // And when the re-read still says the window is spent — upstream not caught up
@@ -794,13 +847,49 @@ test('and racing each other, they join one attempt rather than making two', asyn
   assert.deepEqual(calls.consume, ['a']);
 });
 
-// The cross-account case the cooldown cannot answer, and the policy can: the
-// first redemption returns its account to service, which is exactly the
-// "another Codex account can still serve" the sibling's policy then reads.
+// A redemption holds the WHOLE pool, not just the account that spent one. The
+// sibling's own policy usually says the same thing — the account just returned
+// to service is one that "can still serve" — but that reading depends on the
+// quota re-read having landed. This is the case where it did not: the reset
+// worked, the re-read failed, so the account still reads spent and the next
+// refusal walks straight to a sibling holding a credit of its own.
+test('a reset whose quota re-read fails still holds every other account', async () => {
+  const { am, redeemer, calls } = poolHarness({ usageFn: async () => ({ error: 'HTTP 500' }) });
+  assert.equal((await redeemer.maybeRedeemForPool(am.accounts)).redeemed, true);
+
+  const second = await redeemer.maybeRedeemForPool(am.accounts);
+  assert.equal(second.redeemed, false);
+  assert.match(second.reason, /cooling down/);
+  assert.equal(calls.consume.length, 1, 'one dry pool, one credit');
+});
+
+// The uncertain half of the same rule. A consume that never came back with a
+// verdict may still have been acted on — upstream states a refusal as a 200
+// with a `code`, so an error is "we do not know", never "no". Walking on to the
+// next account would answer a credit that may already be gone with another one;
+// the retry replays the same key instead, and upstream says which it was.
+test('a consume whose verdict never arrived stops the walk rather than spending again', async () => {
+  const { am, redeemer, calls } = poolHarness({ code: () => ({ error: 'socket hang up' }) });
+  const result = await redeemer.maybeRedeemForPool(am.accounts);
+  assert.equal(result.redeemed, false);
+  assert.match(result.reason, /socket hang up/);
+  assert.equal(calls.consume.length, 1, 'a POST that may have landed is never answered with a second one');
+
+  const second = await redeemer.maybeRedeemForPool(am.accounts);
+  assert.match(second.reason, /cooling down/);
+  assert.equal(calls.consume.length, 1);
+});
+
+// The cross-account case the fleet hold is not the only answer to: past it,
+// what declines is the policy itself — the first redemption returned its
+// account to service, which is exactly the "another Codex account can still
+// serve" the sibling then reads.
 test('a redemption that returns one account to service stops the sibling spending too', async () => {
   const { am, redeemer, calls } = poolHarness();
   assert.equal((await redeemer.maybeRedeemForPool(am.accounts)).redeemed, true);
   const sibling = am.accounts.find(a => a.name !== calls.consume[0]);
+
+  redeemer.now = () => Date.now() + 7 * 60 * 60 * 1000;
   const second = await redeemer.maybeRedeem(sibling);
   assert.equal(second.redeemed, false);
   assert.equal(second.reason, 'another Codex account can still serve');

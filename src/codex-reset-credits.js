@@ -50,16 +50,25 @@ export const CREDIT_EXPIRY_WINDOW_MS = 3 * 24 * 60 * 60 * 1000;
 // touches the detail endpoint before the policy has even had a chance to say no.
 const DETAIL_TTL_MS = 6 * 60 * 60 * 1000;
 
-// After an attempt that spent nothing (upstream declined, or the request
-// failed), how long before this account may try again.
+// After an attempt that spent nothing (upstream declined, or the request never
+// got that far), how long before this account may try again. An attempt whose
+// verdict we never read holds the whole fleet for the same span — see _consume.
 const RETRY_COOLDOWN_MS = 30 * 60 * 1000;
 
-// After an attempt that DID spend a credit. Longer, and deliberately so: if the
-// weekly window still reads exhausted afterwards — a reset that only covered
-// the session window, a usage read that had not caught up — the next trigger
-// must not reach for a second credit to fix what the first one apparently did
-// not.
+// After an attempt that DID spend a credit — on the account that spent it and
+// on the fleet alike. Longer, and deliberately so: if the weekly window still
+// reads exhausted afterwards — a reset that only covered the session window, a
+// usage read that failed or had not caught up — the next trigger must not reach
+// for a second credit to fix what the first one apparently did not. And the
+// account that redeemed is not the only one that must not: the refusal behind
+// it walks the whole pool, and a sibling holding a credit is just as able to
+// spend one.
 const SUCCESS_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+
+// What a refresh that outlived the attempt's budget resolves with. A sentinel
+// rather than a value, because every real outcome of a refresh — including a
+// failure — is a value the race could otherwise be confused for.
+const BUDGET_LAPSED = Symbol('redeem budget lapsed');
 
 /**
  * How long the whole redemption may take — the token refresh, the detail read
@@ -203,8 +212,9 @@ export async function consumeResetCredit(account, { creditId = null, redeemReque
  * The 429 path cannot answer this from the flat `x-codex-*-used-percent`
  * headers: those are positions, not durations, so a spent 5-hour window looks
  * identical there. The parsed quota keeps the two apart (see codex-quota.js),
- * and the 5-hour one is explicitly NOT a trigger — it heals by itself within
- * the hour, and a "Full reset" is far too scarce to burn on that.
+ * and the 5-hour one is explicitly NOT a trigger — it comes back on its own
+ * within hours, while the weekly one is what leaves an account walled for days,
+ * and a "Full reset" is far too scarce to burn on the short window.
  *
  * @param {Record<string, any>|null|undefined} account
  * @param {number} [now]
@@ -386,6 +396,14 @@ export function shouldRedeemReset({ account, autoRedeemResets = false, pool = []
  * refusals arrives here asking the same question. Concurrent callers therefore
  * join one attempt rather than starting their own, per account and per pool.
  *
+ * Joining only answers the triggers that arrive together, though; they also
+ * arrive one after another. What bounds those is a fleet-wide hold, armed the
+ * moment an attempt has spent a credit — or may have — and read before the next
+ * attempt reads anything at all. It is deliberately not the per-account
+ * cooldown, and not the per-account join either: a pool-dry attempt walks the
+ * whole pool, so an account that has never touched the endpoint is just as able
+ * to spend the second credit as the one that did.
+ *
  * That waiting client is also what sets the time budget. The budget is ONE
  * deadline for the whole attempt (REDEEM_BUDGET_MS above), not a
  * timeout per call: what the waiting client can spare is a property of the
@@ -446,6 +464,34 @@ export class ResetCreditRedeemer {
     // out, and only one of them should spend anything about it.
     /** @type {Promise<RedeemResult>|null} */
     this.poolInFlight = null;
+    // The hold a per-account cooldown cannot express. Two outcomes are facts
+    // about the FLEET rather than about the account they happened on:
+    //
+    //  - a redemption that worked. What otherwise stops the next trigger
+    //    spending a sibling's credit is this account reading available again —
+    //    and that is a re-read, which can fail or find upstream not yet caught
+    //    up with its own reset. The hold must not depend on it having landed.
+    //  - a consume whose verdict we never read. This endpoint states a refusal
+    //    as a 200 with a `code`, so an error is never upstream saying no — only
+    //    "we do not know", over a POST that may well have spent the credit.
+    //
+    // Armed in _consume, read at the top of both entry points before anything
+    // is fetched, and it stops a pool walk mid-pool.
+    this.fleetCooldownUntil = 0;
+  }
+
+  /**
+   * Has an attempt just spent a credit, or possibly spent one, on behalf of the
+   * whole fleet? Read before any account-level state, because the answer is
+   * about none of them in particular.
+   *
+   * @returns {RedeemResult|null}
+   */
+  _fleetHold() {
+    if (this.now() < this.fleetCooldownUntil) {
+      return { redeemed: false, reason: 'the pool is cooling down after a recent redemption attempt' };
+    }
+    return null;
   }
 
   /**
@@ -525,6 +571,11 @@ export class ResetCreditRedeemer {
    * @returns {Promise<RedeemResult>}
    */
   async _poolAttempt(accounts) {
+    const held = this._fleetHold();
+    // Before a single row is read: an attempt that has just spent a credit, or
+    // may have, speaks for the whole pool rather than for the account it
+    // touched.
+    if (held) return held;
     const now = this.now();
     // ONE budget for the whole refusal, shared across every candidate: the
     // client is waiting on the refusal, not on an account, so a pool of three
@@ -551,6 +602,11 @@ export class ResetCreditRedeemer {
         state => this._decide(account, state, rows.get(account) || [], now, deadline));
       if (result.redeemed) return result;
       reason = result.reason;
+      // Two things end the walk rather than move it on to the next account: a
+      // fleet hold, armed by an attempt that may have spent something — walking
+      // on would answer a credit we cannot account for with a second one — and
+      // a budget the waiting client has nothing left of to give.
+      if (this._fleetHold() || this._timeLeft(deadline) <= 0) break;
     }
     return { redeemed: false, reason };
   }
@@ -632,6 +688,11 @@ export class ResetCreditRedeemer {
    * @returns {Promise<RedeemResult>}
    */
   async _attempt(account, state) {
+    // The same hold the pool walk reads, and for the same reason: a credit just
+    // spent — or possibly spent — elsewhere in the fleet is not this account's
+    // business to answer with another one.
+    const held = this._fleetHold();
+    if (held) return held;
     const now = this.now();
     // Everything past the free checks can touch the network, and all of it
     // shares this one deadline: what the waiting client can spare belongs to the
@@ -657,6 +718,49 @@ export class ResetCreditRedeemer {
   }
 
   /**
+   * Refresh the account's token, and never wait longer for it than the attempt
+   * has left.
+   *
+   * `ensureTokenFresh` takes no timeout of its own and joins whatever refresh is
+   * already running, so awaiting it plainly is unbounded — and reading the clock
+   * afterwards can only report a deadline already missed, with every concurrent
+   * trigger held for exactly as long. The only way to bound it is to race it.
+   *
+   * A refresh that lands late is not wrong, merely too late to act on: it
+   * carries on in the background, and whatever asks next gets the token it
+   * fetched. What must not happen is this attempt proceeding on it — an
+   * irreversible call made for a client that has already stopped waiting is the
+   * worst of both outcomes.
+   *
+   * @param {Record<string, any>} account
+   * @param {number} deadline
+   * @returns {Promise<{ok: boolean, error?: string}>}
+   */
+  async _freshToken(account, deadline) {
+    const left = this._timeLeft(deadline);
+    if (left <= 0) return { ok: false, error: 'ran out of the redeem budget before refreshing the token' };
+    /** @type {any} */
+    let timer = null;
+    /** @type {Promise<any>} */
+    const lapsed = new Promise(resolve => { timer = setTimeout(() => resolve(BUDGET_LAPSED), left); });
+    try {
+      // Wrapped so a synchronous throw arrives as a rejection like any other,
+      // and settled both ways so losing the race cannot leave one unhandled.
+      const refreshed = (async () => this.am.ensureTokenFresh(account.index))()
+        .then(() => null, (/** @type {any} */ err) => err ?? new Error('token refresh failed'));
+      const outcome = await Promise.race([refreshed, lapsed]);
+      if (outcome === BUDGET_LAPSED) return { ok: false, error: 'ran out of the redeem budget refreshing the token' };
+      // A refresh that failed is an answer, and the answer is no: the credential
+      // in hand is the one upstream has already stopped accepting, and the next
+      // call would spend the budget proving it.
+      if (outcome) return { ok: false, error: `token refresh failed (${safeLine(outcome.message || String(outcome), 80)})` };
+      return { ok: true };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
    * The detail rows, from cache while they are fresh.
    *
    * @param {Record<string, any>} account
@@ -667,10 +771,11 @@ export class ResetCreditRedeemer {
    */
   async _credits(account, state, now, deadline) {
     if (state.credits && now - state.creditsAt < this.detailTtlMs) return { credits: state.credits };
-    // The refresh is inside the budget too. It is the one step here that can go
-    // to the network without being given a timeout, so the only way to bound it
-    // is to charge what it spends to the calls that follow.
-    await this.am.ensureTokenFresh(account.index);
+    // The refresh is inside the budget too, and it is the one step here with no
+    // timeout of its own, so it is raced against the deadline rather than
+    // trusted to come back inside it.
+    const fresh = await this._freshToken(account, deadline);
+    if (!fresh.ok) return { error: fresh.error };
     const timeoutMs = this._timeLeft(deadline);
     if (timeoutMs <= 0) return { error: 'ran out of the redeem budget before reading the credit rows' };
     const result = await this.detailsFn(account, { timeoutMs });
@@ -691,15 +796,21 @@ export class ResetCreditRedeemer {
    */
   async _consume(account, state, verdict, now, deadline) {
     const name = safeLine(account.name, 64);
-    await this.am.ensureTokenFresh(account.index);
-    const timeoutMs = this._timeLeft(deadline);
+    // Raced against the deadline, not merely measured after the fact: the
+    // budget exists to bound what the waiting client is held for, and a check
+    // that runs once the refresh has returned can only report a promise already
+    // broken. See _freshToken.
+    const fresh = await this._freshToken(account, deadline);
+    const timeoutMs = fresh.ok ? this._timeLeft(deadline) : 0;
     if (timeoutMs <= 0) {
       // Declined like any other attempt that spent nothing: a cooldown, so a
       // burst against a slow upstream cannot re-enter here per rejection, and
-      // no idempotency key minted for a request never made.
+      // no idempotency key minted for a request never made. Per-account only —
+      // nothing was sent, so the fleet has nothing to be careful of.
+      const why = fresh.error || 'ran out of the redeem budget';
       state.cooldownUntil = now + RETRY_COOLDOWN_MS;
-      this.log(`[TeamClaude] Codex rate-limit reset on "${name}" ran out of its time budget before redeeming — rotating instead`);
-      return { redeemed: false, reason: 'ran out of the redeem budget' };
+      this.log(`[TeamClaude] Codex rate-limit reset on "${name}" stopped before redeeming — ${why}`);
+      return { redeemed: false, reason: why };
     }
 
     // Reused across retries of the SAME logical attempt: an attempt that failed
@@ -713,9 +824,18 @@ export class ResetCreditRedeemer {
       { timeoutMs });
 
     if (result?.error) {
-      // Key deliberately kept: see above.
+      // We do not know whether that POST was acted on, and this is the one
+      // place in the file where not knowing is expensive. Upstream states a
+      // refusal as a 200 with a `code`, so an error here is never "upstream
+      // said no" — it is a verdict we never read, over a request that may well
+      // have spent the credit. So the key is deliberately kept (the retry
+      // replays it, and `already_redeemed` is upstream answering for it), and
+      // the hold is fleet-wide: a pool walk would otherwise move straight on to
+      // a sibling, and a second credit spent over an uncertain first is exactly
+      // how one becomes two.
       state.cooldownUntil = now + RETRY_COOLDOWN_MS;
-      this.log(`[TeamClaude] Codex rate-limit reset failed on "${name}" — ${safeLine(result.error, 120)}`);
+      this.fleetCooldownUntil = Math.max(this.fleetCooldownUntil, now + RETRY_COOLDOWN_MS);
+      this.log(`[TeamClaude] Codex rate-limit reset failed on "${name}" — ${safeLine(result.error, 120)}; it may still have been spent, so the pool holds off`);
       return { redeemed: false, reason: `redeem failed (${result.error})` };
     }
 
@@ -727,6 +847,14 @@ export class ResetCreditRedeemer {
     // that did land, so it is a success with the windows already reset.
     if (result?.code === 'reset' || result?.code === 'already_redeemed') {
       state.cooldownUntil = now + SUCCESS_COOLDOWN_MS;
+      // And the fleet with it. Not because this account might redeem again —
+      // its own cooldown answers that — but because the only thing that would
+      // otherwise stop the next trigger spending a SIBLING's credit is this
+      // account reading available again, which is the re-read below: the one
+      // step here that is allowed to fail. A hold that does not depend on that
+      // reading is what keeps "at most one credit per dry pool" true when it
+      // does fail.
+      this.fleetCooldownUntil = Math.max(this.fleetCooldownUntil, now + SUCCESS_COOLDOWN_MS);
       const windows = result.windowsReset || 0;
       this.log(`[TeamClaude] Redeemed a free Codex rate-limit reset on "${name}" — ${windows} window(s) reset (${result.code})`);
       await this._refresh(account, name, deadline);

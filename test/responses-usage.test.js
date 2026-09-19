@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { AccountManager } from '../src/account-manager.js';
 import { createProxyServer } from '../src/server.js';
-import { normalizeResponsesUsage, responsesEventUsage, responsesBodyUsage } from '../src/responses-usage.js';
+import { normalizeResponsesUsage, responsesEventUsage, isResponsesBody } from '../src/responses-usage.js';
 import { ClientUsageTracker } from '../src/client-usage.js';
 
 // Codex traffic is a passthrough, so its usage arrives in OpenAI's vocabulary
@@ -136,10 +136,14 @@ test('a failed response records its figures when it has them and nothing when it
 
 // ---------------------------------------------------------------- buffered bodies
 
-test('a buffered Responses body is recognised and rewritten', () => {
-  assert.equal(responsesBodyUsage({ object: 'response', status: 'completed', usage: WIRE })?.cache_read_input_tokens, CACHED);
+test('a buffered Responses body is recognised', () => {
+  assert.equal(isResponsesBody({ object: 'response', status: 'completed', usage: WIRE }), true);
   // The cache breakdown alone is enough, for a backend that omits `object`.
-  assert.equal(responsesBodyUsage({ usage: WIRE })?.cache_read_input_tokens, CACHED);
+  assert.equal(isResponsesBody({ usage: WIRE }), true);
+  // Recognition is about the body, not about its figures: a Responses body that
+  // reports nothing usable is still a Responses body, and the caller has to be
+  // able to tell that apart from a body that is not one at all.
+  assert.equal(isResponsesBody({ object: 'response' }), true);
 });
 
 // The discriminator has to be one an Anthropic body cannot produce: rewriting
@@ -147,9 +151,9 @@ test('a buffered Responses body is recognised and rewritten', () => {
 // separately, which is the same double count in the other direction.
 test('an Anthropic body is not mistaken for a Responses one', () => {
   const anthropic = { type: 'message', content: [], usage: { input_tokens: 2, cache_read_input_tokens: 377127, output_tokens: 714 } };
-  assert.equal(responsesBodyUsage(anthropic), null);
-  for (const bad of [null, undefined, 'response', 42, [], {}, { object: 'response' }]) {
-    assert.equal(responsesBodyUsage(bad), null, JSON.stringify(bad));
+  assert.equal(isResponsesBody(anthropic), false);
+  for (const bad of [null, undefined, 'response', 42, [], {}, { usage: 'many' }]) {
+    assert.equal(isResponsesBody(bad), false, JSON.stringify(bad));
   }
 });
 
@@ -256,6 +260,20 @@ test('a stream carrying junk still delivers and records what it can', async () =
   assert.equal(tokensOf(am).reports, 1);
 });
 
+// The terminal event names bound WHAT may report, not how often it may. Both
+// counters the branch feeds are incremental, so a backend that re-sent
+// `response.completed` — or a relay that replayed the tail of a stream — would
+// add the whole turn a second time. The first terminal event settles the turn
+// and the rest are ignored.
+test('a repeated terminal event books the turn once', async () => {
+  const am = await codexTurn(streamingUpstream([CREATED, DELTA, COMPLETED, COMPLETED]));
+  const u = am.accounts[0].usage;
+  assert.equal(u.totalInputTokens, FRESH, 'the turn was booked more than once');
+  assert.equal(u.totalOutputTokens, WIRE.output_tokens);
+  assert.equal(u.totalCacheReadTokens, CACHED);
+  assert.equal(tokensOf(am).reports, 1, 'one turn is one observation');
+});
+
 test('a buffered Codex response books its tokens too', async () => {
   const upstream = http.createServer(async (req, res) => {
     for await (const c of req) void c;
@@ -267,6 +285,26 @@ test('a buffered Codex response books its tokens too', async () => {
   assert.equal(am.accounts[0].usage.totalOutputTokens, WIRE.output_tokens);
   assert.equal(am.accounts[0].usage.totalCacheReadTokens, CACHED);
   assert.equal(tokensOf(am)?.context, WIRE.input_tokens);
+});
+
+// The discriminator decides WHICH reading applies, so a body it recognises must
+// not fall back to the other one when its figures turn out to be unusable:
+// falling back would book the whole prompt as fresh input, which is the thing
+// this change exists to stop, and on the counters that are never recomputed a
+// negative or an infinity is permanent. Written as raw JSON because
+// `JSON.stringify` cannot express `Infinity`, and the wire can.
+test('a Responses body with unusable figures books nothing at all', async () => {
+  const upstream = http.createServer(async (req, res) => {
+    for await (const c of req) void c;
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end('{"id":"resp_1","object":"response","status":"completed","output":[],"usage":{"input_tokens":-5,"output_tokens":1e999}}');
+  });
+  const am = await codexTurn(upstream, { stream: false });
+  const u = am.accounts[0].usage;
+  assert.equal(u.totalInputTokens, 0, 'a negative input count reached a cumulative total');
+  assert.equal(u.totalOutputTokens, 0, 'a non-finite output count reached a cumulative total');
+  assert.equal(u.totalCacheReadTokens, 0);
+  assert.equal(tokensOf(am), null, 'a body that reported nothing usable was recorded as an observation');
 });
 
 // ---------------------------------------------------------------- the conduit

@@ -38,12 +38,23 @@
 
 /** Terminal stream events, the only ones that carry a settled usage object.
  *
- *  Named rather than inferred from "the event has a usage object": EVERY
- *  `response.*` event carries the whole response envelope, so `response.created`
- *  and `response.in_progress` have a `usage` key too — null today. Reading the
- *  key would make this proxy's accounting depend on that staying null, and an
- *  upstream that started reporting progress figures would be counted twice. A
- *  fixed set of terminal names makes a second report unrepresentable instead.
+ *  Named rather than inferred from "the event has a usage object". A Responses
+ *  stream mixes two kinds of event: the LIFECYCLE ones (`response.created`,
+ *  `response.in_progress`, `response.queued` and the three below) each carry the
+ *  whole response envelope, and therefore a `usage` key — null until the
+ *  response settles; the rest, which is most of the stream, carry a fragment
+ *  instead (`response.output_text.delta` carries a `delta` string, the
+ *  `.added`/`.done` events an `item` or a `part`) and no envelope at all.
+ *
+ *  So matching the key rather than the name would make this proxy's accounting
+ *  depend on the in-flight envelopes keeping `usage: null` for ever, and an
+ *  upstream that began reporting progress figures would book one turn once per
+ *  lifecycle event. Naming the terminal events keeps that decision here.
+ *
+ *  The names alone do not stop a terminal event arriving TWICE, so they are not
+ *  the whole guard: the stream reader books the first one and ignores the rest
+ *  (see `parseSSEDataLine` in src/server.js), because the account and per-client
+ *  counters are incremental and would otherwise count the turn again.
  *
  *  `response.failed` is in the set because a failure that got far enough to
  *  report figures still spent them; when it carries none — the usual case — the
@@ -104,7 +115,14 @@ export function responsesEventUsage(event) {
 }
 
 /**
- * Usage from a NON-streaming Responses body, or null when the body is not one.
+ * Whether a NON-streaming body is a Responses one, and so has to be read with
+ * `normalizeResponsesUsage` rather than as Anthropic's usage shape.
+ *
+ * A predicate rather than a "give me the usage or null" reader, because the
+ * caller has to tell two different nulls apart: a body that is not a Responses
+ * one falls back to reading `usage` directly, while a body that IS one but whose
+ * figures do not survive the normaliser must book NOTHING — falling back there
+ * would book the very numbers this file exists to stop.
  *
  * Two independent tells, either of which is enough, and neither of which an
  * Anthropic message body can produce:
@@ -121,11 +139,11 @@ export function responsesEventUsage(event) {
  * Anthropic's and lands on exactly the same numbers it would have anyway.
  *
  * @param {any} json
+ * @returns {boolean}
  */
-export function responsesBodyUsage(json) {
-  if (!json || typeof json !== 'object') return null;
+export function isResponsesBody(json) {
+  if (!json || typeof json !== 'object') return false;
   const usage = json.usage;
-  const tagged = json.object === 'response'
+  return json.object === 'response'
     || (usage != null && typeof usage === 'object' && usage.input_tokens_details != null);
-  return tagged ? normalizeResponsesUsage(usage) : null;
 }

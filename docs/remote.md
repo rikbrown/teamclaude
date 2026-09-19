@@ -113,6 +113,25 @@ new home directory.
 Reload with **R** in the TUI, or `POST /teamclaude/reload`. A `sidecars` change needs a full
 restart — that block is read once at startup.
 
+### Running from a checkout instead
+
+TeamClaude has no runtime dependencies, so a clone runs as-is — useful when the remote host is
+also where you try a fix before publishing it:
+
+```sh
+git clone --branch rik/main https://github.com/rikbrown/teamclaude.git ~/Code/teamclaude
+cd ~/Code/teamclaude
+npm uninstall -g @rikcodes/teamclaude   # drop the published copy first
+npm link                                # `teamclaude` now resolves to this checkout
+```
+
+Point the service at the checkout explicitly — `node <repo>/src/index.js server` — rather than at
+`teamclaude` on `PATH`. A service is started with a bare `PATH`, and `npm link` is a convenience
+for interactive shells that the service should not depend on.
+
+Treat the checkout as a deploy target, not a place to author changes: push from wherever you
+work, then `git fetch && git checkout -B <branch> origin/<branch>` and restart the server.
+
 ## Keeping it running
 
 ### Headless, supervised by the OS

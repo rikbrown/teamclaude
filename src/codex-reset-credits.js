@@ -45,9 +45,9 @@ export const CODEX_RESET_CREDITS_CONSUME_URL = `${CODEX_RESET_CREDITS_URL}/consu
 export const CREDIT_EXPIRY_WINDOW_MS = 3 * 24 * 60 * 60 * 1000;
 
 // How long a fetched list of credit rows is trusted. Expiry dates move at the
-// pace of a monthly grant, so re-reading them per 429 would be all cost: this
-// is the only thing bounding how often a hot rejection loop touches the detail
-// endpoint before the policy has even had a chance to say no.
+// pace of a monthly grant, so re-reading them per trigger would be all cost:
+// this is the only thing bounding how often a hot rejection or refusal loop
+// touches the detail endpoint before the policy has even had a chance to say no.
 const DETAIL_TTL_MS = 6 * 60 * 60 * 1000;
 
 // After an attempt that spent nothing (upstream declined, or the request
@@ -56,15 +56,16 @@ const RETRY_COOLDOWN_MS = 30 * 60 * 1000;
 
 // After an attempt that DID spend a credit. Longer, and deliberately so: if the
 // weekly window still reads exhausted afterwards — a reset that only covered
-// the session window, a usage read that had not caught up — the next 429 must
-// not reach for a second credit to fix what the first one apparently did not.
+// the session window, a usage read that had not caught up — the next trigger
+// must not reach for a second credit to fix what the first one apparently did
+// not.
 const SUCCESS_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 
 /**
  * How long the whole redemption may take — the token refresh, the detail read
  * and the consume TOGETHER, not each.
  *
- * `maybeRedeem` runs inline, with the rejected request waiting on it, and a
+ * A redemption runs inline, with the refused request waiting on it, and a
  * Codex client gives the response head a fixed 60s before abandoning the
  * attempt and retrying the whole request (see test/codex-no-inline-hold.test.js
  * for where that number is from). That retry is the entire point: it is the
@@ -247,6 +248,62 @@ export function redeemPreconditions({ account, autoRedeemResets = false, now = D
 }
 
 /**
+ * Soonest to expire first, so "use it or lose it" spends the one that would be
+ * lost. A credit that never expires sorts last, and two of those compare equal
+ * rather than subtracting two infinities into NaN.
+ *
+ * @param {number|null} a
+ * @param {number|null} b
+ */
+function byExpiry(a, b) {
+  const left = a ?? Infinity;
+  const right = b ?? Infinity;
+  return left === right ? 0 : left - right;
+}
+
+/**
+ * The one credit out of a list worth spending, or null when the list names none.
+ *
+ * `is_supported_by_plan` is as hard a gate as `status`, so it is applied BEFORE
+ * any expiry reasoning: a credit this plan cannot spend is not one we hold for
+ * this purpose, and must not be what makes an expiring-credit decision look
+ * justified.
+ *
+ * @param {ResetCredit[]} [credits]
+ * @returns {ResetCredit|null}
+ */
+export function redeemableCredit(credits = []) {
+  return credits
+    .filter(credit => credit?.status === 'available' && credit.supportedByPlan !== false)
+    .sort((a, b) => byExpiry(a.expiresAt, b.expiresAt))[0] ?? null;
+}
+
+/**
+ * The accounts worth asking, best first, out of a set whose credit rows are in hand.
+ *
+ * The per-account policy below answers "this account was rejected — spend one?".
+ * The pool-dry refusal asks a different question, because no account was chosen
+ * at all: which of several spent accounts should spend one? That is a choice
+ * between candidates rather than a verdict on one, so it lives here, stays pure,
+ * and hands the caller a list the per-account policy then rules on one at a time.
+ *
+ * Accounts holding nothing redeemable drop out; the rest are ordered by the
+ * credit they would spend, soonest expiry first, so the credit that would be
+ * lost anyway is the one offered up.
+ *
+ * @param {Array<{account: Record<string, any>, credits: ResetCredit[]}>} [candidates]
+ * @returns {Array<{account: Record<string, any>, credit: ResetCredit}>}
+ */
+export function orderRedeemCandidates(candidates = []) {
+  return candidates
+    .flatMap(candidate => {
+      const credit = redeemableCredit(candidate.credits);
+      return credit ? [{ account: candidate.account, credit }] : [];
+    })
+    .sort((a, b) => byExpiry(a.credit.expiresAt, b.credit.expiresAt));
+}
+
+/**
  * Whether to spend one of this account's reset credits, and which one.
  *
  * Pure on purpose. This is the function that decides to consume something
@@ -273,20 +330,7 @@ export function shouldRedeemReset({ account, autoRedeemResets = false, pool = []
   const pre = redeemPreconditions({ account, autoRedeemResets, now });
   if (!pre.ok) return { redeem: false, reason: pre.reason, creditId: null };
 
-  // `is_supported_by_plan` is as hard a gate as `status`, so it is applied
-  // BEFORE any expiry reasoning: a credit this plan cannot spend is not one we
-  // hold for this purpose, and must not be what makes an expiring-credit
-  // decision look justified.
-  const redeemable = credits
-    .filter(credit => credit?.status === 'available' && credit.supportedByPlan !== false)
-    // Soonest to expire first, so "use it or lose it" spends the one that would
-    // be lost. Two credits that never expire compare equal rather than NaN.
-    .sort((a, b) => {
-      const left = a.expiresAt ?? Infinity;
-      const right = b.expiresAt ?? Infinity;
-      return left === right ? 0 : left - right;
-    });
-  const credit = redeemable[0];
+  const credit = redeemableCredit(credits);
   if (!credit) return { redeem: false, reason: 'holds no redeemable credit', creditId: null };
 
   // No other Codex account left: `every` over an empty list is true, which is
@@ -325,12 +369,25 @@ export function shouldRedeemReset({ account, autoRedeemResets = false, pool = []
  *
  * Everything with a side effect lives here: the token refresh, the two HTTP
  * calls, the cooldowns, and the re-read that puts a reset account back into
- * rotation. `maybeRedeem` is called from the 429 path, so it must be safe under
- * a burst — a spent weekly window rejects every request in flight at once, and
- * each of those rejections arrives here asking the same question.
+ * rotation.
  *
- * It is also called with a client waiting, which sets the time budget. That
- * budget is ONE deadline for the whole attempt (REDEEM_BUDGET_MS above), not a
+ * There are two ways in, because a spent weekly window presents in two
+ * different places and only one of them was ever wired up:
+ *
+ *  - `maybeRedeem(account)` — upstream rejected a request on THIS account.
+ *  - `maybeRedeemForPool(accounts)` — selection refused a request before
+ *    choosing anyone, because every Codex account it could have used is out of
+ *    quota. This is the common case on a two-account pool and the one the
+ *    feature exists for: no account is chosen, so no upstream 429 ever arrives
+ *    and the first entry point cannot fire at all.
+ *
+ * Both run with a client waiting, and both must be safe under a burst — a spent
+ * weekly window refuses every request in flight at once, and each of those
+ * refusals arrives here asking the same question. Concurrent callers therefore
+ * join one attempt rather than starting their own, per account and per pool.
+ *
+ * That waiting client is also what sets the time budget. The budget is ONE
+ * deadline for the whole attempt (REDEEM_BUDGET_MS above), not a
  * timeout per call: what the waiting client can spare is a property of the
  * attempt, so each call gets whatever is left of it and never more, and a step
  * that finds nothing left does not run at all. Per-call timeouts would let a
@@ -378,6 +435,11 @@ export class ResetCreditRedeemer {
     // quota state or the status payload.
     /** @type {WeakMap<object, RedeemState>} */
     this.state = new WeakMap();
+    // The pool-dry attempt concurrent refusals join. Fleet-scoped rather than
+    // per-account, because the refusal it answers is: every Codex account is
+    // out, and only one of them should spend anything about it.
+    /** @type {Promise<RedeemResult>|null} */
+    this.poolInFlight = null;
   }
 
   /**
@@ -394,6 +456,28 @@ export class ResetCreditRedeemer {
   }
 
   /**
+   * Run `run` as THE attempt for `account`, joining one already running.
+   *
+   * Concurrent rejections on one account are ONE decision. Without this, a burst
+   * arriving the moment a weekly window ran dry would each read the same "we
+   * hold a credit" and race into separate redemptions. Both entry points go
+   * through it, and for the same reason: the pool-dry path can be deciding about
+   * an account at the very moment an in-flight request on it gets its own 429,
+   * and the two must not each spend a credit for it.
+   *
+   * @param {Record<string, any>} account
+   * @param {(state: RedeemState) => Promise<RedeemResult>} run
+   * @returns {Promise<RedeemResult>}
+   */
+  _single(account, run) {
+    const state = this._stateFor(account);
+    if (state.inFlight) return state.inFlight;
+    const attempt = run(state).finally(() => { state.inFlight = null; });
+    state.inFlight = attempt;
+    return attempt;
+  }
+
+  /**
    * Redeem a credit for `account` if the policy allows it.
    *
    * @param {Record<string, any>} account
@@ -401,27 +485,90 @@ export class ResetCreditRedeemer {
    */
   async maybeRedeem(account) {
     if (!account) return { redeemed: false, reason: 'no account' };
-    const state = this._stateFor(account);
-    // Concurrent rejections on one account are ONE decision. Without this, a
-    // burst arriving the moment a weekly window ran dry would each read the
-    // same "we hold a credit" and race into separate redemptions.
-    if (state.inFlight) return state.inFlight;
-    const attempt = this._attempt(account, state).finally(() => { state.inFlight = null; });
-    state.inFlight = attempt;
+    return this._single(account, state => this._attempt(account, state));
+  }
+
+  /**
+   * Redeem a credit for ONE of `accounts`, chosen among them, if the policy
+   * allows it.
+   *
+   * The caller is the refusal that selection produces when nothing can serve a
+   * request, so `accounts` is the set it was refused for: Codex accounts a
+   * cleared quota window would actually return to service. No upstream request
+   * has been made — that is the whole point, the refusal happens before an
+   * account is chosen — so the policy is asked here exactly as it is on the 429
+   * path, one account at a time, and the first yes ends it.
+   *
+   * @param {Record<string, any>[]} accounts
+   * @returns {Promise<RedeemResult>}
+   */
+  async maybeRedeemForPool(accounts) {
+    if (!accounts?.length) return { redeemed: false, reason: 'no candidate accounts' };
+    // A pool-dry refusal is a FLEET state, so concurrent refusals are one
+    // decision about the fleet rather than one per request. The per-account
+    // guard alone would not do: two refusals could walk the same candidate list
+    // and reach different accounts on it, and spend a credit on each.
+    if (this.poolInFlight) return this.poolInFlight;
+    const attempt = this._poolAttempt(accounts).finally(() => { this.poolInFlight = null; });
+    this.poolInFlight = attempt;
     return attempt;
   }
 
   /**
-   * @param {Record<string, any>} account
-   * @param {RedeemState} state
+   * @param {Record<string, any>[]} accounts
    * @returns {Promise<RedeemResult>}
    */
-  async _attempt(account, state) {
+  async _poolAttempt(accounts) {
     const now = this.now();
+    // ONE budget for the whole refusal, shared across every candidate: the
+    // client is waiting on the refusal, not on an account, so a pool of three
+    // must not hold it three times as long as a pool of one.
+    const deadline = now + this.timeoutMs;
+
+    /** @type {Array<{account: Record<string, any>, credits: ResetCredit[]}>} */
+    const holders = [];
+    let reason = 'no Codex account holds a credit worth spending';
+    for (const account of accounts) {
+      const ready = await this._ready(account, this._stateFor(account), now, deadline);
+      if (ready.credits) holders.push({ account, credits: ready.credits });
+      else reason = ready.reason ?? reason;
+    }
+
+    // Ordered by the credit each would spend, soonest expiry first — which
+    // credit is about to be lost is the only thing separating accounts that are
+    // all equally out of quota. The rows travel beside the ordering rather than
+    // through it: that step is a pure choice between candidates, and carrying a
+    // reading it never looks at would only invite one of the two to go stale.
+    const rows = new Map(holders.map(holder => [holder.account, holder.credits]));
+    for (const { account } of orderRedeemCandidates(holders)) {
+      const result = await this._single(account,
+        state => this._decide(account, state, rows.get(account) || [], now, deadline));
+      if (result.redeemed) return result;
+      reason = result.reason;
+    }
+    return { redeemed: false, reason };
+  }
+
+  /**
+   * The checks and the credit rows that come before any decision, for one
+   * account. Everything here is shared by both entry points, so the pool-dry
+   * path cannot drift from the 429 path on what it is even allowed to consider.
+   *
+   * Answers with the account's rows, or with why it is not a candidate at all.
+   * An EMPTY row list is still rows: the account holds nothing, and it is the
+   * policy below that says so in its own words.
+   *
+   * @param {Record<string, any>} account
+   * @param {RedeemState} state
+   * @param {number} now
+   * @param {number} deadline
+   * @returns {Promise<{credits?: ResetCredit[], reason?: string}>}
+   */
+  async _ready(account, state, now, deadline) {
     const autoRedeemResets = this.config?.autoRedeemResets === true;
     const pre = redeemPreconditions({ account, autoRedeemResets, now });
-    if (!pre.ok) return { redeemed: false, reason: pre.reason };
-    if (now < state.cooldownUntil) return { redeemed: false, reason: 'cooling down after a recent attempt' };
+    if (!pre.ok) return { reason: pre.reason };
+    if (now < state.cooldownUntil) return { reason: 'cooling down after a recent attempt' };
 
     // The HOLDINGS count the usage probe last saw — the same number the TUI and
     // the dashboard draw, and not the redeemable set: it knows nothing about
@@ -431,34 +578,62 @@ export class ResetCreditRedeemer {
     // reading is likewise not "none": the probe is off by default, and the
     // detail fetch reports the count anyway.
     if (account.quota?.resetCredits?.available === 0) {
-      return { redeemed: false, reason: 'holds no reset credits' };
+      return { reason: 'holds no reset credits' };
     }
-
-    // Everything from here on can touch the network, and all of it shares this
-    // one deadline: what the waiting client can spare belongs to the attempt,
-    // not to each call inside it.
-    const deadline = now + this.timeoutMs;
 
     const credits = await this._credits(account, state, now, deadline);
     if (credits.error) {
       state.cooldownUntil = now + RETRY_COOLDOWN_MS;
-      return { redeemed: false, reason: `could not read reset credits (${credits.error})` };
+      return { reason: `could not read reset credits (${credits.error})` };
     }
+    return { credits: credits.credits || [] };
+  }
 
+  /**
+   * The policy, and the one action it authorises, for one account whose rows are
+   * already in hand.
+   *
+   * @param {Record<string, any>} account
+   * @param {RedeemState} state
+   * @param {ResetCredit[]} credits
+   * @param {number} now
+   * @param {number} deadline
+   * @returns {Promise<RedeemResult>}
+   */
+  async _decide(account, state, credits, now, deadline) {
+    const autoRedeemResets = this.config?.autoRedeemResets === true;
     // The policy asks whether the rest of the Codex pool can still serve, which
     // is exactly what rotation asks. Resolved through the manager so the two
-    // answers cannot disagree.
+    // answers cannot disagree — and on the pool-dry path it is also what stops
+    // a second credit being spent moments after the first: an account the first
+    // redemption returned to service makes every other account's answer "no".
     const pool = this.am.accounts
       .filter((/** @type {Record<string, any>} */ other) => other !== account && providerOf(other) === 'codex')
       .map((/** @type {Record<string, any>} */ other) => ({ name: other.name, available: this.am.unavailableReason(other) === null }));
 
-    const verdict = shouldRedeemReset({ account, autoRedeemResets, pool, credits: credits.credits, now });
+    const verdict = shouldRedeemReset({ account, autoRedeemResets, pool, credits, now });
     // A policy "no" arms no cooldown: it turns on pool state that can change
     // within the minute, and the cached rows above already bound what asking
     // again costs.
     if (!verdict.redeem) return { redeemed: false, reason: verdict.reason };
 
     return this._consume(account, state, verdict, now, deadline);
+  }
+
+  /**
+   * @param {Record<string, any>} account
+   * @param {RedeemState} state
+   * @returns {Promise<RedeemResult>}
+   */
+  async _attempt(account, state) {
+    const now = this.now();
+    // Everything past the free checks can touch the network, and all of it
+    // shares this one deadline: what the waiting client can spare belongs to the
+    // attempt, not to each call inside it.
+    const deadline = now + this.timeoutMs;
+    const ready = await this._ready(account, state, now, deadline);
+    if (!ready.credits) return { redeemed: false, reason: ready.reason ?? 'not a candidate' };
+    return this._decide(account, state, ready.credits, now, deadline);
   }
 
   /**

@@ -621,15 +621,21 @@ async function serverCommand() {
 
   // Expose reload to the proxy's control endpoint (works with or without TUI).
   hooks.reload = reloadAccounts;
-  // A quota rejection on a Codex account asks this whether one of the account's
-  // free rate-limit reset credits should be spent to undo it. Wired as a hook
-  // rather than reached from the request path directly: the forwarding path
-  // stays ignorant of a provider's billing features, and a server built without
-  // it (every test that is not about redemption) simply rotates as before.
-  // The shared config, so the fleet switch (`autoRedeemResets`) is read live —
-  // a TUI toggle or a reload binds on the next rejection, not the next restart.
+  // Whether one of a Codex account's free rate-limit reset credits should be
+  // spent to undo a spent weekly window. Wired as hooks rather than reached from
+  // the request path directly: the forwarding path stays ignorant of a
+  // provider's billing features, and a server built without them (every test
+  // that is not about redemption) simply rotates as before. The shared config,
+  // so the fleet switch (`autoRedeemResets`) is read live — a TUI toggle or a
+  // reload binds on the next refusal, not the next restart.
+  //
+  // Two hooks because the exhaustion presents in two places. A quota rejection
+  // names the account upstream refused; a pool-dry refusal names none, because
+  // selection turns the request away before choosing one — which is what a fully
+  // spent pool does to every request, and so the case that matters most.
   const redeemer = new ResetCreditRedeemer(accountManager, { config });
   hooks.redeemCodexReset = (/** @type {Record<string, any>} */ account) => redeemer.maybeRedeem(account);
+  hooks.redeemCodexResetForPool = (/** @type {Record<string, any>[]} */ accounts) => redeemer.maybeRedeemForPool(accounts);
   hooks.getStatusExtra = () => ({
     // Read live from the shared config (not a startup snapshot) so the TUI's
     // blocklist editor shows up in `status` immediately, the same way the

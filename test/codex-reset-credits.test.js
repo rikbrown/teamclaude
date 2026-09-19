@@ -14,6 +14,7 @@ import {
   ResetCreditRedeemer,
   consumeResetCredit,
   fetchResetCreditDetails,
+  orderRedeemCandidates,
   redeemPreconditions,
   shouldRedeemReset,
   weeklyExhausted,
@@ -610,6 +611,274 @@ test('a redeemer that throws costs the request nothing but the rotation it would
   const r = await forwardOneCodexRequest(async () => { throw new Error('upstream exploded'); });
   assert.equal(r.status, 429);
   assert.equal(r.account.status, 'throttled');
+});
+
+// ── choosing between accounts ───────────────────────────────────────────────
+
+// The per-account policy answers "this account was rejected — spend one?". A
+// pool-dry refusal asks which of several spent accounts should, so the choice
+// between them is its own pure step.
+
+test('the ordering drops an account holding nothing and offers the soonest-expiring credit first', () => {
+  const now = Date.now();
+  const a = codex('a');
+  const b = codex('b');
+  const c = codex('c');
+  const order = orderRedeemCandidates([
+    { account: a, credits: [credit({ id: 'a-1', expiresAt: now + 20 * DAY })] },
+    { account: b, credits: [credit({ id: 'b-1', status: 'redeemed', expiresAt: now + DAY })] },
+    { account: c, credits: [credit({ id: 'c-1', expiresAt: now + 10 * DAY })] },
+  ]);
+  assert.deepEqual(order.map(entry => entry.account.name), ['c', 'a']);
+  assert.equal(order[0].credit.id, 'c-1');
+});
+
+test('a credit that never expires sorts behind one that does, and two of them do not compare as NaN', () => {
+  const now = Date.now();
+  const order = orderRedeemCandidates([
+    { account: codex('a'), credits: [credit({ expiresAt: null })] },
+    { account: codex('b'), credits: [credit({ expiresAt: now + 5 * DAY })] },
+    { account: codex('c'), credits: [credit({ expiresAt: null })] },
+  ]);
+  assert.deepEqual(order.map(entry => entry.account.name), ['b', 'a', 'c']);
+});
+
+test('an account whose only credit its plan cannot spend is not a candidate', () => {
+  const order = orderRedeemCandidates([
+    { account: codex('a'), credits: [credit({ supportedByPlan: false })] },
+  ]);
+  assert.deepEqual(order, []);
+});
+
+// ── the pool-dry refusal ────────────────────────────────────────────────────
+
+/** A redeemer over a pool of spent Codex accounts, each with its own rows. */
+function poolHarness({ accounts = [codex('a'), codex('b')], credits = {}, code = 'reset', config = { ...ARMED }, caughtUp = true } = {}) {
+  const am = new AccountManager(accounts, 0.98);
+  for (const account of am.accounts) weeklySpent(account);
+  const calls = { details: [], consume: [] };
+  const redeemer = new ResetCreditRedeemer(am, {
+    config,
+    log: () => {},
+    detailsFn: async account => {
+      calls.details.push(account.name);
+      const rows = credits[account.name] ?? [credit()];
+      return { credits: rows, availableCount: rows.length };
+    },
+    consumeFn: async account => {
+      calls.consume.push(account.name);
+      return typeof code === 'function' ? code(account.name) : { code, windowsReset: 1, credit: null };
+    },
+    // `caughtUp: false` is the re-read that still reports the window spent —
+    // upstream has not caught up with its own reset yet.
+    usageFn: async () => ({ sevenDay: { utilization: caughtUp ? 0 : 1, resetAt: Date.now() + 7 * DAY } }),
+  });
+  return { am, redeemer, calls };
+}
+
+test('a dry pool spends the credit that would be lost first, and spends exactly one', async () => {
+  const now = Date.now();
+  const { am, redeemer, calls } = poolHarness({
+    credits: {
+      a: [credit({ id: 'a-1', expiresAt: now + 20 * DAY })],
+      b: [credit({ id: 'b-1', expiresAt: now + 10 * DAY })],
+    },
+  });
+  const result = await redeemer.maybeRedeemForPool(am.accounts);
+  assert.equal(result.redeemed, true);
+  assert.deepEqual(calls.consume, ['b']);
+});
+
+test('an account holding nothing is passed over for one that does', async () => {
+  const { am, redeemer, calls } = poolHarness({ credits: { a: [], b: [credit()] } });
+  assert.equal((await redeemer.maybeRedeemForPool(am.accounts)).redeemed, true);
+  assert.deepEqual(calls.consume, ['b']);
+});
+
+test('a dry pool holding no credit anywhere spends nothing and says so', async () => {
+  const { am, redeemer, calls } = poolHarness({ credits: { a: [], b: [] } });
+  const result = await redeemer.maybeRedeemForPool(am.accounts);
+  assert.equal(result.redeemed, false);
+  assert.deepEqual(calls.consume, []);
+});
+
+// A refusal is a FLEET state, so every request refused at the same moment
+// arrives here asking the same question. Without the pool-level guard each one
+// would walk the same candidate list and could reach a different account on it.
+test('concurrent refusals are one decision, not one redemption per refused request', async () => {
+  const { am, redeemer, calls } = poolHarness();
+  const results = await Promise.all([0, 1, 2, 3].map(() => redeemer.maybeRedeemForPool(am.accounts)));
+  assert.equal(calls.consume.length, 1);
+  assert.equal(results.filter(r => r.redeemed).length, 4);
+});
+
+test('an unarmed fleet refuses the whole pool without reading a single credit list', async () => {
+  const { am, redeemer, calls } = poolHarness({ config: {} });
+  const result = await redeemer.maybeRedeemForPool(am.accounts);
+  assert.equal(result.redeemed, false);
+  assert.match(result.reason, /auto-redeem is switched off$/);
+  assert.deepEqual(calls.details, []);
+});
+
+test('an Anthropic account offered among the candidates never reaches a Codex endpoint', async () => {
+  const { am, redeemer, calls } = poolHarness({ accounts: [oauth('claude'), codex('b')] });
+  assert.equal((await redeemer.maybeRedeemForPool(am.accounts)).redeemed, true);
+  assert.deepEqual(calls.details, ['b']);
+  assert.deepEqual(calls.consume, ['b']);
+});
+
+// ── the two triggers together ───────────────────────────────────────────────
+
+// Both entry points can fire within moments of each other: the pool-dry refusal
+// turns away requests that were never sent while a request already in flight
+// collects its own 429. Between them they may spend ONE credit.
+
+test('a refusal and an upstream 429 on the same account spend one credit between them', async () => {
+  const { am, redeemer, calls } = poolHarness({ accounts: [codex('a')] });
+  assert.equal((await redeemer.maybeRedeemForPool(am.accounts)).redeemed, true);
+  const second = await redeemer.maybeRedeem(am.accounts[0]);
+  assert.equal(second.redeemed, false);
+  assert.equal(second.reason, 'weekly window is not exhausted');
+  assert.deepEqual(calls.consume, ['a']);
+});
+
+// And when the re-read still says the window is spent — upstream not caught up
+// with its own reset — the cooldown is what holds the line instead. This is the
+// case the reset "did not take", and it must not be answered with a second one.
+test('a second trigger after a reset that does not read as one is refused by the cooldown', async () => {
+  const { am, redeemer, calls } = poolHarness({ accounts: [codex('a')], caughtUp: false });
+  assert.equal((await redeemer.maybeRedeemForPool(am.accounts)).redeemed, true);
+  const second = await redeemer.maybeRedeem(am.accounts[0]);
+  assert.equal(second.redeemed, false);
+  assert.match(second.reason, /cooling down/);
+  assert.deepEqual(calls.consume, ['a']);
+});
+
+test('and racing each other, they join one attempt rather than making two', async () => {
+  const { am, redeemer, calls } = poolHarness({ accounts: [codex('a')] });
+  const [pool, single] = await Promise.all([
+    redeemer.maybeRedeemForPool(am.accounts),
+    redeemer.maybeRedeem(am.accounts[0]),
+  ]);
+  assert.equal(pool.redeemed, true);
+  assert.equal(single.redeemed, true);
+  assert.deepEqual(calls.consume, ['a']);
+});
+
+// The cross-account case the cooldown cannot answer, and the policy can: the
+// first redemption returns its account to service, which is exactly the
+// "another Codex account can still serve" the sibling's policy then reads.
+test('a redemption that returns one account to service stops the sibling spending too', async () => {
+  const { am, redeemer, calls } = poolHarness();
+  assert.equal((await redeemer.maybeRedeemForPool(am.accounts)).redeemed, true);
+  const sibling = am.accounts.find(a => a.name !== calls.consume[0]);
+  const second = await redeemer.maybeRedeem(sibling);
+  assert.equal(second.redeemed, false);
+  assert.equal(second.reason, 'another Codex account can still serve');
+  assert.equal(calls.consume.length, 1);
+});
+
+// ── the pool-dry refusal, through the proxy ─────────────────────────────────
+
+/**
+ * One request through a proxy whose pool is dry: every Codex account's weekly
+ * window reads spent, so selection refuses before choosing anyone and no
+ * upstream request is ever made. `onRedeem` stands in for the redeemer;
+ * returning true makes the first candidate selectable, the way a real
+ * redemption's quota re-read does.
+ */
+async function forwardOneRefusedRequest({ onRedeem, accounts = [codex('a')], path = '/backend-api/codex/responses', model = 'gpt-6-astra' } = {}) {
+  let hits = 0;
+  const upstream = http.createServer((_req, res) => {
+    hits++;
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end('{"ok":true}');
+  });
+  const upstreamPort = await new Promise(r => upstream.listen(0, '127.0.0.1', () => r(upstream.address().port)));
+
+  const am = new AccountManager(accounts.map(a => ({ ...a, upstream: `http://127.0.0.1:${upstreamPort}` })), 0.98);
+  for (const account of am.accounts) weeklySpent(account);
+  // The revalidation probe is throttled to one request a minute, so on a pool
+  // this dry the overwhelming majority of requests never reach it — which is
+  // the state the hook exists for, and the one observed live.
+  am._nextProbeAt = Date.now() + 60 * 60 * 1000;
+
+  const asked = [];
+  const hooks = onRedeem ? {
+    redeemCodexResetForPool: async (/** @type {Record<string, any>[]} */ candidates) => {
+      asked.push(candidates.map(a => a.name));
+      const redeemed = await onRedeem();
+      // What a real redemption leaves behind: the hold dropped and the quota
+      // re-read, so the account is selectable again.
+      if (redeemed) am.applyCodexUsageData(candidates[0].index, { sevenDay: { utilization: 0, resetAt: Date.now() + 7 * DAY } });
+      return { redeemed, reason: 'test' };
+    },
+  } : {};
+  const proxy = createProxyServer(am, { proxy: { apiKey: 'k' }, upstream: `http://127.0.0.1:${upstreamPort}` }, hooks);
+  const proxyPort = await new Promise(r => proxy.listen(0, '127.0.0.1', () => r(proxy.address().port)));
+  try {
+    const res = await fetch(`http://127.0.0.1:${proxyPort}${path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model, messages: [] }),
+    });
+    await res.text();
+    return { status: res.status, hits, asked, am };
+  } finally {
+    proxy.close();
+    upstream.close();
+  }
+}
+
+test('a pool-dry refusal asks whether to redeem, and serves the request when one was', async () => {
+  const r = await forwardOneRefusedRequest({ onRedeem: async () => true });
+  assert.deepEqual(r.asked, [['a']]);
+  assert.equal(r.status, 200);
+  assert.equal(r.hits, 1, 'the request selection refused must actually be served afterwards');
+});
+
+test('a refusal with nothing to redeem is the refusal it always was', async () => {
+  const r = await forwardOneRefusedRequest({ onRedeem: async () => false });
+  assert.deepEqual(r.asked, [['a']]);
+  assert.equal(r.status, 429);
+  assert.equal(r.hits, 0);
+});
+
+test('a redeemer that throws leaves the refusal exactly as it was', async () => {
+  const r = await forwardOneRefusedRequest({ onRedeem: async () => { throw new Error('upstream exploded'); } });
+  assert.equal(r.status, 429);
+  assert.equal(r.hits, 0);
+});
+
+// Redeeming on an account the request could not use afterwards would spend
+// something scarce for nothing: an operator's own decision survives a cleared
+// quota window, so those accounts are never offered.
+test('only the accounts a reset would return to service are offered', async () => {
+  const r = await forwardOneRefusedRequest({
+    onRedeem: async () => false,
+    accounts: [codex('off', { disabled: true }), codex('a'), codex('capped', { maxUsage: { unified7d: 0.5 } })],
+  });
+  assert.deepEqual(r.asked, [['a']]);
+});
+
+test('an exhausted Anthropic fleet is refused without a word about reset credits', async () => {
+  const r = await forwardOneRefusedRequest({
+    onRedeem: async () => true,
+    accounts: [oauth('claude')],
+    path: '/v1/messages',
+    model: 'claude-opus-4-1',
+  });
+  assert.deepEqual(r.asked, []);
+  assert.equal(r.status, 429);
+  assert.equal(r.hits, 0);
+});
+
+// A server built without the hooks — every test that is not about redemption —
+// refuses exactly as it did before the feature existed.
+test('a proxy with no redeem hook refuses a dry pool unchanged', async () => {
+  const r = await forwardOneRefusedRequest({ onRedeem: null });
+  assert.equal(r.status, 429);
+  assert.equal(r.hits, 0);
 });
 
 // ── what the operator sees ──────────────────────────────────────────────────

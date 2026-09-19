@@ -139,6 +139,17 @@ One account can be exempted with `accounts[].autoRedeemReset: false`, and that i
 can do. A per-account `true` arms nothing on its own: with `autoRedeemResets` off, no account
 spends anything.
 
+A redemption is considered at the two moments a spent weekly window turns a request away:
+
+- **Nothing could be chosen to serve it.** Every Codex account the request is eligible for is out of
+  quota, so selection refuses it before picking one and nothing is ever sent upstream. On a pool of
+  two this is what almost every request gets, and it is the case the feature exists for. Only the
+  accounts a reset would actually return to service are considered — an account you disabled or
+  capped stays out whatever its windows say — and when several qualify, the one whose credit expires
+  soonest is asked first.
+- **Upstream rejected the account that was chosen.** A request did go out, and came back 429 with
+  the weekly window spent.
+
 While it is on, a credit is spent only when **all** of this holds:
 
 1. The account's **weekly** window is exhausted. A spent 5-hour window never triggers it — that one
@@ -148,10 +159,15 @@ While it is on, a credit is spent only when **all** of this holds:
    rather than topping up an account rotation would have stepped past — or the credit expires
    within three days.
 
-The request that hit the rejection is then retried on the same account, since those are the windows
-that were just reset. The whole decision — token refresh, credit read and redemption — is held to a
-10-second budget, because the waiting client gives the response head 60 seconds and the retry needs
-the rest of it. Every attempt and outcome is logged.
+Whichever of the two asked, at most one credit is spent. Refusals arriving together join a single
+attempt rather than each starting one; an account that has just redeemed holds a cooldown; and an
+account a redemption has returned to service is precisely what makes condition 3 answer "no" for
+every other account.
+
+The request is then served on the account whose windows were just reset — re-selected after a
+refusal, retried in place after a rejection. The whole decision — token refresh, credit read and
+redemption — is held to a 10-second budget, because the waiting client gives the response head 60
+seconds and the retry needs the rest of it. Every attempt and outcome is logged.
 
 ## Timeouts
 

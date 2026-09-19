@@ -86,6 +86,13 @@ function resolveHeaderless429RetryDelayMs() {
   const env = Number(process.env.TEAMCLAUDE_HEADERLESS_429_RETRY_DELAY_MS);
   return env > 0 ? env : DEFAULT_HEADERLESS_429_RETRY_DELAY_MS;
 }
+// The `unavailableReason` verdicts a redeemed Codex reset credit actually
+// clears, and therefore the only ones worth spending one over. A redemption
+// re-reads the account's quota and drops its rate-limit hold, which answers
+// exactly these two; every other reason survives it untouched — an operator's
+// own decision (disabled, capped), a credential or policy problem (error,
+// entitlement), or an eligibility rule (route) that no quota window governs.
+const RESET_CLEARS = new Set(['quota', 'throttled']);
 const OAUTH_ENTITLEMENT_ERROR_CODE = 'oauth_not_allowed_for_organization';
 const ERROR_BODY_INSPECTION_LIMIT = 64 * 1024;
 // How long an idle keep-alive connection is held open.
@@ -2193,12 +2200,53 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
       }
       return;
     }
+    // Set here rather than beside the response below: a redeemed reset can still
+    // serve this request, and both are overwritten when it does — but a client
+    // that walks away mid-attempt leaves the activity row describing the refusal
+    // it was waiting on, exactly as it did before there was anything to attempt.
     ctx.status = 429;
     ctx.account = '(none available)';
     // Measured once and used twice: the accounts the message counts and the
     // windows the retry-after is read from have to be the same accounts, or the
     // two halves of one sentence contradict each other.
     const candidates = candidateAccounts(accountManager, ctx.model, ctx.provider);
+
+    // A Codex pool that is dry because its weekly windows are spent is the one
+    // exhaustion here that a free reset credit can undo — and THIS is where the
+    // feature has to act. Its first home was the upstream-429 handler, which on
+    // a fully spent pool never runs at all: selection refuses the request before
+    // an account is chosen, so nothing is ever sent and nothing ever rejects it.
+    // Hooking the refusal states the policy's own precondition ("every Codex
+    // account is out") directly, instead of inferring it from a rejection that
+    // does not arrive.
+    //
+    // Only the accounts a redemption would actually return to service: an
+    // operator's own decision (disabled, capped) and a structural refusal
+    // (entitlement, an error state needing a re-login) survive a cleared quota
+    // window, and an account this request has already tried stays excluded from
+    // the re-selection below whatever its windows then say. A credit spent on
+    // any of those buys this request nothing.
+    const resettable = hooks.redeemCodexResetForPool && !ctx.resetRedeemTried
+      ? candidates.filter(a => providerOf(a) === 'codex' && !ctx.tried.has(a.index)
+        && RESET_CLEARS.has(accountManager.unavailableReason(a, ctx.model) ?? ''))
+      : [];
+    if (resettable.length) {
+      // Once per request, whatever it decides: a redemption that reports success
+      // but leaves the account unselectable (upstream not yet caught up with its
+      // own reset) must cost this request one re-selection, not a loop of them.
+      ctx.resetRedeemTried = true;
+      let redeemed = false;
+      try {
+        redeemed = !!(await hooks.redeemCodexResetForPool(resettable))?.redeemed;
+      } catch { /* a failed redemption must leave the refusal exactly as it was */ }
+      if (redeemed) {
+        // No upstream attempt was made, so this costs no retry from the budget:
+        // re-select against the account whose windows were just cleared.
+        if (clientGone(res)) { ctx.abandoned = true; return; }
+        return forwardRequest(req, res, body, accountManager, upstream, retryCount, hooks, reqId, ctx, logDir, sx, route);
+      }
+    }
+
     const retryAfter = computeRetryAfter(accountManager, candidates, ctx.model);
 
     // Long-hold mode: hold the HTTP connection and poll until an account

@@ -22,6 +22,7 @@ import { renderDashboardHtml, dashboardCsp } from './dashboard.js';
 import { createUsageRecorder, resolveUsageDimensions, usageDimensionHeaderNames } from './client-usage.js';
 import { responsesEventUsage, isResponsesBody, normalizeResponsesUsage } from './responses-usage.js';
 import { classificationPath } from './classification-path.js';
+import { codexSpentWindows } from './codex-quota.js';
 /** @typedef {import('./types.js').CodedError} CodedError */
 
 
@@ -2494,11 +2495,16 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
       // account is futile — switch to another account now (updateQuota above
       // already recorded the spent bucket's utilization from the headers).
       const rl = rateLimitHeaders;
-      // A spent Codex window on a sidecar-backed account is the same shape as a
-      // rejected unified status: a durable quota rejection, not a transient
-      // throttle. Named separately because a Codex rejection is also the only
-      // one a free reset credit can undo — see below.
-      const codexRejected = codexQuotaRejected(rl);
+      // A spent Codex window says the same thing as a rejected unified status,
+      // in the only vocabulary that backend has: a used-percent at its limit.
+      // Read through the same parser the quota sweep uses, so every family is
+      // covered — a subscription states its only 5-hour window inside a NAMED
+      // one, and `x-codex-primary/secondary-used-percent` alone would read 42%
+      // / 0% while the account was refusing on a spent session window. Named
+      // separately because a Codex rejection is also the only one a free reset
+      // credit can undo — see below.
+      const spentCodexWindows = codexSpentWindows(rl);
+      const codexRejected = spentCodexWindows.length > 0;
       const generalRejected = rl['anthropic-ratelimit-unified-5h-status'] === 'rejected'
         || rl['anthropic-ratelimit-unified-7d-status'] === 'rejected'
         || codexRejected;
@@ -2545,7 +2551,13 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
           console.log(`[TeamClaude] Quota rejection (429) relayed by "${account.name}" — the limit belongs to the pooled account behind it, not the conduit`);
         } else {
           const hold = Math.min(Math.max(retryAfter, 1), 3600);
-          console.log(`[TeamClaude] Quota rejection (429) on "${account.name}" — throttling ${hold}s and switching account`);
+          // Name the spent window when the headers said which: "which one" is
+          // the first thing an operator asks of a rejection, and a 5-hour
+          // window reads very differently from a weekly one. A model-scoped
+          // label carries upstream's own text, so it goes through safeLine.
+          const spent = spentCodexWindows.length
+            ? ` (${safeLine(spentCodexWindows.join(', '), 80)} spent)` : '';
+          console.log(`[TeamClaude] Quota rejection (429) on "${account.name}"${spent} — throttling ${hold}s and switching account`);
           accountManager.markRateLimited(account.index, hold);
         }
         ctx.tried.add(account.index);
@@ -3429,7 +3441,12 @@ export function rewriteModel(body, modelMap) {
 // Rate-limit telemetry we pass to AccountManager.updateQuota: Anthropic's
 // `anthropic-ratelimit-*` family, plus the OpenAI/Codex `x-codex-*` family a
 // translating sidecar may forward from the ChatGPT backend. Exported for tests.
+/**
+ * @param {Headers|Map<string, string>} headers
+ * @returns {Record<string, string>}
+ */
 export function collectRateLimitHeaders(headers) {
+  /** @type {Record<string, string>} */
   const out = {};
   for (const [key, value] of headers.entries()) {
     if (key.startsWith('anthropic-ratelimit-') || key.startsWith('x-codex-')) out[key] = value;
@@ -3437,13 +3454,6 @@ export function collectRateLimitHeaders(headers) {
   return out;
 }
 
-// Durable Codex quota exhaustion: either subscription window (primary ≈ 5h,
-// secondary ≈ weekly) reports fully spent. Like a unified "rejected" status,
-// retrying the same account is futile until the window resets. Exported for tests.
-export function codexQuotaRejected(rl) {
-  return parseFloat(rl['x-codex-primary-used-percent']) >= 100
-    || parseFloat(rl['x-codex-secondary-used-percent']) >= 100;
-}
 
 /**
  * The resets that are actually holding `account` back, each read off the window

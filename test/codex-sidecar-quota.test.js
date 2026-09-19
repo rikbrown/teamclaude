@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { AccountManager } from '../src/account-manager.js';
-import { collectRateLimitHeaders, codexQuotaRejected } from '../src/server.js';
+import { collectRateLimitHeaders } from '../src/server.js';
+import { codexSpentWindows } from '../src/codex-quota.js';
 
 // Covers the codex-proxy feature's quota half: OpenAI/Codex rate-limit telemetry
 // (`x-codex-primary/secondary-*` response headers, as forwarded by a translating
@@ -100,14 +101,69 @@ test('collectRateLimitHeaders keeps anthropic-ratelimit-* and x-codex-*, drops t
 
 // ── durable 429 classification ───────────────────────────────────────────────
 
-test('codexQuotaRejected is true when either codex window is spent', () => {
-  assert.equal(codexQuotaRejected({ 'x-codex-primary-used-percent': '100' }), true);
-  assert.equal(codexQuotaRejected({ 'x-codex-primary-used-percent': '104.2' }), true);
-  assert.equal(codexQuotaRejected({ 'x-codex-secondary-used-percent': '100' }), true);
+// Read through `parseCodexQuota` rather than off the raw header pair, so a
+// window is classified by its own `window-minutes` and every family is covered.
+// The flat reading could not see a spent SESSION window at all: a subscription
+// states its only 5-hour one inside a named family.
+
+test('an account-wide window at its limit is spent', () => {
+  assert.deepEqual(codexSpentWindows({
+    'x-codex-primary-used-percent': '100',
+    'x-codex-primary-window-minutes': '10080',
+  }), ['weekly']);
+  assert.deepEqual(codexSpentWindows({
+    'x-codex-primary-used-percent': '100',
+    'x-codex-primary-window-minutes': '300',
+  }), ['5h']);
+  // Upstream keeps counting once a window is past its limit.
+  assert.deepEqual(codexSpentWindows({
+    'x-codex-primary-used-percent': '104.2',
+    'x-codex-primary-window-minutes': '10080',
+  }), ['weekly']);
 });
 
-test('codexQuotaRejected is false below the limit or without codex headers', () => {
-  assert.equal(codexQuotaRejected({ 'x-codex-primary-used-percent': '99.4' }), false);
-  assert.equal(codexQuotaRejected({ 'anthropic-ratelimit-unified-5h-status': 'rejected' }), false);
-  assert.equal(codexQuotaRejected({}), false);
+test('a named family at its limit is spent, account-wide headroom or not', () => {
+  // The case the account-wide percentages cannot state: a subscription's only
+  // 5-hour window sits in a named family, and the flat pair reads 42% / 0%.
+  assert.deepEqual(codexSpentWindows({
+    'x-codex-primary-used-percent': '42',
+    'x-codex-primary-window-minutes': '10080',
+    'x-codex-secondary-used-percent': '0',
+    'x-codex-secondary-window-minutes': '0',
+    'x-codex-gpt-5-limit-name': 'gpt-5',
+    'x-codex-gpt-5-primary-used-percent': '100',
+    'x-codex-gpt-5-primary-window-minutes': '300',
+  }), ['5h']);
+  // A model-scoped weekly bucket is spent on its own terms.
+  assert.deepEqual(codexSpentWindows({
+    'x-codex-primary-used-percent': '50',
+    'x-codex-primary-window-minutes': '10080',
+    'x-codex-gpt-5-limit-name': 'gpt-5',
+    'x-codex-gpt-5-secondary-used-percent': '100',
+    'x-codex-gpt-5-secondary-window-minutes': '10080',
+  }), ['gpt-5 weekly']);
+});
+
+test('headroom, and headers that state nothing, are not spent', () => {
+  assert.deepEqual(codexSpentWindows({
+    'x-codex-primary-used-percent': '99.4',
+    'x-codex-primary-window-minutes': '10080',
+  }), []);
+  // A 429 with no Codex headers at all — the throttle case, which must stay a
+  // throttle: pausing and retrying the same account is the right answer to it.
+  assert.deepEqual(codexSpentWindows({}), []);
+  // Anthropic's own spelling is classified by the unified statuses, not here.
+  assert.deepEqual(codexSpentWindows({ 'anthropic-ratelimit-unified-5h-status': 'rejected' }), []);
+  // A zeroed window is how this API says "not applicable"; a percentage beside
+  // it means nothing, and reading it as spent would hold a healthy account.
+  assert.deepEqual(codexSpentWindows({
+    'x-codex-secondary-used-percent': '100',
+    'x-codex-secondary-window-minutes': '0',
+  }), []);
+  // Unparseable or unstated readings are dropped rather than guessed at.
+  assert.deepEqual(codexSpentWindows({
+    'x-codex-primary-used-percent': 'n/a',
+    'x-codex-primary-window-minutes': '10080',
+  }), []);
+  assert.deepEqual(codexSpentWindows({ 'x-codex-primary-used-percent': '100' }), []);
 });

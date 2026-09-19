@@ -1,29 +1,28 @@
 # Running the fleet on a remote host
 
-TeamClaude is usually started next to the client that uses it. It does not have to be. Moving
-the server to an always-on box — a mini in a cupboard, a NUC, a VPS — means the fleet keeps its
-quota windows warm, the probe keeps running, and every machine you own shares one pool instead
-of each holding its own.
+TeamClaude usually runs next to its client, but it can run elsewhere. Moving the server to an
+always-on box — a mini in a cupboard, a NUC, a VPS — keeps the fleet's quota windows warm and its
+probe running. It also lets every machine you own share one pool instead of maintaining its own.
 
-This page covers the whole move: reaching the box, moving the accounts onto it, keeping it
-running, and pointing clients at it. Commands are given for macOS and Linux.
+This page covers the full move: how to reach the box, move the accounts to it, keep the server
+running and point clients at it. It includes commands for macOS and Linux.
 
 ## One server, never two
 
 The accounts must live on exactly one machine. This is not a preference.
 
-An OAuth refresh may return a **new** refresh token, and TeamClaude stores whichever it gets
-back. Two servers holding the same `accounts[]` refresh independently, so one can end up
-presenting a token the other has already replaced. TeamClaude records that rejection
-(`_deadRefreshToken`) and stops using the account — including skipping it in the probe, since
-refreshing a rejected token only rotates the family again — until you log in afresh. With a
-quota probe running, a fleet of a dozen accounts can degrade quickly.
+An OAuth refresh may return a **new** refresh token, and TeamClaude stores the returned token.
+Two servers with the same `accounts[]` refresh independently, so one can present a token that
+the other has already replaced. TeamClaude records that rejection (`_deadRefreshToken`) and
+stops using the account. It also skips the account in the probe, because refreshing a rejected
+token only rotates the family again. The account remains unavailable until you log in again.
+With a quota probe running, a fleet of a dozen accounts can degrade quickly.
 
 So the config is **moved**, not copied:
 
 1. Stop the old server.
 2. Copy `teamclaude.json` to the new host.
-3. Rename the original the same minute, so nothing can start a second server against it.
+3. Rename the original immediately, so nothing can start a second server with it.
 
 ```sh
 mv ~/.config/teamclaude.json ~/.config/teamclaude.json.moved-to-<host>-$(date +%Y%m%d)
@@ -38,13 +37,13 @@ overlap.
 
 ## Reaching the box
 
-The server binds a plain HTTP port. Do not put that on the public internet. Two ways to reach it
-that need no port forwarding and survive a dynamic IP:
+The server binds to a plain HTTP port. Do not expose it to the public internet. The following two
+options need no port forwarding and work with a dynamic IP:
 
 ### Tailscale (recommended)
 
-A WireGuard mesh. Traffic is end-to-end encrypted between your devices, nothing is terminated by
-a third party, and there is no request timeout to design around.
+A WireGuard mesh. Traffic is encrypted end to end between your devices. No third party terminates
+it, and there is no request timeout to design around.
 
 ```sh
 # macOS (the CLI package, not the App Store app: it runs as a system daemon, so
@@ -58,12 +57,12 @@ curl -fsSL https://tailscale.com/install.sh | sh
 sudo tailscale up
 ```
 
-Turn on MagicDNS in the admin console and the host is reachable as a bare name — `http://<host>:3456`.
-`tailscale ip -4` gives the `100.x` address if you would rather not depend on DNS.
+Enable MagicDNS in the admin console to reach the host by its bare name: `http://<host>:3456`.
+If you prefer not to depend on DNS, `tailscale ip -4` gives the `100.x` address.
 
 ### Cloudflare Tunnel
 
-Works, with three caveats that matter for this workload:
+Cloudflare Tunnel works, but this workload has three important caveats:
 
 - **Cloudflare terminates TLS.** Your prompts and source code pass through their edge in
   plaintext. For a personal fleet that may be fine; decide deliberately.
@@ -83,8 +82,10 @@ request arrives from loopback and the key gate would otherwise never run. See
 brew install node
 npm install -g @rikcodes/teamclaude
 
-# Linux (Debian/Ubuntu; any Node >= 20 works)
-sudo apt install -y nodejs npm
+# Linux (Debian/Ubuntu). The engines floor is Node 20, and the distro package is
+# older than that on several supported releases, so take it from NodeSource:
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+sudo apt install -y nodejs
 npm install -g @rikcodes/teamclaude
 ```
 
@@ -104,10 +105,10 @@ Copy the config over, then edit three things on the new host:
 }
 ```
 
-If you run a [Codex sidecar](openai.md), its `sidecars[].command` is an **absolute path** on the
-new host, and it must be: a service started by launchd or systemd does not inherit your
-interactive `PATH`, so a bare command name will not resolve. Its `env.XDG_STATE_HOME` needs the
-new home directory if the username differs.
+If you run a [Codex sidecar](openai.md), set its `sidecars[].command` to an **absolute path** on the
+new host. A service started by launchd or systemd does not inherit your interactive `PATH`, so it
+cannot resolve a bare command name. If the username differs, its `env.XDG_STATE_HOME` must use the
+new home directory.
 
 Reload with **R** in the TUI, or `POST /teamclaude/reload`. A `sidecars` change needs a full
 restart — that block is read once at startup.
@@ -121,8 +122,8 @@ teamclaude service install
 ```
 
 macOS writes `~/Library/LaunchAgents/com.karpeleslab.teamclaude.plist` with `RunAtLoad` and
-`KeepAlive`, logging to `~/Library/Logs/teamclaude.log`. Linux writes a systemd **user** unit and
-enables it. Check either with `teamclaude service status`, or:
+`KeepAlive`, and logs to `~/Library/Logs/teamclaude.log`. Linux writes and enables a systemd
+**user** unit. Use `teamclaude service status` to check either service, or run:
 
 ```sh
 # macOS
@@ -146,17 +147,17 @@ Two things are easy to miss:
 
 ### With the live TUI
 
-The installed service runs `server --headless`, which paints nothing. `teamclaude attach` opens a
-remote dashboard, but note what it **cannot** show: request traffic never leaves the server
-process, so the activity pane is replaced by a "Messages" pane. Accounts, quota and the settings
-screen are all there; the live request feed is not.
+The installed service runs `server --headless` and produces no TUI output. `teamclaude attach`
+opens a remote dashboard, but it cannot show request traffic. That traffic stays in the server
+process, so a "Messages" pane replaces the activity pane. The remote dashboard still includes
+accounts, quota and the settings screen.
 
-To get everything — the activity feed, the settings screen, account switching — run the real TUI
-inside `tmux` and have the service supervise the session.
+To retain the activity feed, settings screen and account switching, run the real TUI inside
+`tmux` and let the service supervise the session.
 
-`launchd` and `systemd` cannot watch `tmux new-session -d` directly: it returns as soon as the
-session exists, so a restart policy would respawn it forever. A small keeper script fixes that —
-it creates the session, then blocks while the session lives:
+`launchd` and `systemd` cannot supervise `tmux new-session -d` directly. The command returns as
+soon as the session exists, so a restart policy would respawn it indefinitely. A small keeper
+script creates the session and then blocks while it remains active:
 
 ```sh
 #!/bin/sh
@@ -174,13 +175,13 @@ while "$TMUX_BIN" has-session -t "$SESSION" 2>/dev/null; do
 done
 ```
 
-Save it as `~/.local/bin/teamclaude-tmux.sh`, `chmod +x`, and point the service at it instead of
-`teamclaude` — on macOS by editing `ProgramArguments` in the plist to
-`["/bin/sh", "/home/<user>/.local/bin/teamclaude-tmux.sh"]`, on Linux by replacing `ExecStart` in
+Save it as `~/.local/bin/teamclaude-tmux.sh`, run `chmod +x`, and make the service call it instead
+of `teamclaude`. On macOS, edit `ProgramArguments` in the plist to
+`["/bin/sh", "/Users/<user>/.local/bin/teamclaude-tmux.sh"]`. On Linux, replace `ExecStart` in
 `~/.config/systemd/user/teamclaude.service`.
 
-When the server exits, the pane closes, the session ends, the keeper exits, and the service
-restarts it — which recreates everything. Attach from anywhere with:
+When the server exits, the pane closes, the session ends and the keeper exits. The service then
+restarts the keeper, which recreates the session. Attach from anywhere with:
 
 ```sh
 ssh -t <host> 'tmux attach -t teamclaude'
@@ -205,30 +206,29 @@ ssh <host> 'tail -f ~/.config/teamclaude-activity.log'
 14:02:11  [laptop] 38cee1 POST /v1/messages?beta=true (claude-opus-5) → rik@example.com (200, 7.3s)
 ```
 
-It carries the client name, the outcome and the duration, none of which the TUI's feed shows.
+Each line includes the client name, outcome and duration. The TUI feed shows none of these fields.
 
 ## Pointing clients at it
 
-A client needs two environment variables, and they are **one setting in two halves**:
+A client needs two environment variables. Together, they form one setting:
 
 | Variable | Value |
 | --- | --- |
 | `ANTHROPIC_BASE_URL` | `http://<host>:3456` — `http://127.0.0.1:3456` on the server itself |
 | `ANTHROPIC_CUSTOM_HEADERS` | `x-api-key: <that machine's client key>` |
 
-Loopback clients are exempt from the key gate by default, so a client on the server host needs
-only the base URL — but giving it a key anyway is what makes its usage show up separately.
+Loopback clients bypass the key gate by default, so a client on the server host needs only the base
+URL. Give it a key if you want its usage attributed separately.
 
-> **Keep the pair together, in one file.** A base URL with no key is a 401 from the proxy; a key
-> with no base URL is sent to `api.anthropic.com`, which never issued it, and *every* session
-> fails to authenticate. Splitting them across two files means any edit to one can leave the
-> other stranded.
+> **Keep the pair together in one file.** A base URL with no key gets a 401 from the proxy. A key
+> with no base URL goes to `api.anthropic.com`, which never issued it, so *every* session fails to
+> authenticate. If you split them across two files, an edit to one can leave the other stranded.
 
-`ANTHROPIC_CUSTOM_HEADERS` keeps Claude Code in OAuth mode — it still sends its own token, which
-the proxy strips and replaces with a pooled account's. `ANTHROPIC_API_KEY` also satisfies the
-gate, but switches the client into API-key mode and disables claude.ai connectors. Use it only
-where that does not matter — in particular on a **headless host that has no Claude Code login at
-all**, because API-key mode does not require one.
+`ANTHROPIC_CUSTOM_HEADERS` keeps Claude Code in OAuth mode. Claude Code still sends its own token,
+which the proxy strips and replaces with a pooled account's credential. `ANTHROPIC_API_KEY` also
+satisfies the gate, but it switches the client to API-key mode and disables claude.ai connectors.
+Use it only where that does not matter, especially on a **headless host with no Claude Code login**,
+because API-key mode does not require one.
 
 ### Where to put them
 
@@ -243,9 +243,10 @@ all**, because API-key mode does not require one.
 }
 ```
 
-If you keep `~/.claude` in version control and share it between machines, these two do not belong
-there — each machine has its own client key, and committing one defeats per-machine attribution.
-Put them in the shell environment instead, and put them in **`~/.zshenv`, not `~/.zshrc`**:
+If you keep `~/.claude` in version control and share it between machines, do not put these two
+values there. Each machine has its own client key, and committing one defeats per-machine
+attribution. Put both values in the shell environment instead. For zsh, use **`~/.zshenv`, not
+`~/.zshrc`**:
 
 ```sh
 # ~/.zshenv — sourced by every zsh, including non-interactive ones
@@ -253,25 +254,25 @@ export ANTHROPIC_BASE_URL="http://<host>:3456"
 export ANTHROPIC_CUSTOM_HEADERS="x-api-key: tc-…"
 ```
 
-`.zshrc` is read only by interactive shells, so a launcher that spawns `zsh -lc claude` gets
-nothing from it. The bash equivalents are `~/.bash_profile` for login shells and `~/.bashrc` for
-interactive ones; `~/.profile` is the closest thing to `.zshenv`, but note that a process started
-by systemd reads none of them — use the unit's `Environment=` for those.
+`.zshrc` is read only by interactive shells, so a launcher that starts `zsh -lc claude` gets
+nothing from it. For bash, use `~/.bash_profile` for login shells and `~/.bashrc` for interactive
+shells. `~/.profile` is the closest equivalent to `.zshenv`. A process started by systemd reads
+none of these files, so use the unit's `Environment=` setting.
 
-There is no per-machine override at user scope: `~/.claude/settings.local.json` is **not** read
-for the user-level config, only inside a project.
+There is no user-scope per-machine override. `~/.claude/settings.local.json` is read only inside a
+project, not for the user-level configuration.
 
 ### What you give up
 
-`teamclaude run` and `teamclaude env` assume the proxy is on `localhost` — `run` refuses to start
-when nothing answers there, and `env` emits a hardcoded `http://localhost:<port>`. Neither can
-name a remote host today, so remote clients use base-URL routing and lose
-[MITM mode](proxy-modes.md). In practice that only matters for tools that hardcode
-`api.anthropic.com` rather than honouring `ANTHROPIC_BASE_URL`.
+`teamclaude run` and `teamclaude env` assume that the proxy is on `localhost`. `run` refuses to
+start when nothing responds there, and `env` emits a hardcoded `http://localhost:<port>`. Neither
+can name a remote host today. Remote clients must therefore use base-URL routing and cannot use
+[MITM mode](proxy-modes.md). This limitation affects only tools that hardcode
+`api.anthropic.com` instead of honouring `ANTHROPIC_BASE_URL`.
 
-`CLAUDE_CODE_MAX_CONTEXT_TOKENS` and `ANTHROPIC_CUSTOM_MODEL_OPTION`, which `run` would normally
-inject from `customModels`, also have to be set by hand — but they are fleet-wide rather than
-per-machine, so they are safe to commit in a shared `settings.json`.
+You must also set `CLAUDE_CODE_MAX_CONTEXT_TOKENS` and `ANTHROPIC_CUSTOM_MODEL_OPTION` manually.
+`run` normally injects these values from `customModels`. They apply to the whole fleet, not to one
+machine, so you can commit them safely in a shared `settings.json`.
 
 ## Verifying
 
@@ -296,8 +297,8 @@ curl -s -H "x-api-key: tc-…" http://<host>:3456/teamclaude/status | jq '.clien
 }
 ```
 
-Administer the fleet over SSH. A shell function beats an alias, because `attach` needs a TTY and
-the other subcommands do not:
+Administer the fleet over SSH. Use a shell function instead of an alias, because `attach` needs a
+TTY and the other subcommands do not:
 
 ```sh
 tc() {
@@ -312,15 +313,15 @@ tc() {
 
 ## Traps
 
-- **A 429 with no rate-limit headers, on every account at once**, usually means the request is
-  the problem rather than the fleet. The log says so: `it is about the request, not the
-  accounts`. A hand-rolled `curl` to `/v1/messages` is the common cause.
-- **Killing the server orphans the sidecar.** It survives and keeps its port. The next start
-  reaps it (`reaped orphan pid … left by a previous run`) after one transient `ECONNREFUSED`.
-  Nothing to do.
-- **Two servers briefly overlapping is survivable** if nothing refreshes — tokens only rotate
-  near expiry or after a 401. Check `expiresAt` before you start, and keep the window short.
-- **Probes 429 during an overlap** because both servers poll the same usage endpoint. Harmless,
-  and it stops when the old server does.
-- **A second tmux window in the supervised session defeats the keeper**, because `has-session`
-  stays true when the server's own window dies. Give anything else its own session.
+- **A 429 with no rate-limit headers on every account at once** usually means that the request,
+  not the fleet, is the problem. The log says: `it is about the request, not the accounts`. A
+  hand-written `curl` request to `/v1/messages` is the common cause.
+- **Killing the server orphans the sidecar.** The sidecar keeps running and retains its port. On
+  the next start, the server reaps it (`reaped orphan pid … left by a previous run`) after one
+  transient `ECONNREFUSED`. No action is necessary.
+- **A brief overlap between two servers is survivable** if neither refreshes. Tokens rotate only
+  near expiry or after a 401. Check `expiresAt` before you start, and keep the overlap short.
+- **Probes return 429 during an overlap** because both servers poll the same usage endpoint. This
+  is harmless and stops when the old server stops.
+- **A second tmux window in the supervised session defeats the keeper.** `has-session` remains
+  true when the server's window closes. Use a separate session for anything else.

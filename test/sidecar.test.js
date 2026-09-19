@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { Sidecar, restartDelayMs, isBindConflict } from '../src/sidecar.js';
+import { Sidecar, restartDelayMs, isBindConflict, monitorPort, monitorCounts } from '../src/sidecar.js';
 
 // A fake child process: enough surface for the supervisor (pid, kill, 'exit'/
 // 'error' events, a stderr emitter). Lets tests crash and kill children at will.
@@ -385,4 +385,183 @@ test('isBindConflict matches the phrasings runtimes actually print', () => {
   assert.equal(isBindConflict('Address already in use (os error 48)'), true);
   assert.equal(isBindConflict('listen EADDRINUSE: address already in use 127.0.0.1:3456'), true);
   assert.equal(isBindConflict('panicked at src/main.rs'), false);
+});
+
+// ── the health readout ───────────────────────────────────────────────────────
+
+// Active requests and recent errors, polled off the sidecar's own /monitor. The
+// endpoint is upstream's, so every test below is really the same test: what
+// this does when the answer is not the one it expected. The shapes come from a
+// live claude-code-proxy 0.1.40 started with `--no-monitor`, which is how
+// TeamClaude spawns it.
+
+/** One reply, the way `fetch` hands it over. `length` overrides the declared
+ *  size; null stands for a reply that declares none at all. */
+function fakeReply(body, { ok = true, length } = {}) {
+  const text = typeof body === 'string' ? body : JSON.stringify(body);
+  const declared = length === undefined ? String(Buffer.byteLength(text)) : length;
+  return {
+    ok,
+    headers: { get: (h) => (h === 'content-length' ? declared : null) },
+    text: async () => text,
+  };
+}
+
+/** A fetch that answers every call the same way, and counts them. */
+function fakeFetcher(reply) {
+  const urls = [];
+  const fn = async (/** @type {string} */ url) => {
+    urls.push(url);
+    if (reply instanceof Error) throw reply;
+    return typeof reply === 'function' ? reply() : reply;
+  };
+  fn.urls = urls;
+  return fn;
+}
+
+// The live payload, trimmed to the fields this reads.
+const monitorBody = (active = 0, failed = 0) => ({
+  version: 1,
+  snapshot: {
+    started_at: { secs_since_epoch: 1789817857, nanos_since_epoch: 626722000 },
+    uptime: { secs: 24, nanos: 835849292 },
+    sessions: [],
+    active: Array.from({ length: active }, (_, n) => ({ request_id: `r${n}`, status: 'upstream' })),
+    recent: [
+      ...Array.from({ length: failed }, (_, n) => ({ request_id: `f${n}`, status: 'failed', http_status: 400 })),
+      { request_id: 'ok', status: 'completed', http_status: 200 },
+    ],
+  },
+});
+
+/** The supervisor's status once at least one poll has been answered. */
+async function pollOnce(sc) {
+  for (let i = 0; i < 100 && sc.getStatus()[0].activeRequests === null; i++) await wait(5);
+  return sc.getStatus()[0];
+}
+
+test('monitorPort reads the port out of the command the operator configured', () => {
+  assert.equal(monitorPort(['ccp', 'serve', '--no-monitor', '--port', '18765']), 18765);
+  assert.equal(monitorPort(['ccp', 'serve', '--port=18999']), 18999);
+  // Nothing to ask, so nothing is asked: better a line without numbers than
+  // numbers from whatever else happens to be listening on a guessed port.
+  assert.equal(monitorPort(['ccp', 'serve', '--no-monitor']), null);
+  assert.equal(monitorPort(['ccp', '--port', 'nonsense']), null);
+  assert.equal(monitorPort(['ccp', '--port', '70000']), null);
+  assert.equal(monitorPort(undefined), null);
+});
+
+test('monitorCounts reads the live payload, and refuses one it does not recognise', () => {
+  assert.deepEqual(monitorCounts(monitorBody(2, 3)), { activeRequests: 2, recentErrors: 3 });
+  assert.deepEqual(monitorCounts(monitorBody(0, 0)), { activeRequests: 0, recentErrors: 0 });
+  // Upstream renaming or dropping these is a rebase away, and this may not
+  // become a dependency: unknown reads as "no numbers", never as zero.
+  assert.equal(monitorCounts({ version: 2, snapshot: { requests: [] } }), null);
+  assert.equal(monitorCounts({ version: 1 }), null);
+  assert.equal(monitorCounts(null), null);
+  // Half a shape still answers for the half it has.
+  assert.deepEqual(monitorCounts({ snapshot: { active: [] } }), { activeRequests: 0, recentErrors: null });
+});
+
+test('the readout reaches getStatus, from the sidecar own port on loopback', async () => {
+  const spawn = fakeSpawner();
+  const fetchFn = fakeFetcher(fakeReply(monitorBody(2, 3)));
+  const sc = makeSidecar([{ name: 'codex', command: ['ccp', 'serve', '--port', '18765'] }], spawn, {
+    fetchFn, monitorPollMs: 5,
+  });
+  sc.start();
+
+  const status = await pollOnce(sc);
+  assert.equal(status.activeRequests, 2);
+  assert.equal(status.recentErrors, 3);
+  assert.equal(fetchFn.urls[0], 'http://127.0.0.1:18765/monitor');
+  await sc.stop();
+});
+
+test('an endpoint that is missing, silent or changed leaves the process line alone', async () => {
+  const spawn = fakeSpawner();
+  for (const [why, reply] of [
+    ['nothing listening yet', new Error('connect ECONNREFUSED 127.0.0.1:18765')],
+    ['a 404, because upstream moved it', fakeReply('{}', { ok: false })],
+    ['something that is not the sidecar on the port', fakeReply('<html>not json</html>')],
+    ['a schema this no longer recognises', fakeReply({ version: 2, snapshot: { requests: [] } })],
+    ['a body too big to buffer on a timer', fakeReply(monitorBody(1, 1), { length: '99999999' })],
+    ['a body whose size is not declared', fakeReply(monitorBody(1, 1), { length: null })],
+  ]) {
+    const sc = makeSidecar([{ name: 'codex', command: ['ccp', '--port', '18765'] }], spawn, {
+      fetchFn: fakeFetcher(reply), monitorPollMs: 5,
+    });
+    sc.start();
+    await wait(30);
+    const [status] = sc.getStatus();
+    assert.equal(status.running, true, `the supervisor itself is unaffected by ${why}`);
+    assert.ok(status.pid > 0);
+    assert.equal(status.activeRequests, null, why);
+    assert.equal(status.recentErrors, null, why);
+    await sc.stop();
+  }
+});
+
+test('a command with no --port is never polled at all', async () => {
+  const spawn = fakeSpawner();
+  const fetchFn = fakeFetcher(fakeReply(monitorBody(2, 3)));
+  const sc = makeSidecar([{ name: 'codex', command: ['ccp', 'serve'] }], spawn, { fetchFn, monitorPollMs: 5 });
+  sc.start();
+  await wait(30);
+  assert.deepEqual(fetchFn.urls, []);
+  assert.equal(sc.getStatus()[0].activeRequests, null);
+  await sc.stop();
+});
+
+test('polling stops when the child goes down, and its numbers go with it', async () => {
+  const spawn = fakeSpawner();
+  const fetchFn = fakeFetcher(fakeReply(monitorBody(2, 3)));
+  const sc = makeSidecar([{ name: 'codex', command: ['ccp', '--port', '18765'] }], spawn, {
+    fetchFn, monitorPollMs: 5, baseRestartMs: 10_000,   // no respawn during this test
+  });
+  sc.start();
+  await pollOnce(sc);
+
+  spawn.children[0].emit('exit', 1, null);
+  // "2 active" printed beside "down (code 1)" describes a process that is gone.
+  assert.equal(sc.getStatus()[0].activeRequests, null);
+  const polled = fetchFn.urls.length;
+  await wait(30);
+  assert.equal(fetchFn.urls.length, polled, 'nothing is left asking a dead port');
+  await sc.stop();
+});
+
+test('a poll still in flight when the child dies does not write its numbers back', async () => {
+  const spawn = fakeSpawner();
+  /** @type {null | (() => void)} */
+  let answer = null;
+  const fetchFn = () => new Promise(resolve => { answer = () => resolve(fakeReply(monitorBody(2, 3))); });
+  const sc = makeSidecar([{ name: 'codex', command: ['ccp', '--port', '18765'] }], spawn, {
+    fetchFn, monitorPollMs: 5, baseRestartMs: 10_000,   // no respawn during this test
+  });
+  sc.start();
+  for (let i = 0; i < 100 && !answer; i++) await wait(5);   // a poll is out
+
+  spawn.children[0].emit('exit', 1, null);
+  answer();                 // ... and lands after the child is already gone
+  await wait(20);
+  assert.equal(sc.getStatus()[0].activeRequests, null, 'a dead process has no active requests');
+  await sc.stop();
+});
+
+test('stop() ends the polling too', async () => {
+  const spawn = fakeSpawner();
+  const fetchFn = fakeFetcher(fakeReply(monitorBody(2, 3)));
+  const sc = makeSidecar([{ name: 'codex', command: ['ccp', '--port', '18765'] }], spawn, {
+    fetchFn, monitorPollMs: 5,
+  });
+  sc.start();
+  await pollOnce(sc);
+
+  spawn.children[0].diesOnKill = 1;
+  await sc.stop({ graceMs: 100 });
+  const polled = fetchFn.urls.length;
+  await wait(30);
+  assert.equal(fetchFn.urls.length, polled);
+  assert.equal(sc.getStatus()[0].activeRequests, null);
 });

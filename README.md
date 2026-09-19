@@ -107,9 +107,11 @@ A Claude Code session can use OpenAI models alongside the Claude accounts. They 
 **1. Install the sidecar and log it into your ChatGPT account** (one time):
 
 ```bash
-brew install raine/claude-code-proxy/claude-code-proxy
+curl -fsSL https://raw.githubusercontent.com/rikbrown/claude-code-proxy/rik/main/scripts/install.sh | bash
 claude-code-proxy codex auth login
 ```
+
+This installs [rikbrown/claude-code-proxy](https://github.com/rikbrown/claude-code-proxy), a fork of the reference sidecar. Take the fork rather than upstream's Homebrew build: it forwards Codex's quota headers, without which every bar on the account reads `unknown`, and it lets you raise the 60-second header timeout that otherwise kills a long reasoning turn. See [Timeouts](docs/openai.md#timeouts).
 
 **2. Connect it** — add four pieces to `~/.config/teamclaude.json`:
 
@@ -163,7 +165,7 @@ Each request is routed by the model name in its body, so one session can freely 
 2. Add a `customModels` row. Codex publishes the window for each model as `context_window` in `~/.codex/models_cache.json`; copy it to `contextTokens`.
 3. Start a new `teamclaude run` session. The rows are read at launch, so you do not need to restart the server. If you upgraded the sidecar binary, restart the server — or send `SIGTERM` to the sidecar process and let the supervisor restart it with the new binary.
 
-Claude Code prints one `[claude-code:unrecognized_model]` line to stderr for each custom model. This is expected; suppressing it would lose the correct context window. The quota bars for the sidecar account show `unknown` unless the sidecar forwards Codex's rate-limit headers — see [Quota](docs/openai.md#quota). Keep the sidecar on loopback.
+Claude Code prints one `[claude-code:unrecognized_model]` line to stderr for each custom model. This is expected; suppressing it would lose the correct context window. The quota bars for the sidecar account show `unknown` unless the sidecar forwards Codex's rate-limit headers, which the fork build in step 1 does and upstream's does not — see [Quota](docs/openai.md#quota). Keep the sidecar on loopback.
 
 The sidecar appears under the account table as a `⚙` line rather than a row because it holds no subscription, is the only account its route can use, and never rotates. The line also shows its supervised process state (`up pid 98018`, or `down (code 1) 3 restarts`).
 

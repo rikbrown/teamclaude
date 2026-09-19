@@ -26,6 +26,8 @@ flake.nix
 flake.lock
 eslint.config.js
 .claude
+.claude-plugin
+plugins
 README.md
 SECURITY.md
 Dockerfile

@@ -1,0 +1,17 @@
+{
+  "name": "rikclaude",
+  "description": "Claude Code plugins that ship with TeamClaude.",
+  "owner": {
+    "name": "Rik Brown",
+    "url": "https://github.com/rikbrown"
+  },
+  "plugins": [
+    {
+      "name": "rikclaude-agents",
+      "source": "./plugins/rikclaude-agents",
+      "description": "Effort-pinned subagents for a TeamClaude fleet: one named agent per model and effort level, plus the routing policy that goes with them.",
+      "category": "workflow",
+      "keywords": ["teamclaude", "subagents", "effort", "routing"]
+    }
+  ]
+}

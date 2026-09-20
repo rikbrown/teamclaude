@@ -14,6 +14,8 @@ import { mintAccountId } from './account-id.js';
 import { formatPercent, heldResetCredits } from './status-renderer.js';
 import { resolveMaxUsage, resolveMaxSpendMinor, switchThresholdDiffs } from './model.js';
 import { formatProjection } from './quota-projection.js';
+import { fleetAggregate } from './quota-summary.js';
+/** @typedef {import('./quota-summary.js').FleetBucket} FleetBucket */
 import { parseProxyUrl, proxyToUrl, describeProxy, describeSelfProxy, resolveUpstreamProxy, setUpstreamProxy, getUpstreamProxy, localListener, isSelfProxy } from './upstream-proxy.js';
 import { describeRouting, parseRoutingUrl, routingToUrl, checkRouting } from './account-routing.js';
 import { sanitizeText, safeLine } from './safe-text.js';
@@ -209,6 +211,20 @@ export function truncate(s, w) {
 // enough that a very wide terminal doesn't turn the row into one long bar.
 const BAR_MIN = 5;
 const BAR_MAX = 20;
+
+// The fleet block's own bar cap. A fleet line carries a three-column label, a
+// bar and a burn tag — no name, status, route cells or family columns — so it
+// has far more room than a row and BAR_MAX would leave most of a wide terminal
+// blank. Capped all the same: a 200-column bar is no more informative than a
+// 40-column one, and past that the percentage stops being readable against it.
+const FLEET_BAR_MAX = 40;
+// Fleet bucket labels, spelled exactly as the row bars spell them (Ses/Wk) and
+// the family bars spell theirs (S7/F7), so the two views read against each other.
+/** @type {Record<string, string>} */
+const FLEET_LABELS = { unified5h: 'Ses', unified7d: 'Wk', unified7dSonnet: 'S7', unified7dFable: 'F7' };
+const FLEET_LABEL_W = 3;
+// ' Ses  ': a leading margin, the label, and two columns before the bar starts.
+const FLEET_PREFIX_W = 1 + FLEET_LABEL_W + 2;
 
 // Floor for the account name column. It grows past this toward the longest name
 // when the row has width to spare, but never drops below it, so a narrow
@@ -653,6 +669,11 @@ export class TUI {
     this.log = [];           // completed activity entries
     this.active = new Map(); // in-flight requests
     this.mode = 'normal';    // normal | select | add | input | settings | pick
+    // [f]: draw the fleet aggregate instead of the account rows. Deliberately
+    // not a mode — the rest of the dashboard (and every key) is unchanged, only
+    // which lines fill the account pane — and deliberately not persisted: it is
+    // a way of looking at the same screen, not a setting.
+    this.fleetView = false;
     this.pick = null;        // active list picker (routes editor accounts/bucket/color)
     this.pickReturn = 'routes'; // mode to fall back to when the picker closes
     this.selAction = null;   // switch | remove | toggle | reorder | routing
@@ -1008,6 +1029,11 @@ export class TUI {
 
   _keyNormal(k) {
     if (k === 'q') { this.stop(); this.onQuit?.(); }
+    // Above the attach-mode cutoff below: the fleet block is composed from the
+    // same account list either dashboard already holds, so it reads the same in
+    // attach mode and nothing about it is this process's to own. `f` rather
+    // than `u`, which is already the update key.
+    else if (k === 'f') { this.fleetView = !this.fleetView; }
     else if (k === 's' && this.am.accounts.length > 0) {
       // currentIndex is -1 when nothing is marked current (attach mode, when the
       // server names an account that has since gone); start at the top instead.
@@ -2197,24 +2223,40 @@ export class TUI {
         ? '  The server reports no accounts.'
         : '  No accounts configured. Press [g] → Add account.'));
     } else {
-      // Two providers, two panes; the titles take the spacer line. One column when
-      // the panes cannot draw every bar the rows have.
-      const current = this._currentRows();
-      const groups = this._providerGroups();
-      const split = groups.length === 2 ? this._splitLayout(groups, W) : null;
-      if (split) {
-        const [a, b] = groups;
-        lines.push(paneTitle(PROVIDERS[a.provider].label, split.leftW) + dim(PANE_GUTTER) + paneTitle(PROVIDERS[b.provider].label, split.rightW));
-        for (let r = 0; r < Math.max(a.indices.length, b.indices.length); r++) {
-          const left = r < a.indices.length ? this._renderRow(a.indices[r], split.left, current) : '';
-          const right = r < b.indices.length ? this._renderRow(b.indices[r], split.right, current) : '';
-          lines.push(fitLine(left, split.leftW) + dim(PANE_GUTTER) + right);
-        }
-      } else {
+      // [f] — the fleet block stands in for the rows: one aggregate per
+      // provider pool, answering "how much is left across all of this" rather
+      // than what each seat holds. The conduit lines below are drawn either
+      // way: a local backend is infrastructure, and whether it is up does not
+      // change with which view of the seats is on screen.
+      //
+      // Except while something is being selected. The account table IS the
+      // selection UI (see the `view` note above), so a switch or a disable
+      // started from the fleet view brings the rows back for as long as it is
+      // open — otherwise the footer offers ↑↓ over a block with nothing in it
+      // to move through.
+      if (this.fleetView && view !== 'select') {
         lines.push('');
-        const order = this._displayOrder();
-        const layout = this._listLayout(order, W);
-        for (const i of order) lines.push(this._renderRow(i, layout, current));
+        lines.push(...this._fleetLines(W));
+      } else {
+        // Two providers, two panes; the titles take the spacer line. One column when
+        // the panes cannot draw every bar the rows have.
+        const current = this._currentRows();
+        const groups = this._providerGroups();
+        const split = groups.length === 2 ? this._splitLayout(groups, W) : null;
+        if (split) {
+          const [a, b] = groups;
+          lines.push(paneTitle(PROVIDERS[a.provider].label, split.leftW) + dim(PANE_GUTTER) + paneTitle(PROVIDERS[b.provider].label, split.rightW));
+          for (let r = 0; r < Math.max(a.indices.length, b.indices.length); r++) {
+            const left = r < a.indices.length ? this._renderRow(a.indices[r], split.left, current) : '';
+            const right = r < b.indices.length ? this._renderRow(b.indices[r], split.right, current) : '';
+            lines.push(fitLine(left, split.leftW) + dim(PANE_GUTTER) + right);
+          }
+        } else {
+          lines.push('');
+          const order = this._displayOrder();
+          const layout = this._listLayout(order, W);
+          for (const i of order) lines.push(this._renderRow(i, layout, current));
+        }
       }
       // Local backends sit under the seats, as a readout rather than rows.
       lines.push(...this._conduitLines());
@@ -2560,6 +2602,120 @@ export class TUI {
       const errors = proc?.recentErrors ? yellow(` ${proc.recentErrors} errors`) : '';
       return ` ${dim('⚙')} ${a.name} ${dim('→')} ${dim(host)}  ${state}${pid}${restarts}${active}${errors}`;
     });
+  }
+
+  /**
+   * The fleet block: usable headroom per provider pool, drawn in place of the
+   * account rows when [f] is on.
+   *
+   * WHAT THE BARS MEAN. Not raw quota. The aggregate measures spend against what
+   * rotation will actually hand out — each seat's switch threshold, and its
+   * `maxUsage` cap where one is lower — weighted by subscription size, so the
+   * bar reads 100% at exactly the point every seat in the pool is refused rather
+   * than at the point the windows are literally empty. Disabled seats are out of
+   * it entirely. See fleetAggregate in quota-summary.js.
+   *
+   * ANTHROPIC AND CODEX NEVER MIX: separate pools, separate blocks, because the
+   * windows behind them are unrelated subscriptions and one averaged number
+   * would be true of neither.
+   *
+   * WIDTH. These bars are not in the per-row budget (#234), so they take what
+   * this block has instead — but they are counted just as carefully, because the
+   * failure mode is the same one twice over (#228, #234): a line composed past W
+   * is cut by fitLine from the tail, which is where the bar keeps its reset
+   * countdown. Every column drawn is accounted for here, measured in display
+   * columns rather than in string length.
+   *
+   * @param {number} W terminal columns
+   */
+  _fleetLines(W) {
+    // Same lookup the row bars use, and for the same reason: each bucket reddens
+    // at ITS threshold. Guarded because a stand-in manager may carry only the
+    // single number.
+    const thFor = (/** @type {string} */ k) => (typeof this.am.thresholdFor === 'function' ? this.am.thresholdFor(k) : this.am.switchThreshold);
+    const now = Date.now();
+    const groups = fleetAggregate(this.am.accounts, { thresholdFor: thFor, now });
+
+    // Everything is composed before anything is drawn: the bars share one width
+    // across the whole block — so that equal lengths mean equal shares, exactly
+    // as they do within a row category — and that width is whatever the widest
+    // burn tag leaves over.
+    const blocks = groups.map(group => {
+      /** @type {Array<{bucket: string, value: FleetBucket, tag: string}>} */
+      const entries = [];
+      for (const [bucket, value] of Object.entries(group.buckets)) {
+        // A bucket no counted seat reports is left out rather than drawn as an
+        // empty bar: unobserved is not the same as unspent.
+        if (!value) continue;
+        // The aggregate is sampled as its own series under `fleet:<provider>`
+        // (see AccountManager._recordFleetSamples), so this is the row tag's
+        // projection over the fleet's numbers rather than a second kind of
+        // estimate. It needs ~90 minutes of samples before it says anything,
+        // the same as a row tag does, and it stays quiet after a restart
+        // instead of extrapolating from two readings.
+        const projected = this.am.projection?.project(`fleet:${group.provider}`, bucket, {
+          utilization: value.utilization, resetAt: value.nextResetAt, now,
+        }) || null;
+        // Without the bucket label: this line already starts with it.
+        const tag = formatProjection(projected, { withLabel: false });
+        entries.push({
+          bucket,
+          value,
+          // Colored like a row's: a deficit will stop the fleet, a surplus is
+          // a note about waste.
+          tag: tag ? (projected?.kind === 'deficit' ? yellow(tag) : gray(tag)) : '',
+        });
+      }
+      return { group, entries };
+    });
+
+    const tagW = blocks.reduce(
+      (w, b) => b.entries.reduce((m, e) => Math.max(m, e.tag ? 2 + vw(e.tag) : 0), w), 0);
+    const room = W - FLEET_PREFIX_W;
+    // The tags go before the bar does. A bar squeezed under BAR_MIN cannot hold
+    // its own percentage, and a fleet figure nobody can read is worth less than
+    // the pace note beside it.
+    const withTags = room - tagW >= BAR_MIN;
+    const bw = Math.max(1, Math.min(FLEET_BAR_MAX, withTags ? room - tagW : room));
+
+    const lines = [];
+    for (const { group, entries } of blocks) {
+      lines.push(this._fleetHeader(group, W));
+      if (group.counted === 0) {
+        // Said plainly rather than drawn as empty bars: nothing here is measured,
+        // and a row of zeroes would claim the pool is untouched.
+        lines.push(dim('   no seat here has a tier this build can weigh'));
+      } else if (entries.length === 0) {
+        lines.push(dim('   no quota observed yet'));
+      }
+      for (const e of entries) {
+        const label = rpad(FLEET_LABELS[e.bucket] || e.bucket, FLEET_LABEL_W);
+        // windowMs is null ON PURPOSE, unlike a row bar. barColor's pace shading
+        // compares spend against the share of the window already elapsed, and a
+        // pool has no single window: the reset here is the SOONEST of several
+        // staggered ones, which always looks like a window about to end, so the
+        // pace would read calm however spent the pool was. Without it the colour
+        // falls back to raw fill, which is what an aggregate can honestly claim.
+        // The threshold still forces red at the top of the scale.
+        const tail = withTags && e.tag ? `  ${e.tag}` : '';
+        lines.push(` ${label}  ${bar(e.value.utilization, bw, e.value.nextResetAt, null, thFor(e.bucket))}${tail}`);
+      }
+    }
+    return lines;
+  }
+
+  /** A pool's heading: which backend, how many seats, and how many of them the
+   *  figures below actually cover. The tally is drawn only when it differs from
+   *  the seat count — "9 seats · 9 counted" on every pool is noise, and it is
+   *  the absence of it that makes an uncounted seat stand out.
+   *
+   *  @param {{provider: string, total: number, counted: number}} group
+   *  @param {number} W terminal columns */
+  _fleetHeader(group, W) {
+    const label = PROVIDERS[/** @type {keyof typeof PROVIDERS} */ (group.provider)]?.label || group.provider;
+    const seats = `${group.total} seat${group.total === 1 ? '' : 's'}`;
+    const tally = group.counted === group.total ? seats : `${seats} · ${group.counted} counted`;
+    return truncate(`  ${bold(`Fleet — ${label}`)}   ${dim(tally)}`, W);
   }
 
   /** Supervised sidecar state, or [] when this TUI has no view of it. */
@@ -3263,8 +3419,8 @@ export class TUI {
     switch (this.mode) {
       case 'normal':
         return this.remote
-          ? ` ${bold('s')}witch  ${bold('R')}eload  ${bold('q')}uit`
-          : ` ${bold('s')}witch  ${bold('d')}isable  ${this.loginAccount ? `${bold('l')}ogin  ` : ''}${bold('p')}robe quota  ${bold('R')}eload${this.onRestart ? `  ${bold('u')}pdate` : ''}  ${bold('g')} settings  ${bold('q')}uit`;
+          ? ` ${bold('s')}witch  ${bold('R')}eload  ${bold('f')}leet  ${bold('q')}uit`
+          : ` ${bold('s')}witch  ${bold('d')}isable  ${this.loginAccount ? `${bold('l')}ogin  ` : ''}${bold('p')}robe quota  ${bold('R')}eload  ${bold('f')}leet${this.onRestart ? `  ${bold('u')}pdate` : ''}  ${bold('g')} settings  ${bold('q')}uit`;
       case 'settings':
         return ` ${dim('↑↓')} navigate  ${dim('←→')} change  ${bold('Enter')} edit  ${bold('Esc')} back`;
       case 'routes':

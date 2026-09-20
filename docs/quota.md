@@ -14,6 +14,8 @@ Observed quota is persisted to `teamclaude.state.json` next to the config, so ro
 
 Subscription capacity is weighted relative to Claude Pro: Pro and Team Standard are `1`, Max 5x and Team tier 1 are `5`, and Max 20x and Team tier 2 are `20`. TeamClaude reads the organization and seat tier from the OAuth profile. An unrecognized tier remains visible under `accounts` and `unknownTiers` but is excluded from the aggregate instead of being assigned a guessed weight. API-key token and request limits remain per-account because their units cannot be combined with subscription utilization.
 
+This endpoint's `aggregate` measures **raw** quota — `1 - utilization`, every subscription account in one pool — and that is a stable shape status lines read. The TUI's [fleet view](usage.md#fleet-view) (`f`) answers a different question and reports a different number: how much the fleet can still **spend**, measured against the switch threshold and any per-account cap, with disabled seats excluded and each backend kept in its own pool. The two are meant to disagree; a single Pro account at 49% with a 98% threshold is 49% used here and 50% used there.
+
 Remote callers authenticate exactly like the other control endpoints:
 
 ```bash
@@ -75,6 +77,8 @@ Utilization arrives as whole percent, so the signal is a staircase with 1% steps
 Weekly buckets burn slowly enough to sit in the unreliable range, which is why the default is 90 minutes rather than 30. A fast 5h burn is tracked closely at any of these widths, since a heavy run fills the window with steps quickly. Lower `windowMinutes` to react faster to a change of pace, at the cost of a jumpier figure on the weekly buckets.
 
 `status --json` carries every bucket's projection per account, not just the one on the row. Nothing in selection reads any of this: it is a readout, and turning it off changes no routing decision.
+
+The TUI's [fleet view](usage.md#fleet-view) carries the same tags for the pool. They come from the same sampler: the aggregate is recorded as a series of its own on exactly the cadence the account samples are, rather than being summed from the per-account rates. So it waits the same ~90 minutes before it speaks, and a change to the pool itself — a seat disabled, a tier that stopped resolving — restarts that history the same way a rolled window does.
 
 ## Keep-warm
 

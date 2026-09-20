@@ -51,6 +51,13 @@ function renderRows(width, { fable = [], sonnet = [], accounts = 6, routes = [],
     saveConfig: async () => {}, syncAccounts: async () => 0, onQuit: () => {}, probeQuota: () => {},
   });
 
+  // The rows own the whole line here. [f] defaults to the split view, which
+  // hands part of it to the fleet panel and budgets the rows against what is
+  // left — a layout with its own coverage in tui-fleet.test.js. These tests are
+  // about the row budget itself, and it is the same budget either way, so they
+  // pin it at the width where the arithmetic is easiest to read.
+  tui.fleetMode = 'off';
+
   const cols = Object.getOwnPropertyDescriptor(process.stdout, 'columns');
   const rows = Object.getOwnPropertyDescriptor(process.stdout, 'rows');
   Object.defineProperty(process.stdout, 'columns', { value: width, configurable: true });

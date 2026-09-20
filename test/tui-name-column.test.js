@@ -33,6 +33,12 @@ function renderRows(width, names) {
     saveConfig: async () => {}, syncAccounts: async () => 0, onQuit: () => {}, probeQuota: () => {},
   });
 
+  // The name column grows into whatever the rows have left over, so these
+  // measure it against the whole line. [f] defaults to the split view, which
+  // gives part of that line to the fleet panel — a layout with its own coverage
+  // in tui-fleet.test.js, and the same column arithmetic either way.
+  tui.fleetMode = 'off';
+
   const cols = Object.getOwnPropertyDescriptor(process.stdout, 'columns');
   const rows = Object.getOwnPropertyDescriptor(process.stdout, 'rows');
   Object.defineProperty(process.stdout, 'columns', { value: width, configurable: true });

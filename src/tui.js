@@ -14,7 +14,7 @@ import { mintAccountId } from './account-id.js';
 import { formatPercent } from './status-renderer.js';
 import { resolveMaxUsage } from './model.js';
 import { formatProjection } from './quota-projection.js';
-import { fleetAggregate } from './quota-summary.js';
+import { fleetAggregate, routeHeadroom, routeFamily } from './quota-summary.js';
 /** @typedef {import('./quota-summary.js').FleetBucket} FleetBucket */
 import { parseProxyUrl, proxyToUrl, describeProxy, describeSelfProxy, resolveUpstreamProxy, setUpstreamProxy, getUpstreamProxy } from './upstream-proxy.js';
 import { sanitizeText, safeLine } from './safe-text.js';
@@ -96,16 +96,6 @@ const SAFE_SID = /^[A-Za-z0-9._-]+$/;
 const shortSid = sid => (SAFE_SID.test(sid) ? sid : safeLine(sid, 64) || '?').slice(0, SESSION_ID_LEN);
 const sessionTag = (sid, title = null, width = SESSION_ID_LEN) =>
   sid ? fg(sessionColorCode(sid), rpad(truncate(title || shortSid(sid), width), width)) : ' '.repeat(width);
-
-// Which quota-family bar (F7/S7) a route binds to, or null for a general route.
-// Auto routes are named 'fable'/'sonnet'; a configured route is classified by its
-// globs so e.g. `*fable*` sits next to the F7 bar.
-const routeFamily = route => {
-  const hay = `${route.name} ${(route.match || []).join(' ')}`.toLowerCase();
-  if (/fable/.test(hay)) return 'fable';
-  if (/sonnet/.test(hay)) return 'sonnet';
-  return null;
-};
 
 // The inline ► for a route on an account: bold when it's the route's manual pin,
 // plain when an eligible member, dim when the member is currently ineligible. The
@@ -210,6 +200,11 @@ export function truncate(s, w) {
 const BAR_MIN = 5;
 const BAR_MAX = 20;
 
+// Below this a row draws the session bar alone. Named because two places ask
+// the same question of it: the row budget, and the split layout, which will not
+// narrow the rows past the width where the weekly bar goes (see _rowsFloor).
+const SHOW_BOTH_MIN = 70;
+
 // The fleet block's own bar cap. A fleet line carries a three-column label, a
 // bar and a burn tag — no name, status, route cells or family columns — so it
 // has far more room than a row and BAR_MAX would leave most of a wide terminal
@@ -230,10 +225,49 @@ const FLEET_INDENT_W = 4;
 const FLEET_PREFIX_W = FLEET_INDENT_W + FLEET_LABEL_W + 2;
 const FLEET_INDENT = ' '.repeat(FLEET_INDENT_W);
 
+// What [f] cycles through, in the order it cycles. Split first because it is
+// the default: the rows are what the dashboard is for, and the panel is the
+// thing that gives way — to `full` for a reading of nothing but the pools, then
+// off, then back.
+const FLEET_MODES = /** @type {const} */ (['split', 'full', 'off']);
+/** @typedef {typeof FLEET_MODES[number]} FleetMode */
+
+// ── The split layout ─────────────────────────────────────────
+//
+// Narrowest panel worth drawing beside the rows: the label prefix plus sixteen
+// columns of bar, which is enough for a bar to hold `82% · 2d4h` and still read
+// as a bar. Below that the split is dropped and the rows take the whole line —
+// never the other way round, because a first frame showing aggregates and no
+// accounts is a poor account dashboard.
+const FLEET_PANEL_MIN = FLEET_PREFIX_W + 16;
+// Widest. At FLEET_PREFIX_W + FLEET_BAR_MAX (49) the panel's bar stops growing
+// and the only thing more columns buy is room for the burn tag beside it, which
+// wants about a dozen. Past that every further column reads better in the rows,
+// which have a name column to grow into and never run out of uses for one.
+const FLEET_PANEL_MAX = 52;
+// Clear space between the two columns. Two, not one: a bar's filled background
+// runs to its last cell, and a single column of gap reads as part of it.
+const FLEET_GUTTER = 2;
+const FLEET_GUTTER_PAD = ' '.repeat(FLEET_GUTTER);
+
+// Longest route name the readout under the pool blocks gives a column to. Past
+// this the name is cut: the panel is narrow, and a route identified by its
+// first fourteen columns is identified.
+const ROUTE_NAME_MAX = 14;
+// What a route line spends on everything but the name: the indent, two columns
+// of gap, the widest bucket label (`Ses`), a space and `100%`. The name column
+// is what yields to it, so the reading itself is never cut.
+const ROUTE_LINE_FIXED = FLEET_INDENT_W + 2 + FLEET_LABEL_W + 1 + 4;
+
 // Floor for the account name column. It grows past this toward the longest name
 // when the row has width to spare, but never drops below it, so a narrow
 // terminal lays the table out exactly as it did before the column could grow.
 const NAME_MIN = 12;
+
+// The row's type column when the pool serves one provider: wide enough for
+// `apikey`. A mixed pool draws provider labels there instead and the column
+// follows them — see _typeColW, which the budget and the row both go through.
+const TYPE_COL_W = 7;
 
 // Narrowest label still worth drawing: an ellipsis and three columns of build.
 // Under that the footer goes back to naming no build at all, which at those
@@ -335,6 +369,62 @@ export function fitLine(s, w) {
   }
   if (v < w) return s + ' '.repeat(w - v);
   return s;
+}
+
+/** The first of `variants` that fits `w` display columns, else the last one cut
+ *  to fit.
+ *
+ *  For a line with clauses worth dropping WHOLE rather than a tail worth
+ *  truncating — the choice _restartDrainFooter makes, and for the same reason:
+ *  half a countdown reads as a different number. Order them longest first; the
+ *  last one is the fallback and should be something that fits anywhere the line
+ *  is drawn at all.
+ *
+ *  @param {string[]} variants
+ *  @param {number} w */
+function fitPhrase(variants, w) {
+  return variants.find(v => vw(v) <= w) ?? truncate(variants[variants.length - 1], w);
+}
+
+/** Two columns of lines merged into one, `left` fitted to exactly leftW columns
+ *  and `right` set beside it across the gutter.
+ *
+ *  The left side is cut and padded HERE rather than trusted to have been
+ *  composed to width, because the consequence of a long one is not a ragged
+ *  edge: it would push the whole panel right, off the terminal, where fitLine
+ *  would take the panel's tail off without saying so (#228, #234). truncate
+ *  also closes the left side's colour with a RESET, so a row that ends mid-bar
+ *  cannot bleed its background across the gutter and under the panel.
+ *
+ *  The two sides are different lengths — an eight-account fleet against two
+ *  pool blocks — so whichever runs out is padded and the other keeps going.
+ *
+ *  @param {string[]} left
+ *  @param {string[]} right
+ *  @param {number} leftW */
+function sideBySide(left, right, leftW) {
+  // `leftW` is the reservation, not the destination. The rows stop growing once
+  // the name column holds the longest name and every bar is at BAR_MAX, so past
+  // a certain width they simply do not spend what is set aside for them: on a
+  // 695-column terminal the table ends around column 160 and a panel pinned to
+  // the reservation sat 480 columns away from the rows it describes, with the
+  // operator's eye crossing half a screen of blank to get there.
+  //
+  // So the pad follows what the rows ACTUALLY occupy, and the reservation only
+  // caps it. The panel keeps its place beside the table at every width instead
+  // of drifting to the far edge, and because this can only shorten the line it
+  // cannot push one past W.
+  const used = left.reduce((w, l) => Math.max(w, vw(l)), 0);
+  const padTo = Math.min(leftW, used);
+  const out = [];
+  for (let i = 0; i < Math.max(left.length, right.length); i++) {
+    const l = rpad(truncate(left[i] || '', padTo), padTo);
+    // No gutter on a line the panel does not reach: trailing blanks cost the
+    // frame nothing (fitLine pads every line anyway) but they make a captured
+    // line longer than what is on it, which is what the width tests measure.
+    out.push(right[i] ? `${l}${FLEET_GUTTER_PAD}${right[i]}` : l);
+  }
+  return out;
 }
 
 /** The build label at `max` columns, or '' when nothing legible fits.
@@ -554,11 +644,16 @@ export class TUI {
     this.log = [];           // completed activity entries
     this.active = new Map(); // in-flight requests
     this.mode = 'normal';    // normal | select | add | input | settings | pick
-    // [f]: draw the fleet aggregate instead of the account rows. Deliberately
-    // not a mode — the rest of the dashboard (and every key) is unchanged, only
-    // which lines fill the account pane — and deliberately not persisted: it is
-    // a way of looking at the same screen, not a setting.
-    this.fleetView = false;
+    // [f]: where the fleet aggregate is drawn — beside the account rows, in
+    // place of them, or nowhere. Deliberately not a `mode` in the sense the
+    // line above uses the word: the rest of the dashboard (and every key) is
+    // unchanged, only which lines fill the account pane. Deliberately not
+    // persisted either — it is a way of looking at the same screen, not a
+    // setting. It starts on the split because a fleet large enough to want this
+    // view is one where both halves are worth having, and a terminal too narrow
+    // to carry both falls back to the rows on its own.
+    /** @type {FleetMode} */
+    this.fleetMode = 'split';
     this.pick = null;        // active list picker (routes editor accounts/bucket/color)
     this.pickReturn = 'routes'; // mode to fall back to when the picker closes
     this.selAction = null;   // switch | remove | toggle | reorder
@@ -849,7 +944,13 @@ export class TUI {
     // same account list either dashboard already holds, so it reads the same in
     // attach mode and nothing about it is this process's to own. `f` rather
     // than `u`, which is already the update key.
-    else if (k === 'f') { this.fleetView = !this.fleetView; }
+    //
+    // A cycle rather than a toggle, since there are three places the block can
+    // be. An unrecognised value lands on index 0, so the key always works even
+    // if something ever sets the field to a state that no longer exists.
+    else if (k === 'f') {
+      this.fleetMode = FLEET_MODES[(FLEET_MODES.indexOf(this.fleetMode) + 1) % FLEET_MODES.length];
+    }
     else if (k === 's' && this.am.accounts.length > 0) {
       // currentIndex is -1 when nothing is marked current (attach mode, when the
       // server names an account that has since gone); start at the top instead.
@@ -1804,120 +1905,44 @@ export class TUI {
     } else {
       lines.push('');
 
-      // [f] — the fleet block stands in for the rows: one aggregate per
-      // provider pool, answering "how much is left across all of this" rather
-      // than what each seat holds. The conduit lines below are drawn either
-      // way: a local backend is infrastructure, and whether it is up does not
-      // change with which view of the seats is on screen.
+      // Routes drive three things on this screen: the inline markers on each
+      // row, which seats the fleet aggregate counts as reachable, and the route
+      // readout under the pool blocks. Resolved once per frame and handed down,
+      // since getRoutes() re-derives every route's membership and live target.
+      const routes = this.am.getRoutes();
+
+      // [f] — where the fleet block goes: beside the rows, in place of them, or
+      // nowhere (FLEET_MODES). The conduit lines are drawn in all three: a local
+      // backend is infrastructure, and whether it is up does not change with
+      // which view of the seats is on screen.
       //
-      // Except while something is being selected. The account table IS the
-      // selection UI (see the `view` note above), so a switch or a disable
-      // started from the fleet view brings the rows back for as long as it is
-      // open — otherwise the footer offers ↑↓ over a block with nothing in it
-      // to move through.
-      if (this.fleetView && view !== 'select') {
-        lines.push(...this._fleetLines(W));
+      // A selection is the exception. The account table IS the selection UI (see
+      // the `view` note above), so a switch or a disable started from the
+      // full-width block has to put the rows back for as long as it is open —
+      // otherwise the footer offers ↑↓ over a block with nothing in it to move
+      // through. It falls back to the split rather than to the rows alone: the
+      // panel sits beside the cursor rather than in its way, and dropping it
+      // would make the screen jump twice over one keypress.
+      const fleet = this.fleetMode === 'full' && view === 'select' ? 'split' : this.fleetMode;
+      if (fleet === 'full') {
+        lines.push(...this._fleetLines(W, routes));
+        lines.push(...this._conduitLines());
       } else {
-        // Routes drive the inline markers; general (non-family) routes get a stable
-        // column each at the row start so the marker's position identifies the route.
-        const routes = this.am.getRoutes();
-        const genRoutes = routes.filter(r => routeFamily(r) === null);
-        // Bar width, budgeted PER ROW CATEGORY (#234). A subscription row draws
-        // Ses/Wk and the S7/F7 family bars; an API-key row draws Tok/Req and
-        // nothing else. Neither shares a bar with the other, so the two are laid
-        // out against separate budgets: every subscription row lines up with the
-        // other subscription rows, every API-key row with the other API-key rows,
-        // and an API-key row no longer pays for family columns it never draws (or
-        // for a blocked-family tag only a subscription row can carry). Within a
-        // category the budget is still shared, on purpose: bars line up and equal
-        // lengths mean equal percentages, and the whitespace that costs a row
-        // without a tag is the price of that.
-        //
-        // The budget must count every column the widest row in the category
-        // actually draws, or the row overruns the terminal and fitLine cuts the
-        // tail off — which is how the S7/F7 bars lost the reset countdown they
-        // carry. Three parts beyond the bars themselves:
-        //   - the fixed prefix (marker, name, type, status, first bar label),
-        //   - the route-marker cells, one per general route,
-        //   - 6 columns of label for each bar past the first (`  Wk `, ` ►F7  `).
-        // The `⊘ Sonnet Fable` tag is reserved for only when some account is
-        // actually blocked; the common case where nothing is spends those columns
-        // on the bars instead of leaving the row short of the edge.
-        const categoryOf = a => rowCategory(a.quota);
-        const routeCells = genRoutes.length ? genRoutes.length + 1 : 0;
-        const budgetFor = (members) => {
-          const anyFable = members.some(a => a.quota.unified7dFable != null);
-          const anySonnet = members.some(a => a.quota.unified7dSonnet != null);
-          const tagW = members.reduce((w, a) => {
-            const names = blockedFamilies(a.quota, key => this.am.thresholdFor(key));
-            return names.length ? Math.max(w, 4 + vw(names.join(' '))) : w;
-          }, 0);
-          // Same rule for the `$`/`$!` money tag: a column the row can draw is a
-          // column the budget has to know about, or the row overflows exactly the
-          // way #228 fixed.
-          const spendW = members.reduce((w, a) => {
-            const tag = spendTag(a.quota);
-            return tag ? Math.max(w, 2 + vw(tag)) : w;
-          }, 0);
-          const fixed = 28 + NAME_MIN + routeCells + tagW + spendW;
-          const roomFor = n => fixed + 6 * (n - 1) + n * BAR_MIN <= W;
-          // The family bars are the first thing to go: below the width where they
-          // fit even at BAR_MIN they would push the row past the edge, and a row
-          // cut mid-bar reads worse than one that simply doesn't draw them (the
-          // `⊘` tag still says which family is barred).
-          // The second shared bar answers to roomFor too, not just to a width
-          // threshold. `W >= 70` alone let the reservations (a 16-column
-          // blocked-family tag on two families, plus route cells) leave less than
-          // BAR_MIN per bar, and the floor below then overrode the budget: two
-          // accounts blocked on both families drew 72 columns at W=70, which
-          // fitLine silently cut (#234).
-          const showBoth = W >= 70 && roomFor(2);
-          const showFamily = showBoth && (anyFable || anySonnet) && roomFor(2 + (anyFable ? 1 : 0) + (anySonnet ? 1 : 0));
-          const nbars = (showBoth ? 2 : 1) + (showFamily ? (anyFable ? 1 : 0) + (anySonnet ? 1 : 0) : 0);
-          // Backstop for the case no count of bars can fix: when even one bar at
-          // BAR_MIN overruns the row, the floor has to yield. A narrow bar reads
-          // worse than a wide one; a row cut mid-bar loses the reset countdown its
-          // tail carries, and does it without saying so.
-          const avail = Math.floor((W - fixed - 6 * (nbars - 1)) / nbars);
-          const bw = avail < BAR_MIN
-            ? Math.max(1, avail)
-            : Math.min(BAR_MAX, avail);
-          const slack = Math.max(0, W - fixed - 6 * (nbars - 1) - nbars * bw);
-          return { bw, showBoth, showFamily, anyFable, anySonnet, slack };
-        };
-        const budgets = new Map();
-        for (const a of this.am.accounts) {
-          const cat = categoryOf(a);
-          if (!budgets.has(cat)) budgets.set(cat, budgetFor(this.am.accounts.filter(m => categoryOf(m) === cat)));
-        }
-        const anyFable = [...budgets.values()].some(b => b.anyFable);
-        const anySonnet = [...budgets.values()].some(b => b.anySonnet);
-
-        // Whatever the chrome and the capped bars leave over goes to the name
-        // column, up to the longest name in the fleet, so a wide terminal shows
-        // whole addresses instead of `a-considerab`. The name column is one width
-        // for the whole table (it is the prefix every row shares), so it grows by
-        // the smallest slack any category has left: `fixed` already reserves
-        // NAME_MIN, so only the surplus past it is spent here, and no category's
-        // rows are pushed past the budget above.
-        const longestName = Math.max(0, ...this.am.accounts.map(a => vw(a.name)));
-        const slack = Math.min(...[...budgets.values()].map(b => b.slack));
-        const nameW = Math.max(NAME_MIN, Math.min(longestName, NAME_MIN + slack));
-
-        // The single account each secondary bucket currently routes to (null = none
-        // can serve it right now). Marked next to that account's F7/S7 bar — the
-        // secondary-quota analogue of ► marking the default route's current account.
-        const familyTarget = {
-          fable: anyFable ? this.am.previewRouteIndex('claude-fable-5') : null,
-          sonnet: anySonnet ? this.am.previewRouteIndex('claude-sonnet-4-6') : null,
-        };
-        for (const i of this._displayOrder()) {
-          const b = budgets.get(categoryOf(this.am.accounts[i]));
-          lines.push(this._renderAcct(i, b.bw, b.showBoth, routes, genRoutes, familyTarget, b.showFamily, nameW));
-        }
+        // The panel is composed first, because whether there is one at all
+        // decides the width the rows are laid out against — and a fleet with
+        // nothing to aggregate and no routes draws an empty one. Narrowing the
+        // rows to make room for nothing is the one outcome worth a second look
+        // before committing to it.
+        const { panelW, leftW } = fleet === 'split' ? this._splitLayout(W, routes) : { panelW: 0, leftW: W };
+        const panel = panelW ? this._fleetLines(panelW, routes) : [];
+        const rowsW = panel.length ? leftW : W;
+        const left = this._accountLines(rowsW, routes);
+        // Local backends sit under the seats, as a readout rather than rows —
+        // and on the LEFT, under the rows they belong beside, not under a
+        // column of pool aggregates they are deliberately absent from.
+        left.push(...this._conduitLines());
+        lines.push(...(panel.length ? sideBySide(left, panel, rowsW) : left));
       }
-      // Local backends sit under the seats, as a readout rather than rows.
-      lines.push(...this._conduitLines());
     }
 
     // Routing is surfaced inline on each account row (see _renderAcct): a colored
@@ -1967,6 +1992,205 @@ export class TUI {
     // Show cursor only in input mode
     buf += this.mode === 'input' ? `${ESC}?25h` : `${ESC}?25l`;
     this._paint(buf, force);
+  }
+
+  /**
+   * The account rows, composed against `W` columns.
+   *
+   * W IS NOT ALWAYS THE TERMINAL. In the split view the rows own the left
+   * column and the fleet panel the right, so this is handed the width the rows
+   * actually have. Everything below budgets against that parameter and nothing
+   * reads process.stdout — a row composed for the terminal and then drawn into
+   * a narrower column is cut by fitLine at the far edge, silently, which is the
+   * #228/#234 failure this file has now been bitten by three times (the third
+   * is in _rowFixed, and it was this view that surfaced it).
+   *
+   * @param {number} W columns the rows are laid out in
+   * @param {Array<any>} routes the resolved routing view
+   * @returns {string[]}
+   */
+  _accountLines(W, routes = this.am.getRoutes()) {
+    const lines = [];
+    // Routes drive the inline markers; general (non-family) routes get a stable
+    // column each at the row start so the marker's position identifies the route.
+    const genRoutes = routes.filter(r => routeFamily(r) === null);
+    // Bar width, budgeted PER ROW CATEGORY (#234). A subscription row draws
+    // Ses/Wk and the S7/F7 family bars; an API-key row draws Tok/Req and
+    // nothing else. Neither shares a bar with the other, so the two are laid
+    // out against separate budgets: every subscription row lines up with the
+    // other subscription rows, every API-key row with the other API-key rows,
+    // and an API-key row no longer pays for family columns it never draws (or
+    // for a blocked-family tag only a subscription row can carry). Within a
+    // category the budget is still shared, on purpose: bars line up and equal
+    // lengths mean equal percentages, and the whitespace that costs a row
+    // without a tag is the price of that.
+    //
+    // The budget must count every column the widest row in the category
+    // actually draws, or the row overruns its column and fitLine cuts the
+    // tail off — which is how the S7/F7 bars lost the reset countdown they
+    // carry. The parts beyond the bars themselves are _rowFixed's; what is
+    // decided here is how many bars that leaves room for.
+    const categoryOf = a => rowCategory(a.quota);
+    const routeCells = genRoutes.length ? genRoutes.length + 1 : 0;
+    const budgetFor = (members) => {
+      const anyFable = members.some(a => a.quota.unified7dFable != null);
+      const anySonnet = members.some(a => a.quota.unified7dSonnet != null);
+      const fixed = this._rowFixed(members, routeCells);
+      const roomFor = n => fixed + 6 * (n - 1) + n * BAR_MIN <= W;
+      // The family bars are the first thing to go: below the width where they
+      // fit even at BAR_MIN they would push the row past the edge, and a row
+      // cut mid-bar reads worse than one that simply doesn't draw them (the
+      // `⊘` tag still says which family is barred).
+      // The second shared bar answers to roomFor too, not just to a width
+      // threshold. `W >= 70` alone let the reservations (a 16-column
+      // blocked-family tag on two families, plus route cells) leave less than
+      // BAR_MIN per bar, and the floor below then overrode the budget: two
+      // accounts blocked on both families drew 72 columns at W=70, which
+      // fitLine silently cut (#234).
+      const showBoth = W >= SHOW_BOTH_MIN && roomFor(2);
+      const showFamily = showBoth && (anyFable || anySonnet) && roomFor(2 + (anyFable ? 1 : 0) + (anySonnet ? 1 : 0));
+      const nbars = (showBoth ? 2 : 1) + (showFamily ? (anyFable ? 1 : 0) + (anySonnet ? 1 : 0) : 0);
+      // Backstop for the case no count of bars can fix: when even one bar at
+      // BAR_MIN overruns the row, the floor has to yield. A narrow bar reads
+      // worse than a wide one; a row cut mid-bar loses the reset countdown its
+      // tail carries, and does it without saying so.
+      const avail = Math.floor((W - fixed - 6 * (nbars - 1)) / nbars);
+      const bw = avail < BAR_MIN
+        ? Math.max(1, avail)
+        : Math.min(BAR_MAX, avail);
+      const slack = Math.max(0, W - fixed - 6 * (nbars - 1) - nbars * bw);
+      return { bw, showBoth, showFamily, anyFable, anySonnet, slack };
+    };
+    const budgets = new Map();
+    for (const a of this.am.accounts) {
+      const cat = categoryOf(a);
+      if (!budgets.has(cat)) budgets.set(cat, budgetFor(this.am.accounts.filter(m => categoryOf(m) === cat)));
+    }
+    const anyFable = [...budgets.values()].some(b => b.anyFable);
+    const anySonnet = [...budgets.values()].some(b => b.anySonnet);
+
+    // Whatever the chrome and the capped bars leave over goes to the name
+    // column, up to the longest name in the fleet, so a wide terminal shows
+    // whole addresses instead of `a-considerab`. The name column is one width
+    // for the whole table (it is the prefix every row shares), so it grows by
+    // the smallest slack any category has left: `fixed` already reserves
+    // NAME_MIN, so only the surplus past it is spent here, and no category's
+    // rows are pushed past the budget above.
+    const longestName = Math.max(0, ...this.am.accounts.map(a => vw(a.name)));
+    const slack = Math.min(...[...budgets.values()].map(b => b.slack));
+    const nameW = Math.max(NAME_MIN, Math.min(longestName, NAME_MIN + slack));
+
+    // The single account each secondary bucket currently routes to (null = none
+    // can serve it right now). Marked next to that account's F7/S7 bar — the
+    // secondary-quota analogue of ► marking the default route's current account.
+    const familyTarget = {
+      fable: anyFable ? this.am.previewRouteIndex('claude-fable-5') : null,
+      sonnet: anySonnet ? this.am.previewRouteIndex('claude-sonnet-4-6') : null,
+    };
+    for (const i of this._displayOrder()) {
+      const b = budgets.get(categoryOf(this.am.accounts[i]));
+      lines.push(this._renderAcct(i, b.bw, b.showBoth, routes, genRoutes, familyTarget, b.showFamily, nameW));
+    }
+    return lines;
+  }
+
+  /**
+   * Columns every row in one category spends on something that is not a bar:
+   * the fixed prefix (marker, name, type, status, first bar label), one cell
+   * per general route, and whichever trailing tags the widest member of the
+   * category can draw.
+   *
+   * A column a row CAN draw is a column the budget has to know about, or the
+   * row overflows exactly the way #228 fixed. The `⊘ Sonnet Fable` tag and the
+   * `$`/`$!` money tag are reserved only when some member is actually blocked
+   * or actually spending; the common case where neither is spends those columns
+   * on the bars instead of leaving the row short of the edge.
+   *
+   * @param {Array<any>} members accounts sharing one row category
+   * @param {number} routeCells one column per general route, plus a separator
+   */
+  _rowFixed(members, routeCells) {
+    const tagW = members.reduce((w, a) => {
+      const names = blockedFamilies(a.quota, key => this.am.thresholdFor(key));
+      return names.length ? Math.max(w, 4 + vw(names.join(' '))) : w;
+    }, 0);
+    const spendW = members.reduce((w, a) => {
+      const tag = spendTag(a.quota);
+      return tag ? Math.max(w, 2 + vw(tag)) : w;
+    }, 0);
+    // The 28 is the prefix at its narrowest: two marker columns and a space
+    // either side, a TYPE_COL_W type cell, a 10-column status cell and the
+    // first bar's label. A mixed pool widens the type cell to fit the provider
+    // labels, and that widening was NOT in this number — so every row of a
+    // fleet holding both an Anthropic and a Codex seat was composed two columns
+    // past the terminal and fitLine quietly took them back off the tail. #228
+    // and #234 a third time, and the reason the two go through _typeColW now.
+    return 28 + (this._typeColW() - TYPE_COL_W) + NAME_MIN + routeCells + tagW + spendW;
+  }
+
+  /** Width of a row's type column: the widest provider label once the pool
+   *  serves more than one backend, else the fixed cell an `oauth`/`apikey`
+   *  label needs. Read by the row that draws it and by the budget that has to
+   *  reserve it, which is the point — they drifted once already. */
+  _typeColW() {
+    /** @type {Set<keyof typeof PROVIDERS>} */
+    const pooled = new Set(this.am.accounts.map(providerOf));
+    return pooled.size > 1 ? Math.max(...[...pooled].map(id => PROVIDERS[id].label.length)) : TYPE_COL_W;
+  }
+
+  /**
+   * How the account pane divides into rows and a fleet panel at W columns, or
+   * `panelW: 0` when it does not divide at all.
+   *
+   * THE THRESHOLD IS DERIVED, NOT WRITTEN DOWN. It works out at about a hundred
+   * columns on a plain fleet, but a number saying so would drift from the
+   * budget it has to agree with: `fixed` grows with every general route, every
+   * blocked-family tag and every money tag on screen, and a fleet that meters
+   * Sonnet and Fable draws two more bars than one that does not. A threshold
+   * that did not follow all of that would put a panel beside rows squeezed to
+   * two columns of bar, which is a row that has kept its shape and lost its
+   * content.
+   *
+   * So what the rows must keep is everything _rowFixed reserves plus every bar
+   * the category can draw at BAR_MIN — the same arithmetic the row budget's own
+   * roomFor applies, so the split never costs the table a bar it would
+   * otherwise have drawn — and SHOW_BOTH_MIN, that budget's flat cutoff for
+   * drawing the weekly bar at all.
+   *
+   * The panel then takes a third of the line within its own bounds, so both
+   * sides grow with the terminal instead of one of them taking every column a
+   * wider window adds.
+   *
+   * @param {number} W terminal columns
+   * @param {Array<any>} routes the resolved routing view
+   * @returns {{panelW: number, leftW: number}}
+   */
+  _splitLayout(W, routes) {
+    const genRoutes = routes.filter(r => routeFamily(r) === null);
+    const routeCells = genRoutes.length ? genRoutes.length + 1 : 0;
+    /** @type {Map<string, Array<any>>} */
+    const categories = new Map();
+    for (const a of this.am.accounts) {
+      const cat = rowCategory(a.quota);
+      const list = categories.get(cat);
+      if (list) list.push(a);
+      else categories.set(cat, [a]);
+    }
+    // Bars this category draws when it has the room: the two shared ones, plus
+    // one per family bucket anybody in it meters. 6 columns of label go with
+    // each bar past the first (`  Wk `, ` ►F7  `), exactly as in budgetFor.
+    const need = (/** @type {Array<any>} */ members) => {
+      const bars = 2
+        + (members.some(a => a.quota.unified7dFable != null) ? 1 : 0)
+        + (members.some(a => a.quota.unified7dSonnet != null) ? 1 : 0);
+      return this._rowFixed(members, routeCells) + 6 * (bars - 1) + bars * BAR_MIN;
+    };
+    const floor = Math.max(SHOW_BOTH_MIN, ...[...categories.values()].map(need));
+    const want = Math.min(FLEET_PANEL_MAX, Math.max(FLEET_PANEL_MIN, Math.round(W / 3)));
+    const panelW = Math.min(want, W - FLEET_GUTTER - floor);
+    return panelW >= FLEET_PANEL_MIN
+      ? { panelW, leftW: W - FLEET_GUTTER - panelW }
+      : { panelW: 0, leftW: W };
   }
 
   /** Manager indices of the accounts drawn as rows: the seats that rotate.
@@ -2040,15 +2264,16 @@ export class TUI {
   }
 
   /**
-   * The fleet block: usable headroom per provider pool, drawn in place of the
-   * account rows when [f] is on.
+   * The fleet block: usable headroom per provider pool, then what stops each
+   * route first. Drawn beside the account rows or in place of them ([f]).
    *
    * WHAT THE BARS MEAN. Not raw quota. The aggregate measures spend against what
    * rotation will actually hand out — each seat's switch threshold, and its
    * `maxUsage` cap where one is lower — weighted by subscription size, so the
    * bar reads 100% at exactly the point every seat in the pool is refused rather
    * than at the point the windows are literally empty. Disabled seats are out of
-   * it entirely. See fleetAggregate in quota-summary.js.
+   * it entirely, and so are seats no route reaches. See fleetAggregate in
+   * quota-summary.js.
    *
    * ANTHROPIC AND CODEX NEVER MIX: separate pools, separate blocks, because the
    * windows behind them are unrelated subscriptions and one averaged number
@@ -2059,17 +2284,20 @@ export class TUI {
    * failure mode is the same one twice over (#228, #234): a line composed past W
    * is cut by fitLine from the tail, which is where the bar keeps its reset
    * countdown. Every column drawn is accounted for here, measured in display
-   * columns rather than in string length.
+   * columns rather than in string length. W is the PANEL's width in the split
+   * view, which is around half what the terminal has, so the prose lines this
+   * block can draw are fitted rather than assumed to fit.
    *
-   * @param {number} W terminal columns
+   * @param {number} W columns this block is laid out in
+   * @param {Array<any>} routes the resolved routing view
    */
-  _fleetLines(W) {
+  _fleetLines(W, routes = this.am.getRoutes()) {
     // Same lookup the row bars use, and for the same reason: each bucket reddens
     // at ITS threshold. Guarded because a stand-in manager may carry only the
     // single number.
     const thFor = (/** @type {string} */ k) => (typeof this.am.thresholdFor === 'function' ? this.am.thresholdFor(k) : this.am.switchThreshold);
     const now = Date.now();
-    const groups = fleetAggregate(this.am.accounts, { thresholdFor: thFor, now });
+    const groups = fleetAggregate(this.am.accounts, { thresholdFor: thFor, now, routes });
 
     // Everything is composed before anything is drawn: the bars share one width
     // across the whole block — so that equal lengths mean equal shares, exactly
@@ -2113,15 +2341,30 @@ export class TUI {
     const withTags = room - tagW >= BAR_MIN;
     const bw = Math.max(1, Math.min(FLEET_BAR_MAX, withTags ? room - tagW : room));
 
+    // One header shape for the whole block: the widest form EVERY pool can
+    // draw, not the widest each can. A block whose first heading says
+    // "Anthropic" because it ran out of room and whose second still says
+    // "Fleet — Codex" reads as two different kinds of thing rather than two of
+    // the same kind, which is the one job a repeated heading has.
+    const headings = blocks.map(b => this._fleetHeadings(b.group));
+    let level = 0;
+    while (level < (headings[0]?.length ?? 1) - 1 && headings.some(h => vw(h[level]) > W)) level++;
+
     const lines = [];
-    for (const { group, entries } of blocks) {
-      lines.push(this._fleetHeader(group, W));
+    for (const [i, { group, entries }] of blocks.entries()) {
+      lines.push(fitPhrase(headings[i].slice(level), W));
       if (group.counted === 0) {
         // Said plainly rather than drawn as empty bars: nothing here is measured,
-        // and a row of zeroes would claim the pool is untouched.
-        lines.push(dim(`${FLEET_INDENT}no seat here has a tier this build can weigh`));
+        // and a row of zeroes would claim the pool is untouched. Cut down by
+        // whole phrases as the panel narrows — the sentence is the whole content
+        // of the line, so a truncated tail would leave it saying something else.
+        lines.push(dim(fitPhrase([
+          `${FLEET_INDENT}no seat here counts — a tier this build cannot weigh, or no route to it`,
+          `${FLEET_INDENT}no seat here counts`,
+          `${FLEET_INDENT}none counted`,
+        ], W)));
       } else if (entries.length === 0) {
-        lines.push(dim(`${FLEET_INDENT}no quota observed yet`));
+        lines.push(dim(fitPhrase([`${FLEET_INDENT}no quota observed yet`, `${FLEET_INDENT}no quota yet`], W)));
       }
       for (const e of entries) {
         const label = rpad(FLEET_LABELS[e.bucket] || e.bucket, FLEET_LABEL_W);
@@ -2136,21 +2379,107 @@ export class TUI {
         lines.push(`${FLEET_INDENT}${label}  ${bar(e.value.utilization, bw, e.value.nextResetAt, null, thFor(e.bucket))}${tail}`);
       }
     }
+    const routeLines = this._routeLines(W, routes, thFor, now);
+    // A blank line between the pools and the routes, and only between them: the
+    // readout leading with one would leave the panel starting on an empty row.
+    if (routeLines.length) lines.push(...(lines.length ? [''] : []), ...routeLines);
     return lines;
   }
 
-  /** A pool's heading: which backend, how many seats, and how many of them the
-   *  figures below actually cover. The tally is drawn only when it differs from
-   *  the seat count — "9 seats · 9 counted" on every pool is noise, and it is
-   *  the absence of it that makes an uncounted seat stand out.
+  /** A pool's heading, widest form first: which backend, how many seats, and how
+   *  many of them the figures below actually cover. The tally is drawn only when
+   *  it differs from the seat count — "9 seats · 9 counted" on every pool is
+   *  noise, and it is the absence of it that makes an uncounted seat stand out.
+   *
+   *  The word "Fleet" is the first thing spent when the panel is narrow: the
+   *  block's own shape says what it is, while the backend's name is what tells
+   *  one block from the next. The caller picks ONE form for every pool in the
+   *  block, which is why these are returned rather than fitted here.
    *
    *  @param {{provider: string, total: number, counted: number}} group
-   *  @param {number} W terminal columns */
-  _fleetHeader(group, W) {
+   *  @returns {string[]} */
+  _fleetHeadings(group) {
     const label = PROVIDERS[/** @type {keyof typeof PROVIDERS} */ (group.provider)]?.label || group.provider;
     const seats = `${group.total} seat${group.total === 1 ? '' : 's'}`;
     const tally = group.counted === group.total ? seats : `${seats} · ${group.counted} counted`;
-    return truncate(`  ${bold(`Fleet — ${label}`)}   ${dim(tally)}`, W);
+    return [
+      `  ${bold(`Fleet — ${label}`)}   ${dim(tally)}`,
+      `  ${bold(label)}  ${dim(tally)}`,
+      `  ${bold(label)}`,
+    ];
+  }
+
+  /**
+   * What stops each route first: one line per route, naming the single bucket
+   * of the several it spends that is nearest the point rotation refuses it.
+   *
+   * WHY A ROUTE NEEDS ITS OWN LINE AT ALL. The pool blocks above answer "how
+   * much is left across this backend", which is the wrong question for a fleet
+   * with routes in it: a route that lists three of nine seats is stopped by
+   * those three, whatever the other six hold. The bars above cannot say that,
+   * and the account rows can only say it one seat at a time.
+   *
+   * No bar here on purpose. A bar needs a dozen columns to mean anything, and
+   * this readout sits at the bottom of a panel that is competing with the
+   * account table for the line — the percentage and the countdown are the whole
+   * of what a bar would have told anyone anyway.
+   *
+   * @param {number} W columns this block is laid out in
+   * @param {Array<any>} routes the resolved routing view
+   * @param {(bucket: string) => number} thFor per-bucket switch threshold
+   * @param {number} now
+   */
+  _routeLines(W, routes, thFor, now) {
+    const entries = routeHeadroom(this.am.accounts, routes, { thresholdFor: thFor, now });
+    if (!entries.length) return [];
+    const lines = [fitPhrase([
+      `  ${bold('Routes')}   ${dim('what stops each one first')}`,
+      `  ${bold('Routes')}`,
+    ], W)];
+    // One name column for the whole readout, so the buckets after it line up and
+    // an eye running down the column compares like with like. The bucket and its
+    // percentage are the point of the line, so they are budgeted first and the
+    // name takes what is left: fitPhrase's last resort is to truncate, and half
+    // a percentage reads as a different number.
+    const nameW = Math.max(1, Math.min(
+      ROUTE_NAME_MAX,
+      Math.max(...entries.map(e => vw(e.name))),
+      W - ROUTE_LINE_FIXED,
+    ));
+    entries.forEach((e, i) => {
+      // routeHeadroom answers in the order it was asked, so this is that route —
+      // which is where its colour lives, the same colour its ► carries on the
+      // account rows.
+      const paint = routeColorFn(routes[i]?.color);
+      const name = rpad(truncate(paint(e.name), nameW), nameW);
+      if (!e.value) {
+        // Nothing measured, and the two reasons want different words: a route
+        // whose members are all disabled or unpriceable has no pool at all,
+        // while one with a pool and no readings is simply waiting for a probe.
+        const why = e.counted === 0 ? 'no counted seat' : 'no quota yet';
+        lines.push(fitPhrase([`${FLEET_INDENT}${name}  ${dim(why)}`, `${FLEET_INDENT}${name}  ${dim('-')}`], W));
+        return;
+      }
+      const label = FLEET_LABELS[e.bucket] || e.bucket;
+      const used = e.value.utilization;
+      // The panel has no bar to carry the colour here, so the percentage does,
+      // on the scale a bar without a window falls back to (see barColor) plus
+      // the same hard red at the threshold. The two must not disagree about
+      // what red means — one is the aggregate of the other.
+      const paintUsed = used >= thFor(e.bucket) || used >= 0.9 ? red : used >= 0.7 ? yellow : green;
+      const pct = paintUsed(`${Math.round(used * 100)}%`.padStart(4));
+      const reset = formatReset(e.value.nextResetAt);
+      const seats = `${e.counted} seat${e.counted === 1 ? '' : 's'}`;
+      // Widest first, and the seat count is the first clause dropped: how long
+      // until this clears is worth more than how many seats it is spread over,
+      // which the pool blocks above already imply.
+      const head = `${FLEET_INDENT}${name}  ${label} ${pct}`;
+      lines.push(fitPhrase([
+        ...(reset ? [`${head}  ${dim(reset)}  ${dim(seats)}`, `${head}  ${dim(reset)}`] : [`${head}  ${dim(seats)}`]),
+        head,
+      ], W));
+    });
+    return lines;
   }
 
   /** Supervised sidecar state, or [] when this TUI has no view of it. */
@@ -2220,10 +2549,8 @@ export class TUI {
     // apart. `oauth` repeated down every row is what the column says instead, which the
     // operator already knew. Width follows the labels actually present, so nothing is
     // truncated and a single-provider pool keeps the column it has today.
-    /** @type {Set<keyof typeof PROVIDERS>} */
-    const pooled = new Set(this.am.accounts.map(providerOf));
-    const mixed = pooled.size > 1;
-    const typeW = mixed ? Math.max(...[...pooled].map(id => PROVIDERS[id].label.length)) : 7;
+    const mixed = new Set(this.am.accounts.map(providerOf)).size > 1;
+    const typeW = this._typeColW();
     const type = gray((mixed ? PROVIDERS[providerOf(a)].label : a.type).padEnd(typeW));
 
     // Status — a disabled account is shown as such regardless of its quota state.
@@ -2724,10 +3051,18 @@ export class TUI {
    *  without regard to width: fitting it to the line is _renderFooter's job. */
   _footerHints() {
     switch (this.mode) {
-      case 'normal':
+      case 'normal': {
+        // `f` is a three-way cycle now (FLEET_MODES), and the hint deliberately
+        // does not name which state it is in. Six columns of "  split" is six
+        // columns off the build label in the other corner, which at 80 columns
+        // is the whole of it — and the state is already on the screen, in the
+        // one place that matters: the panel is beside the rows, over them, or
+        // gone.
+        const fleet = `${bold('f')}leet`;
         return this.remote
-          ? ` ${bold('s')}witch  ${bold('R')}eload  ${bold('f')}leet  ${bold('q')}uit`
-          : ` ${bold('s')}witch  ${bold('d')}isable  ${bold('p')}robe quota  ${bold('R')}eload  ${bold('f')}leet${this.onRestart ? `  ${bold('u')}pdate` : ''}  ${bold('g')} settings  ${bold('q')}uit`;
+          ? ` ${bold('s')}witch  ${bold('R')}eload  ${fleet}  ${bold('q')}uit`
+          : ` ${bold('s')}witch  ${bold('d')}isable  ${bold('p')}robe quota  ${bold('R')}eload  ${fleet}${this.onRestart ? `  ${bold('u')}pdate` : ''}  ${bold('g')} settings  ${bold('q')}uit`;
+      }
       case 'settings':
         return ` ${dim('↑↓')} navigate  ${dim('←→')} change  ${bold('Enter')} edit  ${bold('Esc')} back`;
       case 'routes':

@@ -144,7 +144,10 @@ export function buildQuotaSummary(accounts) {
 //     router will refuse to hand out. Measuring against the ceiling instead
 //     makes the aggregate read 100% at exactly the moment every seat is refused.
 //   - A disabled seat still holds quota, and none of it is available. It is out
-//     of the pool entirely rather than sitting in it at its last reading.
+//     of the pool entirely rather than sitting in it at its last reading. A
+//     seat no route will send traffic to is the same error one step removed —
+//     quota that exists and that nothing will spend — so it is out of the
+//     figures too, and only the tally still reports it.
 //   - Anthropic and Codex meter different windows on unrelated subscriptions.
 //     One averaged number over both is true of neither pool, so they never mix.
 
@@ -293,6 +296,110 @@ function aggregateHeadroom(members, bucket, thresholdFor, now) {
   };
 }
 
+/**
+ * Which quota family a route spends, or null for a general route.
+ *
+ * Auto-created routes are named 'fable'/'sonnet'; a configured route is
+ * classified by its globs, so `*fable*` binds to the same weekly bucket the F7
+ * bar draws.
+ *
+ * It lives here rather than in the TUI — which is where it was written and
+ * where it is still used — because routeHeadroom below asks the same question
+ * of the same routes, and a glob test written out twice is two answers waiting
+ * to disagree about which bucket a route spends.
+ *
+ * @param {{name?: string, match?: string[]}} route
+ * @returns {'fable'|'sonnet'|null}
+ */
+export function routeFamily(route) {
+  const hay = `${route.name} ${(route.match || []).join(' ')}`.toLowerCase();
+  if (/fable/.test(hay)) return 'fable';
+  if (/sonnet/.test(hay)) return 'sonnet';
+  return null;
+}
+
+/** The weekly bucket each model family meters on its own. */
+const FAMILY_WEEKLY = { fable: 'unified7dFable', sonnet: 'unified7dSonnet' };
+
+/**
+ * Every seat some route will send traffic to, or null when the routing table
+ * says nothing about that.
+ *
+ * Membership is read off a RESOLVED view (`getRoutes()`, `routeMembership()`,
+ * or the `routes` of a status payload), never re-derived from the configured
+ * `accounts` list, because an empty list there means the opposite of what it
+ * looks like: a route that names nobody constrains models rather than accounts,
+ * and resolves to every account of its provider. Deriving "a route with no
+ * accounts reaches no accounts" from the raw config would exclude the whole
+ * fleet on the commonest configuration there is.
+ *
+ * Null for an empty table, and also for a table whose routes resolve to nobody
+ * at all. That union carries no information about which seats are reachable —
+ * it is equally what an older server, a payload that dropped the field, or a
+ * stand-in manager looks like — and reading it as "no seat is reachable" would
+ * blank every pool on the dashboard over a missing field, which is the one
+ * thing a capacity readout must never invent. The caller applies the same
+ * reasoning per pool; see fleetAggregate.
+ *
+ * @param {Array<{accounts?: Array<{name?: string}>}>|null|undefined} routes
+ * @returns {Set<string>|null}
+ */
+function routableNames(routes) {
+  if (!Array.isArray(routes) || routes.length === 0) return null;
+  /** @type {Set<string>} */
+  const names = new Set();
+  for (const route of routes) {
+    for (const member of route?.accounts || []) {
+      if (member?.name != null) names.add(member.name);
+    }
+  }
+  return names.size ? names : null;
+}
+
+/**
+ * The spendable seats among `accounts`, with the tally that says how many were
+ * left out of the figures.
+ *
+ * ONE PLACE, because the provider pools and the route readout have to agree
+ * about what a seat is. The rules:
+ *
+ *   - A disabled seat is skipped entirely — it is not spendable, so it belongs
+ *     in neither the capacity nor the tally.
+ *   - A local backend is not a seat at all and is skipped before either rule.
+ *     It is a translating proxy in front of another vendor: it holds no
+ *     subscription, its token is a placeholder, and it has no quota of its own
+ *     to pool. The account table already draws it as a readout below the rows
+ *     rather than among them (see _displayOrder in tui.js), and the same
+ *     reasoning applies harder here — priced it would invent capacity, and left
+ *     unpriced it would sit in `total` as a seat the fleet is missing, which is
+ *     the one thing that tally is for saying.
+ *   - A seat this build cannot price is skipped but still counted, so
+ *     `counted` of `total` can say how much of the pool the figures actually
+ *     cover instead of quietly shrinking the fleet.
+ *   - `include`, when given, is the same shape of exclusion: out of the
+ *     figures, still in the tally.
+ *
+ * @param {Array<any>} accounts
+ * @param {((account: any) => boolean)|null} [include] Extra membership test.
+ * @returns {{total: number, counted: number, members: Array<{account: any, weight: number}>}}
+ */
+function countedPool(accounts, include = null) {
+  /** @type {Array<{account: any, weight: number}>} */
+  const members = [];
+  let total = 0;
+  let counted = 0;
+  for (const account of accounts || []) {
+    if (!account || account.disabled || isLocalUpstream(account)) continue;
+    total++;
+    if (include && !include(account)) continue;
+    const weight = seatWeight(account, providerOf(account));
+    if (weight == null) continue;
+    counted++;
+    members.push({ account, weight });
+  }
+  return { total, counted, members };
+}
+
 /** Display order for the pools, so the block does not reshuffle itself as
  *  accounts come and go. Anything not listed sorts after what is. */
 const PROVIDER_ORDER = Object.keys(PROVIDER_BUCKETS);
@@ -305,50 +412,153 @@ const providerRank = (id) => {
 /**
  * Usable headroom across the fleet, one aggregate per provider pool.
  *
- * MEMBERSHIP. A disabled seat is skipped entirely — it is not spendable, so it
- * belongs in neither the capacity nor the tally. A seat this build cannot price
- * is skipped too but still counted, so `counted` of `total` can say how much of
- * the pool the figures actually cover instead of quietly shrinking the fleet.
+ * MEMBERSHIP is countedPool's — disabled seats out, local backends out,
+ * unpriceable seats out of the figures but in the tally — plus one rule of its
+ * own when `routes` is given: a seat no route will send traffic to contributes
+ * nothing spendable, so it is excluded from the capacity and left in `total`,
+ * exactly as an unpriceable seat is. Counting it was the same class of error as
+ * counting a disabled one: quota that exists and that nothing will ever spend.
  *
- * A local backend is not a seat at all and is skipped before either rule. It is
- * a translating proxy in front of another vendor: it holds no subscription, its
- * token is a placeholder, and it has no quota of its own to pool. The account
- * table already draws it as a readout below the rows rather than among them (see
- * _displayOrder in tui.js), and the same reasoning applies harder here — priced
- * it would invent capacity, and left unpriced it would sit in `total` as a seat
- * the fleet is missing, which is the one thing that tally is for saying.
+ * THE RULE IS APPLIED PER POOL, and only to a pool some route actually reaches.
+ * A route that lists no accounts resolves to the asking provider's own pool
+ * (see _routeAccountsView), so an Anthropic-only routing table — which is what
+ * nearly every routing table is, since routes are written about Claude models —
+ * names no Codex seat at all. Read fleet-wide, that emptied the whole Codex
+ * block the moment a single route existed: every seat in it "unroutable", no
+ * bars, a pool the operator can plainly see working reported as nothing. Where
+ * no route mentions a pool, the routing table is saying nothing about that pool
+ * rather than refusing it, and the seats count as they would with no routes at
+ * all.
+ *
+ * THIS ERRS TOWARD UNDERSTATING, on purpose. A seat outside every route is not
+ * strictly unreachable even within a pool the routes do reach: a model that
+ * matches no route at all is not routed, and falls back to plain rotation over
+ * the whole provider pool — so that seat will take unrouted traffic even though
+ * no route names it. The alternative error is the expensive one. Understating
+ * spendable capacity costs a pessimistic bar; overstating it is how an operator
+ * gets surprised by exhaustion on a pool the dashboard said was half full.
+ *
+ * `routes` must be a RESOLVED view — AccountManager's `getRoutes()` or its
+ * cheaper `routeMembership()`, or the `routes` a status payload carries. See
+ * routableNames for what goes wrong when membership is re-derived from config.
  *
  * A pool appears when it has at least one seat that is not disabled, even when
  * none of them can be priced: "three seats, none of them counted" is a state the
  * operator needs told, and a pool that vanished would look like a config error.
  *
  * @param {Array<any>} accounts Manager accounts, or the `accounts` of a status payload.
- * @param {{thresholdFor?: ((bucket: string) => number)|null, now?: number}} [options]
+ * @param {{thresholdFor?: ((bucket: string) => number)|null, now?: number, routes?: Array<any>|null}} [options]
  * @returns {Array<{provider: string, total: number, counted: number, buckets: Record<string, FleetBucket|null>}>}
  */
-export function fleetAggregate(accounts, { thresholdFor = null, now = Date.now() } = {}) {
-  /** @type {Map<string, {provider: string, total: number, counted: number, members: Array<{account: any, weight: number}>}>} */
-  const groups = new Map();
+export function fleetAggregate(accounts, { thresholdFor = null, now = Date.now(), routes = null } = {}) {
+  const routable = routableNames(routes);
+  // Grouped first, pooled second: a seat the routing rule drops still has to
+  // reach its provider's `total`, the rule itself is decided per pool, and
+  // pooling per group is what keeps that rule (and every other membership rule)
+  // in one place.
+  /** @type {Map<string, Array<any>>} */
+  const byProvider = new Map();
   for (const account of accounts || []) {
     if (!account || account.disabled || isLocalUpstream(account)) continue;
     const provider = providerOf(account);
-    let group = groups.get(provider);
-    if (!group) groups.set(provider, group = { provider, total: 0, counted: 0, members: [] });
-    group.total++;
-    const weight = seatWeight(account, provider);
-    if (weight == null) continue;
-    group.counted++;
-    group.members.push({ account, weight });
+    const list = byProvider.get(provider);
+    if (list) list.push(account);
+    else byProvider.set(provider, [account]);
   }
-  return [...groups.values()]
-    .sort((a, b) => providerRank(a.provider) - providerRank(b.provider))
-    .map(group => ({
-      provider: group.provider,
-      total: group.total,
-      counted: group.counted,
-      // A provider added to PROVIDERS without a bucket list here aggregates
-      // nothing, rather than being assumed to meter Anthropic's windows.
-      buckets: Object.fromEntries((PROVIDER_BUCKETS[group.provider] || [])
-        .map(bucket => [bucket, aggregateHeadroom(group.members, bucket, thresholdFor, now)])),
-    }));
+  return [...byProvider.entries()]
+    .sort(([a], [b]) => providerRank(a) - providerRank(b))
+    .map(([provider, list]) => {
+      // Some seat here has to be routable before "unroutable" can mean anything
+      // about the rest — see the note above.
+      const reaching = routable && list.some(account => routable.has(account.name)) ? routable : null;
+      const pool = countedPool(list, reaching ? (/** @type {any} */ a) => reaching.has(a.name) : null);
+      return {
+        provider,
+        total: pool.total,
+        counted: pool.counted,
+        // A provider added to PROVIDERS without a bucket list here aggregates
+        // nothing, rather than being assumed to meter Anthropic's windows.
+        buckets: Object.fromEntries((PROVIDER_BUCKETS[provider] || [])
+          .map(bucket => [bucket, aggregateHeadroom(pool.members, bucket, thresholdFor, now)])),
+      };
+    });
+}
+
+/**
+ * What stops each route first.
+ *
+ * A route holds no quota of its own — it spends its members' buckets — so the
+ * only honest answer to "how much has this route left" is the bucket nearest
+ * its ceiling, because that is the one that will refuse the route's traffic
+ * while the others still have room.
+ *
+ * WHICH BUCKETS. A general route spends the shared weekly and the shared 5-hour
+ * window. A family route (see routeFamily) spends its family's weekly bucket
+ * AND both of those, because family spend meters into the shared weekly too:
+ * an account under its Fable cap can be over the shared one and unable to serve
+ * Fable at all (#175), so a readout that watched F7 alone would keep saying the
+ * route was fine right up to the moment nothing could serve it.
+ *
+ * WHICH ONE BINDS. The highest utilization, not the soonest reset. Every
+ * candidate is measured as a fraction of its own spendable capacity — each
+ * bucket against its own threshold and cap — which is exactly what makes them
+ * comparable: at equal burn rates the fullest reaches 1 first. Rates are not
+ * modelled here; the burn tags beside the bars are what speak to those. A tie
+ * goes to the earlier candidate, so a family route names its family bucket over
+ * the shared weekly and the weekly over the 5-hour one — the more specific
+ * window first, then the one that takes days rather than hours to come back.
+ *
+ * Membership is countedPool's, so the pool a route is measured over obeys the
+ * same rules the fleet pools do. A route member that names no account this
+ * build holds is not a seat at all and never reaches the tally.
+ *
+ * One entry per route, in the order given, so a caller can pair an entry with
+ * the route it came from by index (the colour and the pin live there).
+ *
+ * @param {Array<any>} accounts Manager accounts, or the `accounts` of a status payload.
+ * @param {Array<any>} routes The resolved routing view — see routableNames.
+ * @param {{thresholdFor?: ((bucket: string) => number)|null, now?: number}} [options]
+ * @returns {Array<{name: string, counted: number, total: number, bucket: string|null, value: FleetBucket|null}>}
+ */
+export function routeHeadroom(accounts, routes, { thresholdFor = null, now = Date.now() } = {}) {
+  /** @type {Map<string, any>} */
+  const byName = new Map();
+  for (const account of accounts || []) {
+    if (account?.name != null && !byName.has(account.name)) byName.set(account.name, account);
+  }
+  return (Array.isArray(routes) ? routes : []).map(route => {
+    // Deduplicated by name on the way in: a route lists each account once, but
+    // this list can also arrive off a socket, and a name repeated there would
+    // otherwise weigh that seat twice in its own route's aggregate.
+    const seen = new Set();
+    const members = [];
+    for (const entry of route?.accounts || []) {
+      const name = entry?.name;
+      if (name == null || seen.has(name)) continue;
+      seen.add(name);
+      const account = byName.get(name);
+      if (account) members.push(account);
+    }
+    const pool = countedPool(members);
+    const family = routeFamily(route || {});
+    const candidates = family
+      ? [FAMILY_WEEKLY[family], 'unified7d', 'unified5h']
+      : ['unified7d', 'unified5h'];
+    /** @type {{bucket: string, value: FleetBucket}|null} */
+    let binding = null;
+    for (const bucket of candidates) {
+      const value = aggregateHeadroom(pool.members, bucket, thresholdFor, now);
+      // A bucket no counted member reports is not a constraint that has been
+      // measured, so it cannot be the one that binds. Strict `>` keeps the tie
+      // with the earlier, more specific candidate.
+      if (value && (!binding || value.utilization > binding.value.utilization)) binding = { bucket, value };
+    }
+    return {
+      name: route?.name ?? '',
+      counted: pool.counted,
+      total: pool.total,
+      bucket: binding?.bucket ?? null,
+      value: binding?.value ?? null,
+    };
+  });
 }

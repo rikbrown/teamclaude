@@ -170,6 +170,12 @@ function renderRows(width, spends) {
     accountManager: am, config: { proxy: { port: 1 }, accounts: [], routes: [] }, sx: null,
     saveConfig: async () => {}, syncAccounts: async () => 0, onQuit: () => {}, probeQuota: () => {},
   });
+  // The money tag's reserve is measured against the whole line here. [f]
+  // defaults to the split view, which hands part of it to the fleet panel — a
+  // layout with its own coverage in tui-fleet.test.js, and the same reserve
+  // either way.
+  tui.fleetMode = 'off';
+
   const cols = Object.getOwnPropertyDescriptor(process.stdout, 'columns');
   const rows = Object.getOwnPropertyDescriptor(process.stdout, 'rows');
   Object.defineProperty(process.stdout, 'columns', { value: width, configurable: true });

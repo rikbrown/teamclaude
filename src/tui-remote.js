@@ -324,9 +324,15 @@ export class RemoteAccountManager {
 
   /** Sample each provider pool's aggregate, exactly as the server does for its
    *  own dashboard (AccountManager._recordFleetSamples) — same keys, same
-   *  buckets, same clearing rule — so both dashboards tag the fleet alike. */
+   *  buckets, same clearing rule — so both dashboards tag the fleet alike.
+   *
+   *  The routing table goes in with it, because the aggregate this samples has
+   *  to be the one the panel draws: the tag beside a bar is a projection over
+   *  the series recorded here, and a series taken over a wider pool than the bar
+   *  shows would put a burn rate against a number it was never measured from.
+   *  `this.routes` is already applied by the time applyStatus calls this. */
   _recordFleetSamples(now = Date.now()) {
-    for (const group of fleetAggregate(this.accounts, { thresholdFor: this.thresholdFor.bind(this), now })) {
+    for (const group of fleetAggregate(this.accounts, { thresholdFor: this.thresholdFor.bind(this), now, routes: this.routes })) {
       for (const [bucket, value] of Object.entries(group.buckets)) {
         this.projection.record(`fleet:${group.provider}`, bucket, value ? value.utilization : null, now);
       }

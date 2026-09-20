@@ -2058,10 +2058,23 @@ export class AccountManager {
    * resolving, a member added. That resets the series and the fleet tag goes
    * quiet for another window's worth of samples. It is the honest reading of a
    * composition change, and the alternative — extrapolating across a fleet that
-   * is no longer the one measured — is a fabricated rate.
+   * is no longer the one measured — is a fabricated rate. A route that stops
+   * reaching a seat is one more composition change, and reads the same way.
+   *
+   * The routing table goes into the aggregate because the series has to be the
+   * one the dashboard draws: the fleet tag is a projection whose RATE comes
+   * from these samples and whose REMAINDER comes from the number on screen, so
+   * a series taken over a wider pool than the bar shows would put one fleet's
+   * burn rate against another fleet's headroom. The attached dashboard samples
+   * the same way (tui-remote.js), so the two dashboards still agree.
+   *
+   * routeMembership() rather than getRoutes(): this runs once per quota update,
+   * on the request path, and getRoutes' eligibility and target lookups refresh
+   * account state as a side effect of being read. See routeMembership.
    */
   _recordFleetSamples(now = Date.now()) {
-    for (const group of fleetAggregate(this.accounts, { thresholdFor: this.thresholdFor.bind(this), now })) {
+    const options = { thresholdFor: this.thresholdFor.bind(this), now, routes: this.routeMembership() };
+    for (const group of fleetAggregate(this.accounts, options)) {
       for (const [bucket, value] of Object.entries(group.buckets)) {
         // A bucket nothing reports records null, which clears the series — the
         // same signal a rolled window gives, and for the same reason.
@@ -2862,15 +2875,7 @@ export class AccountManager {
       target: this._routeTarget(sampleModelFor(r), DEFAULT_PROVIDER),
     }));
 
-    const detected = [];
-    if (this.accounts.some(a => a.quota.unified7dFable != null)) {
-      detected.push({ name: 'fable', match: ['*fable*'], sample: 'claude-fable-5' });
-    }
-    if (this.accounts.some(a => a.quota.unified7dSonnet != null)) {
-      detected.push({ name: 'sonnet', match: ['*sonnet*'], sample: 'claude-sonnet-4-6' });
-    }
-    for (const d of detected) {
-      if (this._routeForModel(d.sample)) continue; // already covered by a configured route
+    for (const d of this._detectedRoutes()) {
       out.push({
         name: d.name, match: d.match, bucket: null, color: null, autocreated: true,
         provider: DEFAULT_PROVIDER,
@@ -2880,6 +2885,54 @@ export class AccountManager {
       });
     }
     return out;
+  }
+
+  /**
+   * The ephemeral routes a fleet has earned but not configured: one per model
+   * family that some account meters with its own weekly bucket and no
+   * configured route already covers.
+   *
+   * Split out of getRoutes so routeMembership can apply the same rule. Which
+   * family buckets exist, and whether a route already claims them, is part of
+   * what "the routing table" means here — a second copy of it would answer
+   * differently the first time either half changed.
+   */
+  _detectedRoutes() {
+    const detected = [];
+    if (this.accounts.some(a => a.quota.unified7dFable != null)) {
+      detected.push({ name: 'fable', match: ['*fable*'], sample: 'claude-fable-5' });
+    }
+    if (this.accounts.some(a => a.quota.unified7dSonnet != null)) {
+      detected.push({ name: 'sonnet', match: ['*sonnet*'], sample: 'claude-sonnet-4-6' });
+    }
+    return detected.filter(d => !this._routeForModel(d.sample));
+  }
+
+  /**
+   * The routing table as MEMBERSHIP only: which accounts each route can reach,
+   * by name, with no live eligibility flag and no target.
+   *
+   * getRoutes() answers the same question and more, and the more is the
+   * problem: eligibility and target both run the selection predicates, which
+   * refresh per-account quota state as they go (an expired window is cleared
+   * where it is noticed). That is right on a render path and wrong on the
+   * request path, where the fleet sampler reads this once per quota update —
+   * recording a sample must not quietly age the readings it is sampling. It is
+   * also most of the work, for an answer this caller throws away.
+   *
+   * Same shape as the `routes` a status payload carries, so fleetAggregate
+   * takes either without knowing which it got.
+   */
+  routeMembership() {
+    const named = (/** @type {any} */ route) =>
+      this._routeMembers(route, DEFAULT_PROVIDER).map(a => ({ name: a.name, provider: providerOf(a) }));
+    const configured = this.routes || [];
+    return [
+      ...configured.map(r => ({ name: r.name, match: r.match, accounts: named(r) })),
+      ...this._detectedRoutes().map(d => ({
+        name: d.name, match: d.match, accounts: named({ accounts: [], match: d.match }),
+      })),
+    ];
   }
 
   /** The name of the account a request for `model` would land on right now, or
@@ -2913,10 +2966,19 @@ export class AccountManager {
    * applies. */
   _routeAccountsView(route, provider = DEFAULT_PROVIDER) {
     const sample = sampleModelFor(route);
-    const listed = route.accounts.length
+    return this._routeMembers(route, provider)
+      .map(a => ({ name: a.name, provider: providerOf(a), eligible: this._isAvailable(a, sample) }));
+  }
+
+  /** The accounts a route can use — the membership half of _routeAccountsView,
+   *  and the whole of routeMembership. Reads config and nothing else: no
+   *  eligibility, no quota, so it is safe to call from the request path.
+   *  @param {{accounts: Array<string>}} route
+   *  @param {string} [provider] */
+  _routeMembers(route, provider = DEFAULT_PROVIDER) {
+    return route.accounts.length
       ? this.accounts.filter(a => route.accounts.includes(a.name) || route.accounts.includes(String(a.index)))
       : this.accounts.filter(a => !this._excludeOtherProviders(null, provider)?.has(a.index));
-    return listed.map(a => ({ name: a.name, provider: providerOf(a), eligible: this._isAvailable(a, sample) }));
   }
 
   /** A representative model id for a route name (configured or auto fable/sonnet),

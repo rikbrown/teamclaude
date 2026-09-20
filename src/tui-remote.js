@@ -2,6 +2,8 @@ import { TUI } from './tui.js';
 import { SessionTitles } from './session-titles.js';
 import { modelGlobMatches } from './model.js';
 import { safeLine } from './safe-text.js';
+import { QuotaProjection } from './quota-projection.js';
+import { fleetAggregate } from './quota-summary.js';
 /** @typedef {import('./types.js').CodedError} CodedError */
 
 // Attach mode — the dashboard against a server running somewhere else (a
@@ -203,6 +205,17 @@ export class RemoteAccountManager {
     // this process's own — in attach mode that would name the wrong machine.
     this.versionLabel = '';
     this.updateAvailable = false;
+    // Burn-rate history for the FLEET series only.
+    //
+    // The per-account projections arrive already computed on the payload, so
+    // nothing here recomputes those. The fleet aggregate has no equivalent on
+    // the wire — it is composed from the payload on this side — so its samples
+    // have to be taken here, once per poll, against the same
+    // `fleet:<provider>` keys the server uses. Settings are the defaults: the
+    // window is a property of how utilization is quantised, not of the server,
+    // and the one thing worth mirroring (the on/off switch) is applied in
+    // applyStatus.
+    this.projection = new QuotaProjection();
   }
 
   /** Per-bucket threshold lookup, mirroring AccountManager.thresholdFor so the
@@ -294,9 +307,30 @@ export class RemoteAccountManager {
       activeRequests: Number.isFinite(sc?.activeRequests) ? sc.activeRequests : null,
       recentErrors: Number.isFinite(sc?.recentErrors) ? sc.recentErrors : null,
     }));
+    // The projection is a readout the server can turn off. With it off there the
+    // account rows carry no tags — theirs come off the payload — and a fleet tag
+    // drawn beside them would be the one burn figure on the screen that this
+    // dashboard had invented for itself. Flipped rather than rebuilt: rebuilding
+    // would throw away the samples, so a nudge on the server would blank the tag
+    // for another window's worth of polls.
+    this.projection.enabled = status?.projection?.enabled !== false;
+    // One sample per poll, on the cadence the server publishes at. Taken after
+    // the accounts are in place, since it is composed from them.
+    this._recordFleetSamples();
     this.status = status;
     this.connected = true;
     this.lastError = null;
+  }
+
+  /** Sample each provider pool's aggregate, exactly as the server does for its
+   *  own dashboard (AccountManager._recordFleetSamples) — same keys, same
+   *  buckets, same clearing rule — so both dashboards tag the fleet alike. */
+  _recordFleetSamples(now = Date.now()) {
+    for (const group of fleetAggregate(this.accounts, { thresholdFor: this.thresholdFor.bind(this), now })) {
+      for (const [bucket, value] of Object.entries(group.buckets)) {
+        this.projection.record(`fleet:${group.provider}`, bucket, value ? value.utilization : null, now);
+      }
+    }
   }
 
   markDisconnected(err) {

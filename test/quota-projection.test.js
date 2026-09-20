@@ -330,3 +330,72 @@ test('the default sampling window is wide enough for a slow weekly burn', () => 
   const qp = new QuotaProjection();
   assert.equal(qp.settings().windowMinutes, 90);
 });
+
+// ── The fleet series ────────────────────────────────────────────────────────
+//
+// The fleet view samples each provider pool's computed aggregate as a series of
+// its own, under a synthetic `fleet:<provider>` key, rather than summing the
+// per-account rates. These pin the two properties that makes rest on: the key is
+// only ever concatenated, and the series then behaves exactly like a row's.
+
+test('a synthetic fleet key is just another series', () => {
+  const qp = new QuotaProjection();
+  burn(qp, 'unified7d', { from: 0.20, perStep: 0.01, steps: 10, account: 'fleet:anthropic' });
+  // The same bucket on a real account index is untouched by it: the key is
+  // `${accountIndex}:${bucket}`, so the two never collide.
+  assert.equal(qp.rate(0, 'unified7d'), null);
+  const rate = qp.rate('fleet:anthropic', 'unified7d');
+  assert.ok(Math.abs(rate - 0.01 / MIN) < 1e-12, `rate was ${rate}`);
+});
+
+test('the two provider pools keep separate fleet series', () => {
+  const qp = new QuotaProjection();
+  burn(qp, 'unified5h', { from: 0.10, perStep: 0.02, steps: 10, account: 'fleet:anthropic' });
+  burn(qp, 'unified5h', { from: 0.10, perStep: 0.001, steps: 10, account: 'fleet:codex' });
+  assert.ok(qp.rate('fleet:anthropic', 'unified5h') > qp.rate('fleet:codex', 'unified5h'));
+});
+
+test('a fleet series projects with the same semantics a row does', () => {
+  const qp = new QuotaProjection();
+  const end = burn(qp, 'unified5h', { from: 0.50, perStep: 0.01, steps: 10, account: 'fleet:anthropic' });
+  const p = qp.project('fleet:anthropic', 'unified5h', { utilization: 0.60, resetAt: end + 5 * 60 * MIN, now: end });
+  assert.equal(p.kind, 'deficit');
+  assert.ok(Math.abs(p.exhaustsInMs - 40 * MIN) < MIN / 10, `exhaustsInMs was ${p.exhaustsInMs}`);
+  // The fleet block labels each line itself, so its tag drops the repeat.
+  assert.equal(formatProjection(p, { withLabel: false }), 'TTL 40m');
+  assert.equal(formatProjection(p), `Ses ${formatProjection(p, { withLabel: false })}`);
+});
+
+test('a composition change resets the fleet series, as a rolled window does', () => {
+  // The aggregate falls when a seat is disabled or stops being counted, which is
+  // not consumption. `record` cannot tell the two apart and drops the history
+  // either way — accepted, because extrapolating across a fleet that is no
+  // longer the one measured would be a fabricated rate.
+  const qp = new QuotaProjection();
+  const end = burn(qp, 'unified7d', { from: 0.60, perStep: 0.01, steps: 10, account: 'fleet:anthropic' });
+  assert.ok(qp.rate('fleet:anthropic', 'unified7d') != null);
+  qp.record('fleet:anthropic', 'unified7d', 0.30, end + MIN); // a big seat joins the pool
+  assert.equal(qp.rate('fleet:anthropic', 'unified7d'), null);
+});
+
+test('the manager samples the fleet aggregate alongside the accounts', () => {
+  const now = Date.now();
+  // Tiers on purpose: a seat this build cannot price is not in the aggregate, so
+  // an untiered fixture would have nothing to sample.
+  const am = new AccountManager([
+    { ...oauth('a'), rateLimitTier: 'default_claude_max_20x' },
+    { ...oauth('b'), provider: 'codex', accountId: 'acct' },
+  ], 0.98);
+  for (let i = 0; i <= 10; i++) {
+    am.accounts[0].quota.unified7d = 0.10 + 0.01 * i;
+    am.accounts[1].quota.unified7d = 0.50;
+    am._recordQuotaSamples(am.accounts[0], now + i * MIN);
+  }
+  // What is sampled is the AGGREGATE, not the account reading it was built from:
+  // the single 20x seat burns 0.01/min of its window, which against a 0.98
+  // threshold is 0.01/0.98 per minute of what the pool can actually spend.
+  const rate = am.projection.rate('fleet:anthropic', 'unified7d');
+  assert.ok(Math.abs(rate - (0.01 / 0.98) / MIN) < 1e-12, `rate was ${rate}`);
+  // Both pools are sampled, keyed the way the dashboards read them back.
+  assert.ok(am.projection.samples.has('fleet:codex:unified7d'));
+});

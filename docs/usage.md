@@ -97,10 +97,36 @@ Warning: "me@example.com" is disabled, so requests will not route to it until th
 | `d` | Enable/disable an account |
 | `p` | Refresh quota on all accounts (one-shot probe of the zero-spend usage endpoint) |
 | `R` | Reload accounts from config |
+| `f` | Fleet view — the pooled aggregate instead of the per-account rows (press again to go back) |
 | `g` | Settings (threshold, quota probe, routing, add/remove/reorder accounts, sx.org) |
 | `q` | Quit |
 
 In selection mode, use `j`/`k` or the arrow keys to navigate, `Enter` to confirm, `Esc` to cancel.
+
+### Fleet view
+
+Past a handful of accounts the rows answer "what does each seat hold" when the question is "how much is left across all of it". `f` swaps them for one block per backend:
+
+```text
+  Fleet — Anthropic   9 seats · 7 counted
+ Ses  ███████░░░░░░░░░░░░░░░░░░░░░  11% · 4h12m  TTL 4h12m
+ Wk   ████████████████████░░░░░░░░  68% · 1d22h
+ F7   ██████████████████████████░░  91% · 13m
+  Fleet — Codex       2 seats
+ Ses  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░   0% · 2h30m
+ Wk   ██████████████████░░░░░░░░░░  61% · 5d21h
+```
+
+Four things the block means, none of them obvious from the bars alone:
+
+- **It is usable headroom, not raw quota.** Rotation stops using an account at the [switch threshold](quota.md#switch-threshold), and a [per-account cap](quota.md#per-account-usage-caps) stops it lower still where one is set. Each seat is measured against whichever of those is lower, so the bar reads 100% at the point every seat would be refused — not at the point the windows are literally empty. A single Pro account at 49% with a 98% threshold reads 50% here.
+- **Seats are weighted by subscription size**, exactly as [`GET /teamclaude/quota`](quota.md#fleet-quota-endpoint) weights them: Pro and Team Standard count 1, Max 5x and Team tier 1 count 5, Max 20x and Team tier 2 count 20. A Codex seat counts 1 — ChatGPT publishes no tier to read, so one seat is one seat.
+- **Disabled seats are excluded**, and so is any Anthropic seat on a tier this build does not recognise: its quota cannot be priced, and guessing would be worse than leaving it out. The heading says how many seats the figures cover (`9 seats · 7 counted`) whenever that is fewer than the pool holds.
+- **Anthropic and Codex never mix.** They are separate subscriptions metering unrelated windows, so they get a block each; one averaged number would be true of neither.
+
+The `·` tail inside each bar is that bucket's soonest reset across the counted seats. The tag beside it is the same [burn-rate projection](quota.md#burn-rate-projection) the account rows carry, applied to the pool: it needs about 90 minutes of samples before it appears, so it stays quiet for a while after a restart rather than extrapolating from two readings. Enabling or disabling an account changes what the pool *is*, which resets that history too.
+
+The view works when [attached](remote.md) to a server elsewhere, and the sidecar readout stays on screen either way.
 
 The settings screen is a list, not a set of letter shortcuts: `↑`/`↓` move between rows, `←`/`→` change the value in place (threshold by 1%, probe by 30s, modes cycle), `Enter` opens a row that needs typing or a sub-screen, `Esc` goes back.
 

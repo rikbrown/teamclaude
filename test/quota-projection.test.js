@@ -32,6 +32,44 @@ test('computes a rate once the samples span the minimum interval', () => {
   assert.ok(Math.abs(rate - 0.01 / MIN) < 1e-12, `rate was ${rate}`);
 });
 
+test('a flat series reports no rate, whatever the reading happens to be', () => {
+  // `slope > 0` was not this test. The least-squares sums cancel to a residue
+  // rather than to zero, and its sign survives from whichever rounding did:
+  // 0.51 and 0.68 fitted ~1e-22 and read as consumption while 0.42 and 0.29
+  // cancelled exactly, so identical flat inputs disagreed on the strength of
+  // the reading's binary expansion. Every value here held perfectly still.
+  for (const u of [0.51, 0.68, 0.13, 0.42, 0.29, 0.03, 0.98, 0, 1]) {
+    const qp = new QuotaProjection();
+    burn(qp, 'unified7d', { from: u, perStep: 0, steps: 10 });
+    assert.equal(qp.rate(0, 'unified7d'), null, `flat at ${u} reported a rate`);
+  }
+});
+
+test('an idle weekly bucket raises no waste warning', () => {
+  // What the residue actually cost: ~1e-22 puts exhaustion past the reset, so
+  // it fell through to the surplus branch and an account that had spent
+  // nothing announced half its week unspent — a projection from a burn that
+  // was never measured.
+  const qp = new QuotaProjection();
+  const end = burn(qp, 'unified7d', { from: 0.51, perStep: 0, steps: 10 });
+  const projected = qp.project(0, 'unified7d', {
+    utilization: 0.51, resetAt: end + 3 * 24 * 60 * MIN, now: end,
+  });
+  assert.equal(projected, null);
+});
+
+test('the noise floor keeps a rate far slower than anything measurable', () => {
+  // The floor has to sit in an empty band or it silently eats real readings.
+  // 0.01%/h is already a hundred times slower than the slowest burn a
+  // whole-percent signal can resolve, and it survives untouched.
+  const qp = new QuotaProjection();
+  const perStep = 0.0001 / 6; // 0.01% per hour, sampled every 10 minutes
+  burn(qp, 'unified7d', { from: 0.2, perStep, steps: 10, everyMs: 10 * MIN });
+  const rate = qp.rate(0, 'unified7d');
+  assert.ok(rate != null, 'a real, very slow burn was discarded as noise');
+  assert.ok(Math.abs(rate - perStep / (10 * MIN)) < 1e-18, `rate was ${rate}`);
+});
+
 test('a null reading clears the bucket history so a reset is not a negative burn', () => {
   const qp = new QuotaProjection();
   const end = burn(qp, 'unified7d', { from: 0.90, perStep: 0.01, steps: 10 });

@@ -59,7 +59,17 @@ export class QuotaProjection {
 
   /** Record one utilization reading. A null reading means the window rolled
    *  (_clearExpiredQuotas nulls the bucket at its reset), so the history is
-   *  dropped: without this the roll reads as a large negative burn. */
+   *  dropped: without this the roll reads as a large negative burn.
+   *
+   *  `accountIndex` is only ever a map key here — concatenated, never indexed
+   *  with — so a caller with a series that is not one account's may name it
+   *  whatever is unambiguous. The fleet view samples each provider pool's
+   *  aggregate under `fleet:<provider>`, which needs nothing of this module.
+   *
+   *  @param {number|string} accountIndex
+   *  @param {string} bucket
+   *  @param {number|null|undefined} utilization
+   *  @param {number} [at] */
   record(accountIndex, bucket, utilization, at = Date.now()) {
     if (!this.enabled) return;
     const key = `${accountIndex}:${bucket}`;
@@ -83,7 +93,10 @@ export class QuotaProjection {
 
   /** Consumption in utilization per millisecond, or null when the samples in
    *  the window cannot support an estimate (too few, too short a span, or no
-   *  measurable consumption). */
+   *  measurable consumption).
+   *
+   *  @param {number|string} accountIndex
+   *  @param {string} bucket */
   rate(accountIndex, bucket) {
     if (!this.enabled) return null;
     const list = this.samples.get(`${accountIndex}:${bucket}`);
@@ -111,7 +124,7 @@ export class QuotaProjection {
 
   /**
    * Project one bucket against its reset.
-   * @param {number} accountIndex
+   * @param {number|string} accountIndex
    * @param {string} bucket
    * @param {{utilization?: number|null, resetAt?: number|null, now?: number}} [sample]
    * @returns {{bucket: string, kind: 'deficit'|'surplus', exhaustsInMs?: number,
@@ -152,12 +165,23 @@ export class QuotaProjection {
   }
 }
 
-/** Render a projection as a row tag, e.g. "Ses TTL 38m" or "Wk 22% unspent". */
-export function formatProjection(projection) {
+/**
+ * Render a projection as a row tag, e.g. "Ses TTL 38m" or "Wk 22% unspent".
+ *
+ * An account row carries every bucket's tag on one line, so each has to name the
+ * bucket it is about. The fleet block gives each bucket a line of its own, with
+ * the label already at the start of it, so `withLabel: false` drops the repeat
+ * rather than making that caller reimplement the durations and lose the one
+ * spelling of "2d4h" this codebase has.
+ *
+ * @param {{bucket: string, kind: 'deficit'|'surplus', exhaustsInMs?: number, unspent?: number}|null} projection
+ * @param {{withLabel?: boolean}} [options]
+ */
+export function formatProjection(projection, { withLabel = true } = {}) {
   if (!projection) return null;
-  const label = BUCKET_LABELS[projection.bucket] || projection.bucket;
-  if (projection.kind === 'deficit') return `${label} TTL ${formatDuration(projection.exhaustsInMs)}`;
-  return `${label} ${Math.round(projection.unspent * 100)}% unspent`;
+  const label = withLabel ? `${BUCKET_LABELS[projection.bucket] || projection.bucket} ` : '';
+  if (projection.kind === 'deficit') return `${label}TTL ${formatDuration(projection.exhaustsInMs)}`;
+  return `${label}${Math.round(projection.unspent * 100)}% unspent`;
 }
 
 function formatDuration(ms) {

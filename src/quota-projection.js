@@ -39,6 +39,28 @@ const MIN_SPAN_MS = 5 * 60_000;
  *  ranges 0.4-2.9%/h when it does speak, while 90 minutes holds 0.9-1.1%/h. */
 const DEFAULT_WINDOW_MINUTES = 90;
 
+/** The floor a fitted slope must clear to count as consumption at all.
+ *
+ *  `> 0` is not that test. The least-squares sums below cancel to a residue
+ *  rather than to zero on a PERFECTLY FLAT series, and the residue keeps the
+ *  sign of whichever rounding happened to survive: a series pinned at 0.51 or
+ *  0.68 fits a slope of ~1e-22 and reads as consumption, while 0.42 or 0.29
+ *  cancel exactly and report nothing. Same flat input, opposite answers,
+ *  decided by the binary expansion of the reading.
+ *
+ *  It is not a rounding curiosity downstream. A rate of 1e-22 puts exhaustion
+ *  ~1e19 years out, which clears `exhaustsInMs <= resetInMs` and lands in the
+ *  surplus branch, so a wholly idle account announces "Wk 49% unspent" — a
+ *  waste warning derived from a burn that was never measured, and one this
+ *  module's own contract says it would not fabricate.
+ *
+ *  The floor sits in an empty band, so it cannot discard a real reading.
+ *  Utilization arrives quantised to whole percent, so the slowest rate that is
+ *  measurable at all is one 1% step across a 90-minute window — about 1.9e-9
+ *  per ms. This is six orders below that and seven above the noise it rejects.
+ */
+const MIN_RATE = 1e-15;
+
 export class QuotaProjection {
   constructor({ enabled = true, windowMinutes = DEFAULT_WINDOW_MINUTES, wasteFloor = 0.1 } = {}) {
     this.enabled = enabled !== false;
@@ -119,7 +141,7 @@ export class QuotaProjection {
     const denom = n * sumTT - sumT * sumT;
     if (denom === 0) return null;
     const slope = (n * sumTU - sumT * sumU) / denom;
-    return slope > 0 ? slope : null;
+    return slope > MIN_RATE ? slope : null;
   }
 
   /**

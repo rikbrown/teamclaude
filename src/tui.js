@@ -221,8 +221,14 @@ const FLEET_BAR_MAX = 40;
 /** @type {Record<string, string>} */
 const FLEET_LABELS = { unified5h: 'Ses', unified7d: 'Wk', unified7dSonnet: 'S7', unified7dFable: 'F7' };
 const FLEET_LABEL_W = 3;
-// ' Ses  ': a leading margin, the label, and two columns before the bar starts.
-const FLEET_PREFIX_W = 1 + FLEET_LABEL_W + 2;
+// Indent for the lines under a pool header, which sits at 2 — the settings
+// screen's arrangement (a section at 2, its rows at 4), and the one that puts
+// these labels in the same column an account row starts its name in, so the two
+// views register against each other when [f] swaps one for the other.
+const FLEET_INDENT_W = 4;
+// '    Ses  ': the indent, the label, and two columns before the bar starts.
+const FLEET_PREFIX_W = FLEET_INDENT_W + FLEET_LABEL_W + 2;
+const FLEET_INDENT = ' '.repeat(FLEET_INDENT_W);
 
 // Floor for the account name column. It grows past this toward the longest name
 // when the row has width to spare, but never drops below it, so a narrow
@@ -2113,9 +2119,9 @@ export class TUI {
       if (group.counted === 0) {
         // Said plainly rather than drawn as empty bars: nothing here is measured,
         // and a row of zeroes would claim the pool is untouched.
-        lines.push(dim('   no seat here has a tier this build can weigh'));
+        lines.push(dim(`${FLEET_INDENT}no seat here has a tier this build can weigh`));
       } else if (entries.length === 0) {
-        lines.push(dim('   no quota observed yet'));
+        lines.push(dim(`${FLEET_INDENT}no quota observed yet`));
       }
       for (const e of entries) {
         const label = rpad(FLEET_LABELS[e.bucket] || e.bucket, FLEET_LABEL_W);
@@ -2127,7 +2133,7 @@ export class TUI {
         // falls back to raw fill, which is what an aggregate can honestly claim.
         // The threshold still forces red at the top of the scale.
         const tail = withTags && e.tag ? `  ${e.tag}` : '';
-        lines.push(` ${label}  ${bar(e.value.utilization, bw, e.value.nextResetAt, null, thFor(e.bucket))}${tail}`);
+        lines.push(`${FLEET_INDENT}${label}  ${bar(e.value.utilization, bw, e.value.nextResetAt, null, thFor(e.bucket))}${tail}`);
       }
     }
     return lines;

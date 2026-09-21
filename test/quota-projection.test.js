@@ -1,12 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { QuotaProjection, formatProjection, formatEstimate } from '../src/quota-projection.js';
+import { QuotaProjection, formatProjection, formatEstimate, estimateBurn } from '../src/quota-projection.js';
 import { AccountManager } from '../src/account-manager.js';
+import { fleetAggregate } from '../src/quota-summary.js';
 import { TUI } from '../src/tui.js';
 
 const MIN = 60_000;
 const T0 = 1_700_000_000_000;
-const HOURS_2 = 2 * 60 * MIN;
 
 // Feed `steps` evenly spaced samples rising by `perStep` utilization each.
 function burn(qp, bucket, { from = 0, perStep, steps, everyMs = MIN, start = T0, account = 0 }) {
@@ -33,47 +33,53 @@ test('computes a rate once the samples span the minimum interval', () => {
   assert.ok(Math.abs(rate - 0.01 / MIN) < 1e-12, `rate was ${rate}`);
 });
 
-test('estimate answers where project deliberately stays silent', () => {
+test('estimateBurn answers where project deliberately stays silent', () => {
   // The case that made the fleet panel look broken: a 5h bucket is not weekly,
   // so `project` reports only a deficit and a pool comfortably inside its
   // window got no tag at all. The estimate is the number the operator wanted.
   const qp = new QuotaProjection();
   const end = burn(qp, 'unified5h', { from: 0.2, perStep: 0.002, steps: 10 });
-  const sample = { utilization: 0.4, resetAt: end + 60 * MIN, now: end };
+  assert.equal(qp.project(0, 'unified5h', { utilization: 0.4, resetAt: end + 60 * MIN, now: end }), null,
+    'project is silent here by design');
 
-  assert.equal(qp.project(0, 'unified5h', sample), null, 'project is silent here by design');
-
-  const est = qp.estimate(0, 'unified5h', sample);
-  assert.ok(est, 'estimate should still answer');
   // 60% left at 0.002 per minute — 300 minutes.
+  const est = estimateBurn({ utilization: 0.4, ratePerMs: 0.002 / MIN, nextResetAt: end + 60 * MIN }, end);
+  assert.ok(est, 'estimateBurn should still answer');
   assert.ok(Math.abs(est.exhaustsInMs - 300 * MIN) < MIN, `was ${est.exhaustsInMs}`);
   assert.equal(est.dry, false, 'it outlasts the reset, so it is not running dry');
   assert.equal(formatEstimate(est), 'TTL 5h0m');
 });
 
-test('estimate marks a pool that runs dry before its reset', () => {
-  const qp = new QuotaProjection();
-  const end = burn(qp, 'unified7d', { from: 0.5, perStep: 0.01, steps: 10 });
+test('estimateBurn marks a pool that runs dry before its reset', () => {
   // 10% left at 0.01/min is 10 minutes; the window has an hour to run.
-  const est = qp.estimate(0, 'unified7d', { utilization: 0.9, resetAt: end + 60 * MIN, now: end });
+  const est = estimateBurn({ utilization: 0.9, ratePerMs: 0.01 / MIN, nextResetAt: T0 + 60 * MIN }, T0);
   assert.equal(est.dry, true);
   assert.equal(formatEstimate(est), 'TTL 10m');
 });
 
-test('estimate reports nothing without a measurable rate', () => {
-  const qp = new QuotaProjection();
-  burn(qp, 'unified7d', { from: 0.5, perStep: 0, steps: 10 });
-  assert.equal(qp.estimate(0, 'unified7d', { utilization: 0.5, resetAt: T0 + HOURS_2, now: T0 }), null);
+test('estimateBurn reports nothing without a rate', () => {
+  // The pool's rate is null when no member has a measurable one, and null is
+  // not zero: nobody can project a pool nobody has measured.
+  assert.equal(estimateBurn({ utilization: 0.5, ratePerMs: null, nextResetAt: T0 + 60 * MIN }, T0), null);
+  assert.equal(estimateBurn({ utilization: 0.5, ratePerMs: 0, nextResetAt: T0 + 60 * MIN }, T0), null);
+  assert.equal(estimateBurn(null, T0), null);
   assert.equal(formatEstimate(null), null);
 });
 
-test('a spent window estimates zero rather than a negative time', () => {
+test('a spent pool estimates zero rather than a negative time', () => {
   // Upstream keeps counting past a spent window, so 1.04 arrives as a reading.
-  const qp = new QuotaProjection();
-  const end = burn(qp, 'unified7d', { from: 0.9, perStep: 0.01, steps: 10 });
-  const est = qp.estimate(0, 'unified7d', { utilization: 1.04, resetAt: end + 60 * MIN, now: end });
+  const est = estimateBurn({ utilization: 1.04, ratePerMs: 0.01 / MIN, nextResetAt: T0 + 60 * MIN }, T0);
   assert.equal(est.exhaustsInMs, 0);
   assert.equal(est.dry, true);
+});
+
+test('estimateBurn needs no reset to answer', () => {
+  // A bucket nothing has dated still has a burn worth reporting; it simply
+  // cannot be said to run dry "before" anything.
+  const est = estimateBurn({ utilization: 0.5, ratePerMs: 0.01 / MIN, nextResetAt: null }, T0);
+  assert.equal(est.resetInMs, null);
+  assert.equal(est.dry, false);
+  assert.equal(formatEstimate(est), 'TTL 50m');
 });
 
 test('a flat series reports no rate, whatever the reading happens to be', () => {
@@ -437,47 +443,68 @@ test('the two provider pools keep separate fleet series', () => {
   assert.ok(qp.rate('fleet:anthropic', 'unified5h') > qp.rate('fleet:codex', 'unified5h'));
 });
 
-test('a fleet series projects with the same semantics a row does', () => {
-  const qp = new QuotaProjection();
-  const end = burn(qp, 'unified5h', { from: 0.50, perStep: 0.01, steps: 10, account: 'fleet:anthropic' });
-  const p = qp.project('fleet:anthropic', 'unified5h', { utilization: 0.60, resetAt: end + 5 * 60 * MIN, now: end });
-  assert.equal(p.kind, 'deficit');
-  assert.ok(Math.abs(p.exhaustsInMs - 40 * MIN) < MIN / 10, `exhaustsInMs was ${p.exhaustsInMs}`);
-  // The fleet block labels each line itself, so its tag drops the repeat.
-  assert.equal(formatProjection(p, { withLabel: false }), 'TTL 40m');
-  assert.equal(formatProjection(p), `Ses ${formatProjection(p, { withLabel: false })}`);
-});
-
-test('a composition change resets the fleet series, as a rolled window does', () => {
-  // The aggregate falls when a seat is disabled or stops being counted, which is
-  // not consumption. `record` cannot tell the two apart and drops the history
-  // either way — accepted, because extrapolating across a fleet that is no
-  // longer the one measured would be a fabricated rate.
-  const qp = new QuotaProjection();
-  const end = burn(qp, 'unified7d', { from: 0.60, perStep: 0.01, steps: 10, account: 'fleet:anthropic' });
-  assert.ok(qp.rate('fleet:anthropic', 'unified7d') != null);
-  qp.record('fleet:anthropic', 'unified7d', 0.30, end + MIN); // a big seat joins the pool
-  assert.equal(qp.rate('fleet:anthropic', 'unified7d'), null);
-});
-
-test('the manager samples the fleet aggregate alongside the accounts', () => {
+test('a pool derives its burn from its members, not from a series of its own', () => {
+  // Sampling the aggregate as one series was the first design and it does not
+  // survive a fleet: `record` drops a series whenever its reading falls, and the
+  // aggregate falls when ANY member's does, so one seat's 1% dip wiped the whole
+  // pool's history. Measured on nine seats, a single seat dipping every five
+  // minutes left the pool with no rate at all, ever, while every per-account tag
+  // kept working — each of those series only clears itself.
   const now = Date.now();
-  // Tiers on purpose: a seat this build cannot price is not in the aggregate, so
-  // an untiered fixture would have nothing to sample.
+  const am = new AccountManager([
+    { ...oauth('big'), rateLimitTier: 'default_claude_max_20x' },
+    { ...oauth('small'), rateLimitTier: 'default_claude_ai' },
+  ], 0.98);
+  for (let i = 0; i <= 10; i++) {
+    am.accounts[0].quota.unified7d = 0.10 + 0.01 * i;   // 0.01/min
+    am.accounts[1].quota.unified7d = 0.50;              // idle throughout
+    am._recordQuotaSamples(am.accounts[0], now + i * MIN);
+    am._recordQuotaSamples(am.accounts[1], now + i * MIN);
+  }
+  assert.ok(am.rateFor(am.accounts[0], 'unified7d') != null, 'the burning seat has a rate');
+  assert.equal(am.rateFor(am.accounts[1], 'unified7d'), null, 'the idle seat has none');
+
+  const [pool] = fleetAggregate(am.accounts, { thresholdFor: () => 0.98, now: now + 10 * MIN,
+    rateFor: am.rateFor.bind(am) });
+  // Σ(weight × seat rate) / Σ(weight × limit): only the 20x seat burns, so
+  // (20 × 0.01/min) / ((20 + 1) × 0.98).
+  const expected = (20 * (0.01 / MIN)) / (21 * 0.98);
+  assert.ok(Math.abs(pool.buckets.unified7d.ratePerMs - expected) < 1e-15,
+    `ratePerMs was ${pool.buckets.unified7d.ratePerMs}`);
+  assert.equal(pool.buckets.unified7d.ratedAccounts, 1, 'the idle seat contributes no rate');
+});
+
+test("one seat's dip no longer costs the pool its rate", () => {
+  // The regression this rework exists for.
+  const now = Date.now();
   const am = new AccountManager([
     { ...oauth('a'), rateLimitTier: 'default_claude_max_20x' },
-    { ...oauth('b'), provider: 'codex', accountId: 'acct' },
+    { ...oauth('b'), rateLimitTier: 'default_claude_max_20x' },
   ], 0.98);
   for (let i = 0; i <= 10; i++) {
     am.accounts[0].quota.unified7d = 0.10 + 0.01 * i;
-    am.accounts[1].quota.unified7d = 0.50;
+    // The second seat reports a 1% dip midway, as a live feed does.
+    am.accounts[1].quota.unified7d = (i === 5 ? 0.19 : 0.10 + 0.01 * i);
+    am._recordQuotaSamples(am.accounts[0], now + i * MIN);
+    am._recordQuotaSamples(am.accounts[1], now + i * MIN);
+  }
+  const [pool] = fleetAggregate(am.accounts, { thresholdFor: () => 0.98, now: now + 10 * MIN,
+    rateFor: am.rateFor.bind(am) });
+  assert.ok(pool.buckets.unified7d.ratePerMs != null,
+    'the undisturbed seat should still carry the pool');
+  assert.equal(pool.buckets.unified7d.ratedAccounts, 1, 'the dipped seat dropped its own series only');
+});
+
+test('a seat already at its ceiling contributes no further burn', () => {
+  const now = Date.now();
+  const am = new AccountManager([{ ...oauth('spent'), rateLimitTier: 'default_claude_max_20x' }], 0.98);
+  for (let i = 0; i <= 10; i++) {
+    am.accounts[0].quota.unified7d = 0.90 + 0.01 * i;   // crosses 0.98 on the way
     am._recordQuotaSamples(am.accounts[0], now + i * MIN);
   }
-  // What is sampled is the AGGREGATE, not the account reading it was built from:
-  // the single 20x seat burns 0.01/min of its window, which against a 0.98
-  // threshold is 0.01/0.98 per minute of what the pool can actually spend.
-  const rate = am.projection.rate('fleet:anthropic', 'unified7d');
-  assert.ok(Math.abs(rate - (0.01 / 0.98) / MIN) < 1e-12, `rate was ${rate}`);
-  // Both pools are sampled, keyed the way the dashboards read them back.
-  assert.ok(am.projection.samples.has('fleet:codex:unified7d'));
+  const [pool] = fleetAggregate(am.accounts, { thresholdFor: () => 0.98, now: now + 10 * MIN,
+    rateFor: am.rateFor.bind(am) });
+  // Past the threshold the seat is spending nothing the router will hand out.
+  assert.equal(pool.buckets.unified7d.ratePerMs, null);
+  assert.equal(pool.buckets.unified7d.ratedAccounts, 0);
 });

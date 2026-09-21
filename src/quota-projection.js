@@ -171,43 +171,6 @@ export class QuotaProjection {
     return { bucket, kind: 'surplus', unspent, resetInMs };
   }
 
-  /**
-   * How long this bucket lasts at the measured rate — whatever that means for
-   * the reset.
-   *
-   * `project` is a WARNING. It speaks when the window will stop you, or when it
-   * will expire with enough left to be worth regretting, and stays silent in
-   * between. That is right for an account row, where a tag per bucket per seat
-   * would be a wall of text nobody reads, and it is why a healthy fleet shows
-   * nothing: a 5h bucket is not a weekly one, so it reports only a deficit, and
-   * a pool that will spend its week almost exactly falls under `wasteFloor` and
-   * says nothing at all.
-   *
-   * A fleet line is one line for a whole pool and is read to plan against, so
-   * the useful answer there is the estimate itself — "at this burn the pool
-   * lasts 2d4h" — reported whenever a rate exists rather than only at the
-   * extremes. `dry` says which side of the reset it lands on, so a caller can
-   * colour the difference without measuring it again.
-   *
-   * @param {number|string} accountIndex
-   * @param {string} bucket
-   * @param {{utilization?: number|null, resetAt?: number|null, now?: number}} [sample]
-   * @returns {{bucket: string, rate: number, exhaustsInMs: number,
-   *   resetInMs: number|null, dry: boolean} | null}
-   */
-  estimate(accountIndex, bucket, { utilization, resetAt, now = Date.now() } = {}) {
-    if (!this.enabled) return null;
-    if (utilization == null) return null;
-    const rate = this.rate(accountIndex, bucket);
-    if (rate == null) return null;
-    // Clamped because upstream keeps counting past a spent window (104% arrives
-    // as 1.04), which would otherwise estimate a negative time to empty.
-    const remaining = Math.max(0, 1 - utilization);
-    const resetInMs = resetAt == null ? null : resetAt - now;
-    const exhaustsInMs = remaining / rate;
-    return { bucket, rate, exhaustsInMs, resetInMs, dry: resetInMs != null && exhaustsInMs <= resetInMs };
-  }
-
   /** Projections in display order: anything that will stop you comes before
    *  anything that will merely expire, soonest and largest first. */
   rank(projections) {
@@ -241,6 +204,39 @@ export function formatProjection(projection, { withLabel = true } = {}) {
   const label = withLabel ? `${BUCKET_LABELS[projection.bucket] || projection.bucket} ` : '';
   if (projection.kind === 'deficit') return `${label}TTL ${formatDuration(projection.exhaustsInMs)}`;
   return `${label}${Math.round(projection.unspent * 100)}% unspent`;
+}
+
+/**
+ * How long a pool's bucket lasts at the rate its members are burning it.
+ *
+ * `project` is a WARNING. It speaks when a bucket will stop you before it
+ * resets, or when it will expire wasting more than the floor, and stays silent
+ * in between. That is right for an account row, where a tag per bucket per seat
+ * is a wall of text nobody reads, and it is why a healthy fleet showed nothing:
+ * a 5h bucket is not weekly, so it reports only a deficit, and a pool that will
+ * spend its week almost exactly falls under `wasteFloor` and says nothing.
+ *
+ * A fleet line is one line for a whole pool, read to plan against, so this
+ * answers whenever a rate exists. `dry` says which side of the reset it lands
+ * on, so a caller can colour the difference without measuring it again.
+ *
+ * Takes the rate rather than looking one up: a pool's burn is derived from its
+ * members' (see aggregateHeadroom) and never sampled as a series of its own,
+ * because a series fed by every seat is cleared by any one of them dipping.
+ *
+ * @param {{utilization?: number|null, ratePerMs?: number|null, nextResetAt?: number|null}|null} bucket
+ * @param {number} [now]
+ * @returns {{rate: number, exhaustsInMs: number, resetInMs: number|null, dry: boolean} | null}
+ */
+export function estimateBurn(bucket, now = Date.now()) {
+  const rate = bucket?.ratePerMs;
+  if (bucket?.utilization == null || !Number.isFinite(rate) || Number(rate) <= 0) return null;
+  // Clamped because upstream keeps counting past a spent window (104% arrives
+  // as 1.04), which would otherwise estimate a negative time to empty.
+  const remaining = Math.max(0, 1 - Number(bucket.utilization));
+  const resetInMs = bucket.nextResetAt == null ? null : Number(bucket.nextResetAt) - now;
+  const exhaustsInMs = remaining / Number(rate);
+  return { rate: Number(rate), exhaustsInMs, resetInMs, dry: resetInMs != null && exhaustsInMs <= resetInMs };
 }
 
 /**

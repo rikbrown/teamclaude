@@ -167,6 +167,8 @@ export function buildQuotaSummary(accounts) {
  * @property {number} capacityWeight Σ weight × limit.
  * @property {number} remainingWeight capacityWeight - spentWeight, floored at 0.
  * @property {number} knownAccounts Counted seats that reported this bucket.
+ * @property {number|null} ratePerMs Pool burn, Σ(weight × seat rate) / capacityWeight, or null when no seat has a measurable one.
+ * @property {number} ratedAccounts Counted seats contributing a measured rate.
  * @property {number|null} nextResetAt Soonest still-future reset among them.
  */
 
@@ -249,11 +251,14 @@ function usableLimit(account, bucket, thresholdFor) {
  * @param {string} bucket
  * @param {((bucket: string) => number)|null} thresholdFor
  * @param {number} now
+ * @param {((account: any, bucket: string) => number|null)|null} [rateFor]
  * @returns {FleetBucket|null}
  */
-function aggregateHeadroom(members, bucket, thresholdFor, now) {
+function aggregateHeadroom(members, bucket, thresholdFor, now, rateFor = null) {
   let capacityWeight = 0;
   let spentWeight = 0;
+  let rateWeight = 0;
+  let ratedAccounts = 0;
   let knownAccounts = 0;
   /** @type {number|null} */
   let nextResetAt = null;
@@ -270,6 +275,23 @@ function aggregateHeadroom(members, bucket, thresholdFor, now) {
     capacityWeight += weight * limit;
     spentWeight += weight * Math.min(Math.max(0, Number(reading)), limit);
     knownAccounts++;
+    // The pool's burn is built from the MEMBERS' burn, not measured on the
+    // aggregate. Sampling the aggregate as its own series looks tidier and is
+    // unusable here: `record` drops a series whenever its reading falls, and
+    // the aggregate falls when ANY member's does, so one seat's 1% dip wipes
+    // the whole pool's history. Measured on this fleet, a single seat dipping
+    // once every five minutes left the pool with no rate at all, ever, while
+    // every per-account tag kept working — each of those series only ever
+    // clears itself.
+    //
+    // d/dt of Σ(w·min(u,lim)) / Σ(w·lim) is Σ(w·rate) / Σ(w·lim), and a seat
+    // already at its ceiling has stopped contributing spend, so it contributes
+    // no rate either. A seat with no measurable rate adds nothing, which is not
+    // a gap in the estimate: no measurable slope is what "not consuming" looks
+    // like, so the pool's rate falls as its members go quiet, exactly as it
+    // should.
+    const rate = rateFor && Number(reading) < limit ? rateFor(account, bucket) : null;
+    if (rate != null && Number.isFinite(rate) && rate > 0) { rateWeight += weight * rate; ratedAccounts++; }
     // Resets already in the past are skipped rather than winning "soonest"
     // forever: a window whose reset has passed is one the sweep has not caught
     // up with yet (#237), and it would freeze the countdown on a dead timestamp.
@@ -292,6 +314,10 @@ function aggregateHeadroom(members, bucket, thresholdFor, now) {
     capacityWeight: clean(capacityWeight),
     remainingWeight: clean(Math.max(0, capacityWeight - spentWeight)),
     knownAccounts,
+    // Null rather than 0 when nothing was measured: a pool whose seats have no
+    // rate yet is one nobody can project, and a 0 would read as "idle forever".
+    ratePerMs: ratedAccounts && capacityWeight > 0 ? rateWeight / capacityWeight : null,
+    ratedAccounts,
     nextResetAt,
   };
 }
@@ -447,10 +473,10 @@ const providerRank = (id) => {
  * operator needs told, and a pool that vanished would look like a config error.
  *
  * @param {Array<any>} accounts Manager accounts, or the `accounts` of a status payload.
- * @param {{thresholdFor?: ((bucket: string) => number)|null, now?: number, routes?: Array<any>|null}} [options]
+ * @param {{thresholdFor?: ((bucket: string) => number)|null, now?: number, routes?: Array<any>|null, rateFor?: ((account: any, bucket: string) => number|null)|null}} [options]
  * @returns {Array<{provider: string, total: number, counted: number, buckets: Record<string, FleetBucket|null>}>}
  */
-export function fleetAggregate(accounts, { thresholdFor = null, now = Date.now(), routes = null } = {}) {
+export function fleetAggregate(accounts, { thresholdFor = null, now = Date.now(), routes = null, rateFor = null } = {}) {
   const routable = routableNames(routes);
   // Grouped first, pooled second: a seat the routing rule drops still has to
   // reach its provider's `total`, the rule itself is decided per pool, and
@@ -479,7 +505,7 @@ export function fleetAggregate(accounts, { thresholdFor = null, now = Date.now()
         // A provider added to PROVIDERS without a bucket list here aggregates
         // nothing, rather than being assumed to meter Anthropic's windows.
         buckets: Object.fromEntries((PROVIDER_BUCKETS[provider] || [])
-          .map(bucket => [bucket, aggregateHeadroom(pool.members, bucket, thresholdFor, now)])),
+          .map(bucket => [bucket, aggregateHeadroom(pool.members, bucket, thresholdFor, now, rateFor)])),
       };
     });
 }
@@ -517,10 +543,10 @@ export function fleetAggregate(accounts, { thresholdFor = null, now = Date.now()
  *
  * @param {Array<any>} accounts Manager accounts, or the `accounts` of a status payload.
  * @param {Array<any>} routes The resolved routing view — see routableNames.
- * @param {{thresholdFor?: ((bucket: string) => number)|null, now?: number}} [options]
+ * @param {{thresholdFor?: ((bucket: string) => number)|null, now?: number, rateFor?: ((account: any, bucket: string) => number|null)|null}} [options]
  * @returns {Array<{name: string, counted: number, total: number, bucket: string|null, value: FleetBucket|null}>}
  */
-export function routeHeadroom(accounts, routes, { thresholdFor = null, now = Date.now() } = {}) {
+export function routeHeadroom(accounts, routes, { thresholdFor = null, now = Date.now(), rateFor = null } = {}) {
   /** @type {Map<string, any>} */
   const byName = new Map();
   for (const account of accounts || []) {
@@ -547,7 +573,7 @@ export function routeHeadroom(accounts, routes, { thresholdFor = null, now = Dat
     /** @type {{bucket: string, value: FleetBucket}|null} */
     let binding = null;
     for (const bucket of candidates) {
-      const value = aggregateHeadroom(pool.members, bucket, thresholdFor, now);
+      const value = aggregateHeadroom(pool.members, bucket, thresholdFor, now, rateFor);
       // A bucket no counted member reports is not a constraint that has been
       // measured, so it cannot be the one that binds. Strict `>` keeps the tie
       // with the earlier, more specific candidate.

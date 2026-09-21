@@ -3,7 +3,7 @@ import { SessionTitles } from './session-titles.js';
 import { modelGlobMatches } from './model.js';
 import { safeLine } from './safe-text.js';
 import { QuotaProjection } from './quota-projection.js';
-import { fleetAggregate } from './quota-summary.js';
+
 /** @typedef {import('./types.js').CodedError} CodedError */
 
 // Attach mode — the dashboard against a server running somewhere else (a
@@ -316,27 +316,27 @@ export class RemoteAccountManager {
     this.projection.enabled = status?.projection?.enabled !== false;
     // One sample per poll, on the cadence the server publishes at. Taken after
     // the accounts are in place, since it is composed from them.
-    this._recordFleetSamples();
     this.status = status;
     this.connected = true;
     this.lastError = null;
   }
 
-  /** Sample each provider pool's aggregate, exactly as the server does for its
-   *  own dashboard (AccountManager._recordFleetSamples) — same keys, same
-   *  buckets, same clearing rule — so both dashboards tag the fleet alike.
+  /**
+   * This account's measured burn for `bucket`, read from the status payload.
    *
-   *  The routing table goes in with it, because the aggregate this samples has
-   *  to be the one the panel draws: the tag beside a bar is a projection over
-   *  the series recorded here, and a series taken over a wider pool than the bar
-   *  shows would put a burn rate against a number it was never measured from.
-   *  `this.routes` is already applied by the time applyStatus calls this. */
-  _recordFleetSamples(now = Date.now()) {
-    for (const group of fleetAggregate(this.accounts, { thresholdFor: this.thresholdFor.bind(this), now, routes: this.routes })) {
-      for (const [bucket, value] of Object.entries(group.buckets)) {
-        this.projection.record(`fleet:${group.provider}`, bucket, value ? value.utilization : null, now);
-      }
-    }
+   * The server samples and fits; an attached dashboard only reads the result,
+   * so this mirrors AccountManager.rateFor without keeping a second series of
+   * its own. The pool's rate is built from these by aggregateHeadroom, which is
+   * why the payload carries rates and not only projections.
+   *
+   * @param {any} account
+   * @param {string} bucket
+   */
+  rateFor(account, bucket) {
+    const rate = account?.projection?.rates?.[bucket];
+    // Off the wire, so validated rather than trusted: it is about to be
+    // multiplied into a weighted total.
+    return Number.isFinite(rate) && rate > 0 ? Number(rate) : null;
   }
 
   markDisconnected(err) {

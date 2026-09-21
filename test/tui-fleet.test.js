@@ -48,6 +48,22 @@ function withQuota(am) {
   return am;
 }
 
+/** Drive `minutes` of steady per-account burn so each pool has a derived rate.
+ *  The pool's rate comes from its MEMBERS now, so the fixture has to move the
+ *  accounts rather than record an aggregate series. */
+function seedBurn(am, minutes = 20) {
+  const now = Date.now();
+  for (let i = 0; i <= minutes; i++) {
+    for (const a of am.accounts) {
+      if (a.quota.unified5h != null) a.quota.unified5h = 0.30 + 0.01 * i;
+      if (a.quota.unified7d != null) a.quota.unified7d = 0.40 + 0.005 * i;
+      if (a.quota.unified7dFable != null) a.quota.unified7dFable = 0.50 + 0.004 * i;
+    }
+    for (const a of am.accounts) am._recordQuotaSamples(a, now - (minutes - i) * 60_000);
+  }
+  return am;
+}
+
 function tuiFor(am, over = {}) {
   return new TUI({
     accountManager: am,
@@ -101,17 +117,7 @@ test('a fleet line carries a TTL estimate once the pool has a burn rate', () => 
   // The panel reported nothing on a healthy fleet: `project` warns rather than
   // estimates, so a 5h bucket inside its window and a weekly one under the
   // waste floor both printed blank. The fleet lines estimate instead.
-  const am = withQuota(new AccountManager(fleetAccounts(), 0.98));
-  const now = Date.now();
-  for (let m = 120; m >= 0; m -= 5) {
-    for (const a of am.accounts) {
-      if (a.quota.unified5h != null) a.quota.unified5h = Math.max(0, a.quota.unified5h - 0.0002 * m);
-      if (a.quota.unified7d != null) a.quota.unified7d = Math.max(0, 0.6 - 0.0004 * m);
-    }
-    am._recordFleetSamples(now - m * 60_000);
-  }
-  for (const a of am.accounts) if (a.quota.unified7d != null) a.quota.unified7d = 0.6;
-
+  const am = seedBurn(withQuota(new AccountManager(fleetAccounts(), 0.98)));
   const { fleet } = renderFleet(tuiFor(am), 200);
   const ttl = fleet.filter(l => /TTL /.test(l));
   assert.ok(ttl.length > 0, `expected a TTL on some fleet line, got:\n${fleet.join('\n')}`);
@@ -476,19 +482,11 @@ test('a burn tag is budgeted for rather than pushed past the edge', () => {
   // The tag is the one part of the line whose width is not fixed, and it is what
   // #228 lost when a row was composed past W. Seed a steady burn so every bucket
   // carries one, then check the same invariant at every width.
-  const am = withQuota(new AccountManager(fleetAccounts(), 0.98));
-  const now = Date.now();
-  for (let i = 0; i <= 20; i++) {
-    for (const a of am.accounts) {
-      a.quota.unified5h = 0.30 + 0.01 * i;
-      a.quota.unified7d = 0.40 + 0.005 * i;
-    }
-    am._recordFleetSamples(now - (20 - i) * 60_000);
-  }
+  const am = seedBurn(withQuota(new AccountManager(fleetAccounts(), 0.98)));
   const tui = tuiFor(am);
   tui.fleetMode = 'full';
 
-  const tagged = renderFleet(tui, 120).fleet.filter(l => /TTL|unspent/.test(l));
+  const tagged = renderFleet(tui, 120).fleet.filter(l => /TTL/.test(l));
   assert.ok(tagged.length > 0, 'the seeded burn should produce a tag');
   // The line already names the bucket, so the tag does not repeat it.
   assert.ok(!tagged.some(l => /(Ses|Wk|S7|F7) TTL/.test(l)), tagged.join('\n'));
@@ -564,14 +562,23 @@ test('an attached dashboard leaves out the seats the server routes nothing to', 
   assert.ok(fleet.some(l => l.includes('2 seats · 1 counted')), fleet.join('\n'));
 });
 
-test('an attached dashboard samples the fleet series once per poll', () => {
+test('an attached dashboard reads its pool rate off the payload', () => {
+  // The server samples and fits; this dashboard only reads the result. It keeps
+  // no series of its own, so the payload has to carry the RATES and not only the
+  // projections built from them — `project` says nothing through the whole
+  // middle ground where a fleet line still has something to report.
   const am = new RemoteAccountManager();
-  const status = used => ({
+  am.applyStatus({
     switchThreshold: 1,
-    accounts: [remoteAccount('one', 1, { quota: { unified7d: used, unified7dReset: Date.now() + 3 * 24 * HOUR } })],
+    accounts: [remoteAccount('one', 1, {
+      quota: { unified7d: 0.5, unified7dReset: Date.now() + 3 * 24 * HOUR },
+      projection: { buckets: {}, rates: { unified7d: 3e-9 } },
+    })],
   });
-  for (let i = 0; i <= 10; i++) am.applyStatus(status(0.10 + 0.01 * i));
-  assert.ok(am.projection.samples.has('fleet:anthropic:unified7d'));
+  assert.equal(am.rateFor(am.accounts[0], 'unified7d'), 3e-9);
+  // A payload without rates is simply unmeasured, never a fabricated zero.
+  assert.equal(am.rateFor({ projection: { buckets: {} } }, 'unified7d'), null);
+  assert.equal(am.rateFor({ projection: { rates: { unified7d: 0 } } }, 'unified7d'), null);
 });
 
 test('an attached dashboard keeps the server\'s projection switch', () => {

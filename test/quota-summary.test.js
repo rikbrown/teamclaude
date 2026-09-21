@@ -623,18 +623,26 @@ test('routeMembership answers exactly the membership getRoutes resolves', () => 
   assert.deepEqual(shape(am.routeMembership()), shape(am.getRoutes()));
 });
 
-test('the fleet series is sampled over the pool the routes reach', () => {
-  // The projection takes its RATE from this series and its remainder from the
-  // aggregate on screen, so the two have to be the same measurement.
+test("a pool's rate is built over the seats the routes actually reach", () => {
+  // The estimate takes its RATE from the members and its remainder from the
+  // aggregate on screen, so both have to be drawn from the same pool. A seat no
+  // route reaches is in neither.
   const am = new AccountManager([
     oauth('routed', { rateLimitTier: 'default_claude_ai' }),
     oauth('stranded', { rateLimitTier: 'default_claude_max_20x' }),
   ], 1, { routes: [{ name: 'bulk', match: ['claude-haiku-*'], accounts: ['routed'] }] });
-  Object.assign(am.accounts[0].quota, { unified7d: 0.5, unified7dReset: Date.now() + HOUR });
-  Object.assign(am.accounts[1].quota, { unified7d: 0, unified7dReset: Date.now() + HOUR });
+  const now = Date.now();
+  Object.assign(am.accounts[0].quota, { unified7d: 0.5, unified7dReset: now + HOUR });
+  Object.assign(am.accounts[1].quota, { unified7d: 0, unified7dReset: now + HOUR });
 
-  am._recordFleetSamples();
-  const series = am.projection.samples.get('fleet:anthropic:unified7d');
-  // The stranded 20x seat would drag this to 10/21 ≈ 0.024 if it were counted.
-  assert.equal(series.at(-1).u, 0.5);
+  // Both seats burn; only the routed one may reach the figures.
+  const rateFor = (account) => (account.name === 'routed' ? 2e-9 : 9e-9);
+  const [pool] = fleetAggregate(am.accounts, { thresholdFor: () => 1, now, routes: am.getRoutes(), rateFor });
+
+  // The stranded 20x seat would drag utilization to 10/21 ≈ 0.024 and dominate
+  // the rate if it were counted at all.
+  assert.equal(pool.buckets.unified7d.utilization, 0.5);
+  assert.equal(pool.buckets.unified7d.ratedAccounts, 1);
+  assert.ok(Math.abs(pool.buckets.unified7d.ratePerMs - 2e-9) < 1e-18,
+    `ratePerMs was ${pool.buckets.unified7d.ratePerMs}`);
 });

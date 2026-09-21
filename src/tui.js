@@ -13,7 +13,7 @@ import { PROVIDERS, providerOf } from './provider.js';
 import { mintAccountId } from './account-id.js';
 import { formatPercent } from './status-renderer.js';
 import { resolveMaxUsage } from './model.js';
-import { formatProjection, formatEstimate } from './quota-projection.js';
+import { formatProjection, formatEstimate, estimateBurn } from './quota-projection.js';
 import { fleetAggregate, routeHeadroom, routeFamily } from './quota-summary.js';
 /** @typedef {import('./quota-summary.js').FleetBucket} FleetBucket */
 import { parseProxyUrl, proxyToUrl, describeProxy, describeSelfProxy, resolveUpstreamProxy, setUpstreamProxy, getUpstreamProxy } from './upstream-proxy.js';
@@ -2297,7 +2297,10 @@ export class TUI {
     // single number.
     const thFor = (/** @type {string} */ k) => (typeof this.am.thresholdFor === 'function' ? this.am.thresholdFor(k) : this.am.switchThreshold);
     const now = Date.now();
-    const groups = fleetAggregate(this.am.accounts, { thresholdFor: thFor, now, routes });
+    // The pool's burn comes from its members' rates (see aggregateHeadroom), so
+    // the manager's own lookup is handed over rather than a series sampled here.
+    const rateFor = typeof this.am.rateFor === 'function' ? this.am.rateFor.bind(this.am) : null;
+    const groups = fleetAggregate(this.am.accounts, { thresholdFor: thFor, now, routes, rateFor });
 
     // Everything is composed before anything is drawn: the bars share one width
     // across the whole block — so that equal lengths mean equal shares, exactly
@@ -2322,9 +2325,7 @@ export class TUI {
         // falls under the waste floor — which on a healthy fleet left every
         // line blank and made the panel look broken rather than calm. One line
         // per pool is read to plan against, so it answers whenever it can.
-        const est = this.am.projection?.estimate(`fleet:${group.provider}`, bucket, {
-          utilization: value.utilization, resetAt: value.nextResetAt, now,
-        }) || null;
+        const est = estimateBurn(value, now);
         // No bucket label: this line already starts with it.
         const tag = formatEstimate(est);
         entries.push({
@@ -2436,7 +2437,8 @@ export class TUI {
    * @param {number} now
    */
   _routeLines(W, routes, thFor, now) {
-    const entries = routeHeadroom(this.am.accounts, routes, { thresholdFor: thFor, now });
+    const rateFor = typeof this.am.rateFor === 'function' ? this.am.rateFor.bind(this.am) : null;
+    const entries = routeHeadroom(this.am.accounts, routes, { thresholdFor: thFor, now, rateFor });
     if (!entries.length) return [];
     const lines = [fitPhrase([
       `  ${bold('Routes')}   ${dim('what stops each one first')}`,

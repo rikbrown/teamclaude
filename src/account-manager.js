@@ -5,7 +5,7 @@ import { parseCodexQuota, parseCodexPlanType } from './codex-quota.js';
 import { sameIdentity } from './identity.js';
 import { weeklyBucketForModel, modelGlobMatches, modelFamily, gatingUtilization, resolveMaxUsage, WEEKLY_BUCKET_KEYS } from './model.js';
 import { SessionTracker } from './session-tracker.js';
-import { buildQuotaSummary, quotaTier, fleetAggregate } from './quota-summary.js';
+import { buildQuotaSummary, quotaTier } from './quota-summary.js';
 import { QuotaProjection, PROJECTED_BUCKETS } from './quota-projection.js';
 import { ROLLOVER_MIN_JUMP_MS, remapHeld, findHeld, dropHeld, newObservation } from './rollover.js';
 import { decideBand, pressureOf, pressureRank, assertNever } from './band-decision.js';
@@ -2033,59 +2033,17 @@ export class AccountManager {
     for (const bucket of PROJECTED_BUCKETS) {
       if (q[bucket] !== undefined) this.projection.record(account.index, bucket, q[bucket], now);
     }
-    this._recordFleetSamples(now);
   }
 
   /**
-   * Sample each provider pool's aggregate as a series of its own, so the fleet
-   * view gets a TTL on the same terms the rows do.
+   * This account's measured burn for `bucket`, or null when its samples cannot
+   * support one. The fleet aggregate builds a pool's rate out of these.
    *
-   * The aggregate is SAMPLED rather than derived from the per-account rates.
-   * Summing rates would mean carrying a second, parallel notion of burn around
-   * the manager and keeping it in step with this one; feeding the computed
-   * figure back into the same QuotaProjection needs nothing new at all. `record`
-   * keys on `${accountIndex}:${bucket}` by plain concatenation, so a synthetic
-   * `fleet:<provider>` is simply another key and `project()` then answers with
-   * semantics identical to a row's.
-   *
-   * Called from _recordQuotaSamples, so a fleet sample lands on exactly the
-   * cadence an account sample does and the two series are comparable.
-   *
-   * CONSEQUENCE, ACCEPTED. `record` drops its history whenever utilization
-   * falls, because within a window it never does — a drop means the window
-   * rolled. The aggregate can also fall when the POOL changes rather than when
-   * anything was refunded: an account disabled, a seat whose tier stopped
-   * resolving, a member added. That resets the series and the fleet tag goes
-   * quiet for another window's worth of samples. It is the honest reading of a
-   * composition change, and the alternative — extrapolating across a fleet that
-   * is no longer the one measured — is a fabricated rate. A route that stops
-   * reaching a seat is one more composition change, and reads the same way.
-   *
-   * The routing table goes into the aggregate because the series has to be the
-   * one the dashboard draws: the fleet tag is a projection whose RATE comes
-   * from these samples and whose REMAINDER comes from the number on screen, so
-   * a series taken over a wider pool than the bar shows would put one fleet's
-   * burn rate against another fleet's headroom. The attached dashboard samples
-   * the same way (tui-remote.js), so the two dashboards still agree.
-   *
-   * routeMembership() rather than getRoutes(): this runs once per quota update,
-   * on the request path, and getRoutes' eligibility and target lookups refresh
-   * account state as a side effect of being read. See routeMembership.
+   * @param {any} account
+   * @param {string} bucket
    */
-  _recordFleetSamples(now = Date.now()) {
-    const options = { thresholdFor: this.thresholdFor.bind(this), now, routes: this.routeMembership() };
-    for (const group of fleetAggregate(this.accounts, options)) {
-      for (const [bucket, value] of Object.entries(group.buckets)) {
-        // A bucket nothing reports records null, which clears the series — the
-        // same signal a rolled window gives, and for the same reason.
-        //
-        // The optional chain never short-circuits: the constructor sets
-        // `projection` through setProjection. It is written this way because
-        // that indirection is one step more than the type checker follows, and
-        // the strict ratchet counts what it cannot see.
-        this.projection?.record(`fleet:${group.provider}`, bucket, value ? value.utilization : null, now);
-      }
-    }
+  rateFor(account, bucket) {
+    return account == null ? null : this.projection?.rate(account.index, bucket) ?? null;
   }
 
   /** Every bucket's projection for one account, keyed by bucket name. Buckets
@@ -4435,7 +4393,23 @@ export class AccountManager {
         usage: { ...a.usage, byBucket: copyBuckets(a.usage.byBucket) },
         projection: (() => {
           const buckets = this.projectionsFor(a.index);
-          return { headline: this.projection.headline(Object.values(buckets)), buckets };
+          // The raw rates travel too, not just the projections built from them.
+          // An attached dashboard derives each pool's burn from its members'
+          // rates (see aggregateHeadroom) and cannot recover one from a
+          // projection: `project` reports nothing at all through the whole
+          // middle ground where the fleet lines still have something to say.
+          /** @type {Record<string, number>} */
+          const rates = {};
+          for (const b of PROJECTED_BUCKETS) {
+            // Optional chain for the same reason the rest of this file uses one:
+            // `projection` is set through setProjection, which is a step more of
+            // indirection than the checker follows, and the strict ratchet counts
+            // what it cannot see. It never short-circuits in practice.
+            const r = this.projection?.rate(a.index, b);
+            // Absent rather than null: an unmeasured bucket is not a zero burn.
+            if (r != null) rates[b] = r;
+          }
+          return { headline: this.projection.headline(Object.values(buckets)), buckets, rates };
         })(),
         rateLimitedUntil: a.rateLimitedUntil
           ? new Date(a.rateLimitedUntil).toISOString()

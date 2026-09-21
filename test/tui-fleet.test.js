@@ -97,6 +97,27 @@ const layout = (tui, width) => tui._splitLayout(width, tui.am.getRoutes());
 // single-bar row cutoff, a half screen, and wide.
 const WIDTHS = [40, 46, 60, 70, 80, 100, 120, 200];
 
+test('a fleet line carries a TTL estimate once the pool has a burn rate', () => {
+  // The panel reported nothing on a healthy fleet: `project` warns rather than
+  // estimates, so a 5h bucket inside its window and a weekly one under the
+  // waste floor both printed blank. The fleet lines estimate instead.
+  const am = withQuota(new AccountManager(fleetAccounts(), 0.98));
+  const now = Date.now();
+  for (let m = 120; m >= 0; m -= 5) {
+    for (const a of am.accounts) {
+      if (a.quota.unified5h != null) a.quota.unified5h = Math.max(0, a.quota.unified5h - 0.0002 * m);
+      if (a.quota.unified7d != null) a.quota.unified7d = Math.max(0, 0.6 - 0.0004 * m);
+    }
+    am._recordFleetSamples(now - m * 60_000);
+  }
+  for (const a of am.accounts) if (a.quota.unified7d != null) a.quota.unified7d = 0.6;
+
+  const { fleet } = renderFleet(tuiFor(am), 200);
+  const ttl = fleet.filter(l => /TTL /.test(l));
+  assert.ok(ttl.length > 0, `expected a TTL on some fleet line, got:\n${fleet.join('\n')}`);
+  assert.ok(ttl.some(l => /\bWk\b/.test(l)), 'the shared weekly line should carry one');
+});
+
 test('[f] cycles split → full → off → split', () => {
   const tui = tuiFor(withQuota(new AccountManager(fleetAccounts(), 0.98)));
   assert.equal(tui.fleetMode, 'split', 'the split is the default');

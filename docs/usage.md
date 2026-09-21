@@ -109,7 +109,7 @@ Past a handful of accounts the rows answer "what does each seat hold" when the q
 
 ```text
   Fleet — Anthropic   9 seats · 7 counted
-    Ses  ███████░░░░░░░░░░░░░░░░░░░░░  11% · 4h12m  TTL 4h12m
+    Ses  ███████░░░░░░░░░░░░░░░░░░░░░  11% · 4h12m  TTL 13h49m
     Wk   ████████████████████░░░░░░░░  68% · 1d22h
     F7   ██████████████████████████░░  91% · 13m
   Fleet — Codex   2 seats
@@ -129,7 +129,9 @@ Five things the block means, none of them obvious from the bars alone:
 - **A seat no [route](routing.md#model-routes) reaches is excluded too**, and counted in the same way. Quota nothing will send traffic to is not headroom, so a fleet whose routes name five of nine seats is measured on five. This errs towards saying you have less than you do: a model that matches no route at all still falls back to plain rotation, so such a seat does take unrouted traffic. Being surprised by exhaustion is the more expensive mistake. Where *no* route mentions a pool at all — the usual case for Codex, since routes are written about Claude models — the routing table is saying nothing about that pool rather than refusing it, and every seat in it counts.
 - **Anthropic and Codex never mix.** They are separate subscriptions metering unrelated windows, so they get a block each; one averaged number would be true of neither.
 
-The `·` tail inside each bar is that bucket's soonest reset across the counted seats. The tag beside it is the same [burn-rate projection](quota.md#burn-rate-projection) the account rows carry, applied to the pool: it needs about 90 minutes of samples before it appears, so it stays quiet for a while after a restart rather than extrapolating from two readings. Enabling or disabling an account changes what the pool *is*, which resets that history too — and so does a route that stops reaching a seat.
+The `·` tail inside each bar is that bucket's soonest reset across the counted seats. The `TTL` beside it is how long the pool lasts at its measured burn rate, and it is an *estimate*, not the warning an account row carries. A row tag speaks only when a bucket will stop you before it resets, or when it will expire wasting more than the floor; applied to a healthy pool that left every fleet line blank, which reads as broken rather than calm. A fleet line answers whenever a rate exists, and says which side of the reset it falls on with colour: yellow when the pool runs dry before it resets, grey when it lasts past it.
+
+It draws on the same [burn-rate projection](quota.md#burn-rate-projection) sampler, so it needs about 90 minutes of samples before it appears and stays quiet after a restart rather than extrapolating from two readings. Enabling or disabling an account changes what the pool *is*, which resets that history too — and so does a route that stops reaching a seat.
 
 **The route lines** answer a question the pools cannot. A route has no quota of its own: it spends its members' buckets, so a route holding three of nine seats is stopped by those three whatever the rest of the fleet has left. Each line names the one bucket nearest its ceiling — the constraint that will refuse the route's traffic first — with the percentage, that bucket's soonest reset and how many seats it is spread over. A Fable or Sonnet route is measured on its own weekly bucket **and** the shared weekly and session windows, because family spend meters into the shared weekly too: a route can be well under its `F7` cap and stopped by `Wk` all the same.
 

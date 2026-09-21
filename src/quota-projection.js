@@ -171,6 +171,43 @@ export class QuotaProjection {
     return { bucket, kind: 'surplus', unspent, resetInMs };
   }
 
+  /**
+   * How long this bucket lasts at the measured rate — whatever that means for
+   * the reset.
+   *
+   * `project` is a WARNING. It speaks when the window will stop you, or when it
+   * will expire with enough left to be worth regretting, and stays silent in
+   * between. That is right for an account row, where a tag per bucket per seat
+   * would be a wall of text nobody reads, and it is why a healthy fleet shows
+   * nothing: a 5h bucket is not a weekly one, so it reports only a deficit, and
+   * a pool that will spend its week almost exactly falls under `wasteFloor` and
+   * says nothing at all.
+   *
+   * A fleet line is one line for a whole pool and is read to plan against, so
+   * the useful answer there is the estimate itself — "at this burn the pool
+   * lasts 2d4h" — reported whenever a rate exists rather than only at the
+   * extremes. `dry` says which side of the reset it lands on, so a caller can
+   * colour the difference without measuring it again.
+   *
+   * @param {number|string} accountIndex
+   * @param {string} bucket
+   * @param {{utilization?: number|null, resetAt?: number|null, now?: number}} [sample]
+   * @returns {{bucket: string, rate: number, exhaustsInMs: number,
+   *   resetInMs: number|null, dry: boolean} | null}
+   */
+  estimate(accountIndex, bucket, { utilization, resetAt, now = Date.now() } = {}) {
+    if (!this.enabled) return null;
+    if (utilization == null) return null;
+    const rate = this.rate(accountIndex, bucket);
+    if (rate == null) return null;
+    // Clamped because upstream keeps counting past a spent window (104% arrives
+    // as 1.04), which would otherwise estimate a negative time to empty.
+    const remaining = Math.max(0, 1 - utilization);
+    const resetInMs = resetAt == null ? null : resetAt - now;
+    const exhaustsInMs = remaining / rate;
+    return { bucket, rate, exhaustsInMs, resetInMs, dry: resetInMs != null && exhaustsInMs <= resetInMs };
+  }
+
   /** Projections in display order: anything that will stop you comes before
    *  anything that will merely expire, soonest and largest first. */
   rank(projections) {
@@ -204,6 +241,20 @@ export function formatProjection(projection, { withLabel = true } = {}) {
   const label = withLabel ? `${BUCKET_LABELS[projection.bucket] || projection.bucket} ` : '';
   if (projection.kind === 'deficit') return `${label}TTL ${formatDuration(projection.exhaustsInMs)}`;
   return `${label}${Math.round(projection.unspent * 100)}% unspent`;
+}
+
+/**
+ * Render an estimate as a fleet tag, e.g. "TTL 2d4h".
+ *
+ * Spelled the way a deficit is, because it measures the same thing — time until
+ * the bucket is spent. What the row tag's TTL additionally implies, that the
+ * window will stop you before it resets, is carried by `dry` and drawn as colour
+ * rather than said again in the text.
+ *
+ * @param {{exhaustsInMs: number}|null} estimate
+ */
+export function formatEstimate(estimate) {
+  return estimate ? `TTL ${formatDuration(estimate.exhaustsInMs)}` : null;
 }
 
 function formatDuration(ms) {

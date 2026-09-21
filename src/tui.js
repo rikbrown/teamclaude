@@ -14,7 +14,7 @@ import { mintAccountId } from './account-id.js';
 import { ACCOUNT_REFUSAL_CODES } from './account-refusal.js';
 import { formatPercent, heldResetCredits, showSessionRow, showWeeklyRow, unavailableLine } from './status-renderer.js';
 import { resolveMaxUsage, resolveMaxSpendMinor, switchThresholdDiffs, modelLabel, EFFORT_SEP } from './model.js';
-import { formatProjection } from './quota-projection.js';
+import { formatProjection, formatEstimate } from './quota-projection.js';
 import { fleetAggregate, routeHeadroom, routeFamily } from './quota-summary.js';
 /** @typedef {import('./quota-summary.js').FleetBucket} FleetBucket */
 import { parseProxyUrl, proxyToUrl, describeProxy, describeSelfProxy, resolveUpstreamProxy, setUpstreamProxy, getUpstreamProxy, localListener, isSelfProxy } from './upstream-proxy.js';
@@ -3453,17 +3453,23 @@ export class TUI {
         // estimate. It needs ~90 minutes of samples before it says anything,
         // the same as a row tag does, and it stays quiet after a restart
         // instead of extrapolating from two readings.
-        const projected = this.am.projection?.project(`fleet:${group.provider}`, bucket, {
+        // An ESTIMATE here, not the row's warning. `project` is deliberately
+        // quiet in the middle ground — a 5h bucket is not weekly so it reports
+        // only a deficit, and a pool that will spend its week almost exactly
+        // falls under the waste floor — which on a healthy fleet left every
+        // line blank and made the panel look broken rather than calm. One line
+        // per pool is read to plan against, so it answers whenever it can.
+        const est = this.am.projection?.estimate(`fleet:${group.provider}`, bucket, {
           utilization: value.utilization, resetAt: value.nextResetAt, now,
         }) || null;
-        // Without the bucket label: this line already starts with it.
-        const tag = formatProjection(projected, { withLabel: false });
+        // No bucket label: this line already starts with it.
+        const tag = formatEstimate(est);
         entries.push({
           bucket,
           value,
-          // Colored like a row's: a deficit will stop the fleet, a surplus is
-          // a note about waste.
-          tag: tag ? (projected?.kind === 'deficit' ? yellow(tag) : gray(tag)) : '',
+          // The colour carries what the text no longer says: yellow when the
+          // pool runs dry before it resets, gray when it lasts past it.
+          tag: tag ? (est?.dry ? yellow(tag) : gray(tag)) : '',
         });
       }
       return { group, entries };

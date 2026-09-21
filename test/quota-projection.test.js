@@ -1,11 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { QuotaProjection, formatProjection } from '../src/quota-projection.js';
+import { QuotaProjection, formatProjection, formatEstimate } from '../src/quota-projection.js';
 import { AccountManager } from '../src/account-manager.js';
 import { TUI } from '../src/tui.js';
 
 const MIN = 60_000;
 const T0 = 1_700_000_000_000;
+const HOURS_2 = 2 * 60 * MIN;
 
 // Feed `steps` evenly spaced samples rising by `perStep` utilization each.
 function burn(qp, bucket, { from = 0, perStep, steps, everyMs = MIN, start = T0, account = 0 }) {
@@ -30,6 +31,49 @@ test('computes a rate once the samples span the minimum interval', () => {
   assert.ok(rate != null, 'expected a rate');
   // Per millisecond, so 0.01 / 60000.
   assert.ok(Math.abs(rate - 0.01 / MIN) < 1e-12, `rate was ${rate}`);
+});
+
+test('estimate answers where project deliberately stays silent', () => {
+  // The case that made the fleet panel look broken: a 5h bucket is not weekly,
+  // so `project` reports only a deficit and a pool comfortably inside its
+  // window got no tag at all. The estimate is the number the operator wanted.
+  const qp = new QuotaProjection();
+  const end = burn(qp, 'unified5h', { from: 0.2, perStep: 0.002, steps: 10 });
+  const sample = { utilization: 0.4, resetAt: end + 60 * MIN, now: end };
+
+  assert.equal(qp.project(0, 'unified5h', sample), null, 'project is silent here by design');
+
+  const est = qp.estimate(0, 'unified5h', sample);
+  assert.ok(est, 'estimate should still answer');
+  // 60% left at 0.002 per minute — 300 minutes.
+  assert.ok(Math.abs(est.exhaustsInMs - 300 * MIN) < MIN, `was ${est.exhaustsInMs}`);
+  assert.equal(est.dry, false, 'it outlasts the reset, so it is not running dry');
+  assert.equal(formatEstimate(est), 'TTL 5h0m');
+});
+
+test('estimate marks a pool that runs dry before its reset', () => {
+  const qp = new QuotaProjection();
+  const end = burn(qp, 'unified7d', { from: 0.5, perStep: 0.01, steps: 10 });
+  // 10% left at 0.01/min is 10 minutes; the window has an hour to run.
+  const est = qp.estimate(0, 'unified7d', { utilization: 0.9, resetAt: end + 60 * MIN, now: end });
+  assert.equal(est.dry, true);
+  assert.equal(formatEstimate(est), 'TTL 10m');
+});
+
+test('estimate reports nothing without a measurable rate', () => {
+  const qp = new QuotaProjection();
+  burn(qp, 'unified7d', { from: 0.5, perStep: 0, steps: 10 });
+  assert.equal(qp.estimate(0, 'unified7d', { utilization: 0.5, resetAt: T0 + HOURS_2, now: T0 }), null);
+  assert.equal(formatEstimate(null), null);
+});
+
+test('a spent window estimates zero rather than a negative time', () => {
+  // Upstream keeps counting past a spent window, so 1.04 arrives as a reading.
+  const qp = new QuotaProjection();
+  const end = burn(qp, 'unified7d', { from: 0.9, perStep: 0.01, steps: 10 });
+  const est = qp.estimate(0, 'unified7d', { utilization: 1.04, resetAt: end + 60 * MIN, now: end });
+  assert.equal(est.exhaustsInMs, 0);
+  assert.equal(est.dry, true);
 });
 
 test('a flat series reports no rate, whatever the reading happens to be', () => {

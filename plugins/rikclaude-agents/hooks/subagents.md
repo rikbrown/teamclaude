@@ -5,8 +5,8 @@ From the `rikclaude-agents` plugin. Its agents are namespaced, so a dispatch alw
 
 - These rules are for the orchestrator, the session the user talks to. If you are a subagent, do
   the work in your brief. Your agent prompt says whether you may delegate.
-- The fleet serves four models beyond the Claude ones: `gpt-5.6-{sol,terra,luna}` and
-  `gpt-6-astra`. Reach them through the Agent tool. Never use the `codex` CLI.
+- The fleet serves four models beyond the Claude ones: `gpt-5.6-terra` and
+  `gpt-6-{astra,sol,luna}`. Reach them through the Agent tool. Never use the `codex` CLI.
 - Always launch a model through its effort-named agent, e.g. `rikclaude-agents:opus-high`.
   Never dispatch a model directly: a direct dispatch silently inherits this session's effort. Each
   agent's description says when to pick it.
@@ -18,7 +18,7 @@ From the `rikclaude-agents` plugin. Its agents are namespaced, so a dispatch alw
   `rikclaude-agents:fable-*` and `rikclaude-agents:gpt-6-astra-*` are equal sidekicks for
   technical design and adversarial reviews of complex code. They bring different opinions, so a
   review that matters gets both.
-  `rikclaude-agents:gpt-5.6-sol-medium` touches up the prose in docs without being asked, and
+  `rikclaude-agents:gpt-6-sol-medium` touches up the prose in docs without being asked, and
   `rikclaude-agents:gpt-5.6-terra-medium` does the same for comments and messages. If you are
   GPT-6 Astra, use Fable as your partner instead.
 - Batch reviews. Eight tasks, simple ones included, are a few logical review rounds — not eight

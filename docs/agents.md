@@ -6,7 +6,7 @@ plus the routing policy that goes with them. Install it and a session can say "d
 time.
 
 The models it names are the ones a TeamClaude fleet serves — `fable[1m]` and `claude-opus-5-5[1m]` for Claude,
-`gpt-6-astra` and the `gpt-5.6-*` family through the [Codex sidecar](openai.md). On a plain Claude
+`gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna` and `gpt-5.6-terra` through the [Codex sidecar](openai.md). On a plain Claude
 Code install, with no fleet behind it, the GPT agents resolve to model ids nothing can answer.
 
 ## Why an agent definition and not the `model` parameter
@@ -68,9 +68,9 @@ at the moment it picks an agent, and they say more than this table does.
 | `fable[1m]` | `fable-medium`, `fable-high`, `fable-xhigh` | Engineering sidekick on par with GPT-6 Astra: full-branch, architectural and design review, `xhigh` for the most challenging. Not code |
 | `claude-opus-5-5[1m]` | `opus-high`, `opus-xhigh` | The coding: well-defined work at `high`, larger or ambiguous work at `xhigh`. Also fact-finding |
 | `gpt-6-astra` | `gpt-6-astra-medium`, `gpt-6-astra-high` | Engineering sidekick on par with Fable: full-branch, architectural and design review |
-| `gpt-5.6-sol` | `gpt-5.6-sol-medium`, `gpt-5.6-sol-xhigh` | Prose refinement of docs; light or interim code review |
+| `gpt-6-sol` | `gpt-6-sol-medium`, `gpt-6-sol-xhigh` | Prose refinement of docs; light or interim code review |
 | `gpt-5.6-terra` | `gpt-5.6-terra-medium` | Prose refinement of comments and messages |
-| `gpt-5.6-luna` | `gpt-5.6-luna-medium` | Haiku-level tasks |
+| `gpt-6-luna` | `gpt-6-luna-medium` | Haiku-level tasks |
 
 Each prompt also carries a **nesting rule** — whether that agent may launch agents of its own, only
 when its brief says so, or not at all. Without it, a subagent that reaches the routing policy takes

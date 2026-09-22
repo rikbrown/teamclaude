@@ -50,18 +50,25 @@ const AGENT_PREFIX = 'rikclaude-agents:';
 // model id the frontmatter carries, which has to match a `customModels` row (or
 // be a built-in alias) for the dispatch to reach anything.
 //
+// `model` overrides that derived id, to pin a version the name does not spell —
+// `opus-high` runs `claude-opus-5-5[1m]`, not whatever the `opus` alias points at.
+// It also opts into 1M: a bare id or alias runs at 200K, only the `[1m]` spelling
+// gets the full window, which is why the Fable rows pin `fable[1m]`.
+// The frontmatter emits it unquoted: the parser takes the rest of the line, so
+// quotes would come back as part of the id.
+//
 // `nesting` is one of none | brief | own — see the head comment.
 //
 // Commented-out rows are efforts that exist but are not worth listing: every row
 // costs the orchestrator description text at pick time, so the roster stays the
 // set somebody would actually choose between.
-/** @type {{ name: string, label: string, when: string, nesting: 'none'|'brief'|'own' }[]} */
+/** @type {{ name: string, label: string, model?: string, when: string, nesting: 'none'|'brief'|'own' }[]} */
 const AGENTS = [
-  { name: 'fable-medium', label: 'Fable', nesting: 'brief', when: 'Default for larger, complex or ambiguous coding tasks.' },
-  { name: 'fable-high', label: 'Fable', nesting: 'brief', when: `Non-coding work only (design, research, planning). For coding, use ${AGENT_PREFIX}fable-medium.` },
-  { name: 'fable-xhigh', label: 'Fable', nesting: 'brief', when: `Non-coding work only (design, research, planning). For coding, use ${AGENT_PREFIX}fable-medium.` },
-  { name: 'opus-high', label: 'Opus', nesting: 'brief', when: 'Coding tasks that are fully defined and pre-planned, e.g. narrow fixes from PR feedback. Also the default for fact-finding.' },
-  { name: 'opus-xhigh', label: 'Opus', nesting: 'brief', when: 'Pre-planned coding tasks that still have some ambiguity.' },
+  { name: 'fable-medium', label: 'Fable', model: 'fable[1m]', nesting: 'none', when: `Engineering sidekick, on par with GPT-6 Astra. Full-branch, architectural or technical design review. Not for coding; use ${AGENT_PREFIX}opus-high or ${AGENT_PREFIX}opus-xhigh.` },
+  { name: 'fable-high', label: 'Fable', model: 'fable[1m]', nesting: 'own', when: `Engineering sidekick, on par with GPT-6 Astra. Full-branch, architectural or technical design review for only the most complex or critical challenges. Not for coding; use ${AGENT_PREFIX}opus-high or ${AGENT_PREFIX}opus-xhigh.` },
+  { name: 'fable-xhigh', label: 'Fable', model: 'fable[1m]', nesting: 'own', when: `Engineering sidekick, on par with GPT-6 Astra. Adversarial review for the most challenging reviews only, where ${AGENT_PREFIX}fable-high is not enough. Not for coding; use ${AGENT_PREFIX}opus-high or ${AGENT_PREFIX}opus-xhigh.` },
+  { name: 'opus-high', label: 'Opus 5.5', model: 'claude-opus-5-5[1m]', nesting: 'brief', when: 'Default for coding tasks that are well defined, e.g. narrow fixes from PR feedback. Also the default for fact-finding.' },
+  { name: 'opus-xhigh', label: 'Opus 5.5', model: 'claude-opus-5-5[1m]', nesting: 'brief', when: 'Default for larger, complex or ambiguous coding tasks.' },
   { name: 'gpt-6-astra-medium', label: 'GPT-6 Astra', nesting: 'none', when: 'Engineering sidekick, on par with Fable. Full-branch, architectural or technical design review.' },
   { name: 'gpt-6-astra-high', label: 'GPT-6 Astra', nesting: 'own', when: 'Engineering sidekick, on par with Fable. Full-branch, architectural or technical design review for only the most complex or critical challenges.' },
   // { name: 'gpt-6-astra-xhigh', label: 'GPT-6 Astra', nesting: 'own', when: 'Engineering sidekick, on par with Fable. Full-branch, architectural or technical design review for only the most complex or critical challenges.' },
@@ -91,8 +98,7 @@ function nestingParagraph(nesting) {
 }
 
 /** One agent file, frontmatter and prompt. */
-function render({ name, label, when, nesting }) {
-  const model = name.slice(0, name.lastIndexOf('-'));
+function render({ name, label, model = name.slice(0, name.lastIndexOf('-')), when, nesting }) {
   const effort = name.slice(name.lastIndexOf('-') + 1);
   return `---
 name: ${name}

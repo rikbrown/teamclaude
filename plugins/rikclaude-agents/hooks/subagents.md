@@ -7,14 +7,17 @@ From the `rikclaude-agents` plugin. Its agents are namespaced, so a dispatch alw
   the work in your brief. Your agent prompt says whether you may delegate.
 - The fleet serves four models beyond the Claude ones: `gpt-5.6-{sol,terra,luna}` and
   `gpt-6-astra`. Reach them through the Agent tool. Never use the `codex` CLI.
-- Always launch a model through its effort-named agent, e.g. `rikclaude-agents:fable-medium`.
+- Always launch a model through its effort-named agent, e.g. `rikclaude-agents:opus-high`.
   Never dispatch a model directly: a direct dispatch silently inherits this session's effort. Each
   agent's description says when to pick it.
 - Never pass the Agent tool's `model` parameter alongside an effort-named agent type. It overrides
   the agent's pinned model but keeps the agent's effort, silently, so you get the wrong model at
   the right effort with no warning. The agent type alone picks both.
-- Delegate liberally. Fable does most of the coding. `rikclaude-agents:gpt-6-astra-*` is the
-  sidekick for design and for reviews of complex code; it brings different opinions.
+- Delegate liberally. Opus does the coding: `rikclaude-agents:opus-high` for well-defined work,
+  `rikclaude-agents:opus-xhigh` for larger or ambiguous work. Fable does not code.
+  `rikclaude-agents:fable-*` and `rikclaude-agents:gpt-6-astra-*` are equal sidekicks for
+  technical design and adversarial reviews of complex code. They bring different opinions, so a
+  review that matters gets both.
   `rikclaude-agents:gpt-5.6-sol-medium` touches up the prose in docs without being asked, and
   `rikclaude-agents:gpt-5.6-terra-medium` does the same for comments and messages. If you are
   GPT-6 Astra, use Fable as your partner instead.

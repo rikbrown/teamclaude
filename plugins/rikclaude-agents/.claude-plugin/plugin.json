@@ -1,7 +1,7 @@
 {
   "name": "rikclaude-agents",
   "displayName": "RikClaude Agents",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Effort-pinned subagents for a TeamClaude fleet: one named agent per model and effort level, plus the routing policy that goes with them.",
   "author": {
     "name": "Rik Brown",

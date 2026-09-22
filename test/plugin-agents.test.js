@@ -114,8 +114,13 @@ for (const file of agentFiles) {
     // `: ` would close the YAML key early and take the rest of the frontmatter
     // with it.
     assert.ok(!front.description.includes(': '), "description contains ': '");
-    assert.ok(front.name.startsWith(`${front.model}-`), 'name must be <model>-<effort>');
-    assert.equal(front.name, `${front.model}-${front.effort}`);
+    assert.ok(front.name.endsWith(`-${front.effort}`), 'name must be <model>-<effort>');
+    // The name spells the model family; the frontmatter may pin a version of it
+    // and the 1M window (`opus-high` → `claude-opus-5-5[1m]`, `fable-high` → `fable[1m]`).
+    const family = front.name.slice(0, -`-${front.effort}`.length);
+    const model = front.model.replace(/\[1m\]$/, '');
+    assert.ok(model === family || model.startsWith(`claude-${family}-`), `model ${front.model} does not match name ${front.name}`);
+    assert.ok(!/["']/.test(front.model), 'model must be unquoted');
   });
 }
 

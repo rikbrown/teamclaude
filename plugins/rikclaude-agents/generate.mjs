@@ -72,10 +72,10 @@ const AGENTS = [
   { name: 'gpt-6-astra-medium', label: 'GPT-6 Astra', nesting: 'none', when: 'Engineering sidekick, on par with Fable. Full-branch, architectural or technical design review.' },
   { name: 'gpt-6-astra-high', label: 'GPT-6 Astra', nesting: 'own', when: 'Engineering sidekick, on par with Fable. Full-branch, architectural or technical design review for only the most complex or critical challenges.' },
   // { name: 'gpt-6-astra-xhigh', label: 'GPT-6 Astra', nesting: 'own', when: 'Engineering sidekick, on par with Fable. Full-branch, architectural or technical design review for only the most complex or critical challenges.' },
-  { name: 'gpt-5.6-sol-medium', label: 'GPT-5.6 Sol', nesting: 'none', when: 'Prose refinement of docs. Weak at coding. Skip prose refinement if Astra already rewrote most of a doc in its review pass.' },
-  { name: 'gpt-5.6-sol-xhigh', label: 'GPT-5.6 Sol', nesting: 'none', when: `Interim or light review of code. Use a ${AGENT_PREFIX}gpt-6-astra-* agent if architectural decisions are needed. Weak at coding.` },
-  // { name: 'gpt-5.6-sol-high', label: 'GPT-5.6 Sol', nesting: 'none', when: `Use only when the user names it; for prose, prefer ${AGENT_PREFIX}gpt-5.6-sol-medium. Weak at coding.` },
-  { name: 'gpt-5.6-luna-medium', label: 'GPT-5.6 Luna', nesting: 'none', when: 'Haiku-level tasks only. Weak at coding.' },
+  { name: 'gpt-6-sol-medium', label: 'GPT-6 Sol', nesting: 'none', when: 'Prose refinement of docs. Weak at coding. Skip prose refinement if Astra already rewrote most of a doc in its review pass.' },
+  { name: 'gpt-6-sol-xhigh', label: 'GPT-6 Sol', nesting: 'none', when: `Interim or light review of code. Use a ${AGENT_PREFIX}gpt-6-astra-* agent if architectural decisions are needed. Weak at coding.` },
+  // { name: 'gpt-6-sol-high', label: 'GPT-6 Sol', nesting: 'none', when: `Use only when the user names it; for prose, prefer ${AGENT_PREFIX}gpt-6-sol-medium. Weak at coding.` },
+  { name: 'gpt-6-luna-medium', label: 'GPT-6 Luna', nesting: 'none', when: 'Haiku-level tasks only. Weak at coding.' },
   { name: 'gpt-5.6-terra-medium', label: 'GPT-5.6 Terra', nesting: 'none', when: 'Prose refinement of comments and messages. Use freely without asking for regular touch up. Weak at coding.' },
 ];
 

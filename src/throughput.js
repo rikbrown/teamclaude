@@ -259,7 +259,7 @@ export function niceCeil(v) {
 
 const mod = (/** @type {number} */ x, /** @type {number} */ n) => ((x % n) + n) % n;
 
-/** @typedef {{ chars: number, firstAt: number, lastAt: number, model: string|null }} Stream */
+/** @typedef {{ chars: number, firstAt: number, lastAt: number, model: string|null, counted: boolean }} Stream */
 
 /**
  * The fleet's output rate: tokens generated across every request in the last
@@ -282,6 +282,11 @@ const mod = (/** @type {number} */ x, /** @type {number} */ n) => ((x % n) + n) 
  *
  * Generating time runs from the stream's first output event to now, not to its
  * latest one: hidden thinking sends nothing while it thinks.
+ *
+ * A stream can be followed without being counted (`counted` false): its own
+ * live estimate is kept, but it adds nothing to the fleet's reading, books
+ * nothing when it ends and teaches its model nothing. The TUI uses that for
+ * the second leg of one generation (see TUI._markLeg).
  */
 export class ThroughputMeter {
   /** @param {{ now?: () => number, windowSec?: number, ringSec?: number }} [opts] */
@@ -305,22 +310,24 @@ export class ThroughputMeter {
 
   /**
    * Output streamed for request `id`: `chars` of text at `at`, from `model`.
-   * The first call starts the stream's generating time.
-   * @param {unknown} id @param {number} chars @param {number} at @param {string|null} [model]
+   * The first call starts the stream's generating time. `counted` false follows
+   * the stream for its own estimate only (see the class comment).
+   * @param {unknown} id @param {number} chars @param {number} at @param {string|null} [model] @param {boolean} [counted]
    */
-  progress(id, chars, at, model = null) {
+  progress(id, chars, at, model = null, counted = true) {
     const t = time(at);
     if (t === null) return;
     const n = typeof chars === 'number' && Number.isFinite(chars) && chars > 0 ? chars : 0;
     let s = this.streams.get(id);
     if (!s) {
       if (this.streams.size >= MAX_STREAMS) this.streams.delete(this.streams.keys().next().value);
-      s = { chars: 0, firstAt: t, lastAt: t, model: null };
+      s = { chars: 0, firstAt: t, lastAt: t, model: null, counted: true };
       this.streams.set(id, s);
     }
     s.chars += n;
     if (t > s.lastAt) s.lastAt = t;
     if (model) s.model = model;
+    s.counted = counted !== false;
   }
 
   /**
@@ -333,12 +340,16 @@ export class ThroughputMeter {
    * part of its estimate it can vouch for, its visible text, and not the part
    * that was a guess from its model's pace.
    *
+   * A request that is not counted (`counted` false, here or on its stream)
+   * books nothing and teaches nothing: it is only forgotten.
+   *
    * @param {unknown} id
-   * @param {{ outputTokens?: number|null, firstAt?: number|null, lastAt?: number|null, dispatchedAt?: number|null, endedAt?: number|null, model?: string|null }} [r]
+   * @param {{ outputTokens?: number|null, firstAt?: number|null, lastAt?: number|null, dispatchedAt?: number|null, endedAt?: number|null, model?: string|null, counted?: boolean }} [r]
    */
-  finish(id, { outputTokens = null, firstAt = null, lastAt = null, dispatchedAt = null, endedAt = null, model = null } = {}) {
+  finish(id, { outputTokens = null, firstAt = null, lastAt = null, dispatchedAt = null, endedAt = null, model = null, counted = true } = {}) {
     const s = this.streams.get(id);
     this.streams.delete(id);
+    if (counted === false || s?.counted === false) return;
     const end = time(endedAt);
     if (end !== null) this._observe(end);
     const n = tokens(outputTokens);
@@ -402,6 +413,7 @@ export class ThroughputMeter {
     sum += this.ring[mod(sec - w, n)] * (1 - into);
     const from = t - w * 1000;
     for (const s of this.streams.values()) {
+      if (!s.counted) continue;
       const { est, genMs } = this._estimate(s, t);
       if (!est) continue;
       sum += genMs > 0 ? est * (Math.min(genMs, t - from) / genMs) : est;
@@ -410,11 +422,13 @@ export class ThroughputMeter {
     return Number.isFinite(r) && r > 0 ? r : 0;
   }
 
-  /** Whether the reading is anything but a settled zero: a stream in flight, or
-   *  tokens still in the window. The TUI keeps its fast tick for exactly as long.
+  /** Whether the reading is anything but a settled zero: a counted stream in
+   *  flight, or tokens still in the window. The TUI keeps its fast tick for
+   *  exactly as long.
    *  @param {number} [at] */
   recent(at = this.now()) {
-    return this.streams.size > 0 || this.rate(at) > 0;
+    for (const s of this.streams.values()) if (s.counted) return true;
+    return this.rate(at) > 0;
   }
 
   /**

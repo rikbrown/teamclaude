@@ -4,7 +4,7 @@ One subagent per model **and effort level**, so a dispatch pins both. The Agent 
 parameter is an alias enum with no effort control, so dispatching a model directly inherits
 whatever effort the parent session happens to run at. Only an agent definition can pin the pair.
 
-The agents name models a [TeamClaude](../../README.md) fleet serves — `fable`, `opus`, and the
+The agents name models a [TeamClaude](../../README.md) fleet serves — `fable`, `opus`, `sonnet`, and the
 `gpt-*` ids a [Codex sidecar](../../docs/openai.md) answers. They resolve to nothing on a plain
 Claude Code install.
 

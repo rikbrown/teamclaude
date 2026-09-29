@@ -4257,7 +4257,12 @@ export function rewriteModel(body, modelMap) {
 // Rate-limit telemetry we pass to AccountManager.updateQuota: Anthropic's
 // `anthropic-ratelimit-*` family, plus the OpenAI/Codex `x-codex-*` family a
 // translating sidecar may forward from the ChatGPT backend. Exported for tests.
+/**
+ * @param {Headers|Map<string, string>} headers
+ * @returns {Record<string, string>}
+ */
 export function collectRateLimitHeaders(headers) {
+  /** @type {Record<string, string>} */
   const out = {};
   for (const [key, value] of headers.entries()) {
     if (key.startsWith('anthropic-ratelimit-') || key.startsWith('x-codex-')) out[key] = value;
@@ -4265,13 +4270,6 @@ export function collectRateLimitHeaders(headers) {
   return out;
 }
 
-// Durable Codex quota exhaustion: either subscription window (primary ≈ 5h,
-// secondary ≈ weekly) reports fully spent. Like a unified "rejected" status,
-// retrying the same account is futile until the window resets. Exported for tests.
-export function codexQuotaRejected(rl) {
-  return parseFloat(rl['x-codex-primary-used-percent']) >= 100
-    || parseFloat(rl['x-codex-secondary-used-percent']) >= 100;
-}
 
 /**
  * The resets that are actually holding `account` back, each read off the window

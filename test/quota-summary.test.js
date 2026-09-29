@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { AccountManager } from '../src/account-manager.js';
-import { fleetAggregate } from '../src/quota-summary.js';
+import { fleetAggregate, routeHeadroom, routeFamily } from '../src/quota-summary.js';
 
 function oauth(name, tier = {}) {
   return { name, type: 'oauth', accessToken: `token-${name}`, ...tier };
@@ -369,4 +369,272 @@ test('the status payload carries each account tier so a remote view can weigh it
   ], 0.98);
 
   assert.deepEqual(am.getStatus().accounts.map(a => a.tier.weight), [20, null]);
+});
+
+// ── Routing and the fleet ────────────────────────────────────────────────────
+//
+// A seat no route will send traffic to holds quota nothing will spend, which is
+// the disabled-seat error one step removed. These pin the rule and the two ways
+// it deliberately does NOT fire: no routing table at all, and a pool the routing
+// table says nothing about.
+
+/** The resolved shape getRoutes() publishes: membership already worked out. */
+const route = (name, names, over = {}) => ({
+  name, match: [`${name}-*`], accounts: names.map(n => ({ name: n, provider: 'anthropic', eligible: true })), ...over,
+});
+
+test('a seat no route reaches is out of the figures and still in the tally', () => {
+  const accounts = [
+    seat('routed', { rateLimitTier: 'default_claude_ai', quota: { unified7d: 0.5 } }),
+    seat('stranded', { rateLimitTier: 'default_claude_max_20x', quota: { unified7d: 0 } }),
+  ];
+  const groups = fleetAggregate(accounts, {
+    thresholdFor: () => 1, now: NOW, routes: [route('bulk', ['routed'])],
+  });
+  const anthropic = pool(groups, 'anthropic');
+
+  // The stranded 20x seat would otherwise hold twenty of the pool's twenty-one
+  // units of capacity and report the fleet nearly untouched.
+  assert.equal(anthropic.total, 2, 'it is still a seat, and the tally says so');
+  assert.equal(anthropic.counted, 1);
+  assert.equal(anthropic.buckets.unified7d.capacityWeight, 1);
+  assert.equal(anthropic.buckets.unified7d.utilization, 0.5);
+});
+
+test('with no routing table every seat counts', () => {
+  const accounts = [
+    seat('a', { rateLimitTier: 'default_claude_ai', quota: { unified7d: 0.5 } }),
+    seat('b', { rateLimitTier: 'default_claude_ai', quota: { unified7d: 0.5 } }),
+  ];
+  // Absent, empty, and a table whose routes resolve to nobody: three ways of
+  // saying nothing about routing, and none of them says "no seat is reachable".
+  for (const routes of [undefined, null, [], [route('empty', [])]]) {
+    const anthropic = pool(fleetAggregate(accounts, { thresholdFor: () => 1, now: NOW, routes }), 'anthropic');
+    assert.equal(anthropic.counted, 2, `routes=${JSON.stringify(routes)}`);
+    assert.equal(anthropic.buckets.unified7d.capacityWeight, 2);
+  }
+});
+
+test('a pool no route mentions is left alone rather than emptied', () => {
+  // Routes are written about Claude models, and a route that lists no accounts
+  // resolves to the asking provider's own pool — so an ordinary routing table
+  // names no Codex seat at all. Read fleet-wide that emptied the whole Codex
+  // block the moment one route existed.
+  const groups = fleetAggregate([
+    seat('claude', { rateLimitTier: 'default_claude_ai', quota: { unified5h: 0.5 } }),
+    seat('gpt', { provider: 'codex', quota: { unified5h: 0.5 } }),
+  ], { thresholdFor: () => 1, now: NOW, routes: [route('bulk', ['claude'])] });
+
+  assert.equal(pool(groups, 'codex').counted, 1);
+  assert.equal(pool(groups, 'codex').buckets.unified5h.utilization, 0.5);
+});
+
+test('routeFamily classifies a route by its name and its globs', () => {
+  assert.equal(routeFamily({ name: 'fable', match: [] }), 'fable');
+  assert.equal(routeFamily({ name: 'cheap', match: ['*sonnet*'] }), 'sonnet');
+  assert.equal(routeFamily({ name: 'bulk', match: ['claude-haiku-*'] }), null);
+});
+
+// ── routeHeadroom ────────────────────────────────────────────────────────────
+
+const HALF_SPENT = { unified7d: 0.5, unified5h: 0.5 };
+
+test('a route reports the bucket nearest its ceiling, not the fullest window', () => {
+  // The shared weekly is 80% through what rotation will hand out; the session
+  // window is 20%. The weekly is what will stop this route.
+  const [entry] = routeHeadroom(
+    [seat('a', { rateLimitTier: 'default_claude_ai', quota: { unified7d: 0.8, unified5h: 0.2 } })],
+    [route('bulk', ['a'])],
+    { thresholdFor: () => 1, now: NOW },
+  );
+
+  assert.equal(entry.name, 'bulk');
+  assert.equal(entry.bucket, 'unified7d');
+  assert.equal(entry.value.utilization, 0.8);
+  assert.equal(entry.counted, 1);
+});
+
+test('the session window binds when it is the one running out', () => {
+  const [entry] = routeHeadroom(
+    [seat('a', { rateLimitTier: 'default_claude_ai', quota: { unified7d: 0.3, unified5h: 0.95 } })],
+    [route('bulk', ['a'])],
+    { thresholdFor: () => 1, now: NOW },
+  );
+
+  assert.equal(entry.bucket, 'unified5h');
+  assert.equal(entry.value.utilization, 0.95);
+});
+
+test('a family route watches its own weekly bucket', () => {
+  const [entry] = routeHeadroom(
+    [seat('a', { rateLimitTier: 'default_claude_ai', quota: { ...HALF_SPENT, unified7dFable: 0.9 } })],
+    [{ name: 'fable', match: ['*fable*'], accounts: [{ name: 'a' }] }],
+    { thresholdFor: () => 1, now: NOW },
+  );
+
+  assert.equal(entry.bucket, 'unified7dFable');
+  assert.equal(entry.value.utilization, 0.9);
+});
+
+test('a family route is still stopped by the shared weekly when that goes first', () => {
+  // Family spend meters into the shared weekly too (#175), so an account under
+  // its Fable cap can be over the shared one and unable to serve Fable at all.
+  const [entry] = routeHeadroom(
+    [seat('a', { rateLimitTier: 'default_claude_ai', quota: { unified5h: 0.1, unified7d: 0.97, unified7dFable: 0.4 } })],
+    [{ name: 'fable', match: ['*fable*'], accounts: [{ name: 'a' }] }],
+    { thresholdFor: () => 1, now: NOW },
+  );
+
+  assert.equal(entry.bucket, 'unified7d');
+});
+
+test('a general route never reports a family bucket', () => {
+  const [entry] = routeHeadroom(
+    [seat('a', { rateLimitTier: 'default_claude_ai', quota: { ...HALF_SPENT, unified7dFable: 0.99 } })],
+    [route('bulk', ['a'])],
+    { thresholdFor: () => 1, now: NOW },
+  );
+
+  assert.equal(entry.bucket, 'unified7d');
+  assert.equal(entry.value.utilization, 0.5);
+});
+
+test('a route is measured against ITS members, weighted, and nobody else', () => {
+  const accounts = [
+    seat('big', { rateLimitTier: 'default_claude_max_20x', quota: { unified7d: 0.5 } }),
+    seat('small', { rateLimitTier: 'default_claude_ai', quota: { unified7d: 0 } }),
+    seat('elsewhere', { rateLimitTier: 'default_claude_max_20x', quota: { unified7d: 0 } }),
+  ];
+  const [entry] = routeHeadroom(accounts, [route('bulk', ['big', 'small'])], { thresholdFor: () => 1, now: NOW });
+
+  // 20 × 0.5 spent of 21 spendable — the third seat is in the fleet and not in
+  // this route, so it is no part of this answer.
+  assert.equal(entry.counted, 2);
+  assert.ok(Math.abs(entry.value.utilization - 10 / 21) < 1e-9);
+});
+
+test('a route pool obeys the fleet rules: disabled out, conduits out, unpriced tallied', () => {
+  const accounts = [
+    seat('live', { rateLimitTier: 'default_claude_ai', quota: { unified7d: 0.5 } }),
+    seat('off', { rateLimitTier: 'default_claude_max_20x', disabled: true, quota: { unified7d: 0 } }),
+    seat('kimi', { upstream: 'http://127.0.0.1:18789', quota: { unified7d: 0.9 } }),
+    seat('future', { rateLimitTier: 'default_heron', quota: { unified7d: 0 } }),
+  ];
+  const [entry] = routeHeadroom(
+    accounts,
+    [route('bulk', ['live', 'off', 'kimi', 'future', 'ghost'])],
+    { thresholdFor: () => 1, now: NOW },
+  );
+
+  // Two seats in the tally: the disabled one and the conduit are not seats, and
+  // a member naming no account this build holds was never one either.
+  assert.equal(entry.total, 2);
+  assert.equal(entry.counted, 1, 'the unpriced tier is out of the figures');
+  assert.equal(entry.value.utilization, 0.5);
+});
+
+test('a route with nothing countable reports that instead of a number', () => {
+  const [entry] = routeHeadroom(
+    [seat('future', { rateLimitTier: 'default_heron', quota: { unified7d: 0.5 } })],
+    [route('bulk', ['future'])],
+    { thresholdFor: () => 1, now: NOW },
+  );
+
+  assert.equal(entry.counted, 0);
+  assert.equal(entry.bucket, null);
+  assert.equal(entry.value, null);
+});
+
+test('a route whose members have reported nothing yet reports no bucket', () => {
+  const [entry] = routeHeadroom(
+    [seat('fresh', { rateLimitTier: 'default_claude_ai' })],
+    [route('bulk', ['fresh'])],
+    { thresholdFor: () => 1, now: NOW },
+  );
+
+  assert.equal(entry.counted, 1);
+  assert.equal(entry.bucket, null);
+});
+
+test('a member named twice is weighed once', () => {
+  const [entry] = routeHeadroom(
+    [seat('a', { rateLimitTier: 'default_claude_ai', quota: { unified7d: 0.5 } })],
+    [{ name: 'bulk', match: ['x-*'], accounts: [{ name: 'a' }, { name: 'a' }] }],
+    { thresholdFor: () => 1, now: NOW },
+  );
+
+  assert.equal(entry.counted, 1);
+  assert.equal(entry.value.capacityWeight, 1);
+});
+
+test('headroom answers one entry per route, in the order it was asked', () => {
+  const accounts = [seat('a', { rateLimitTier: 'default_claude_ai', quota: HALF_SPENT })];
+  const entries = routeHeadroom(accounts, [route('one', ['a']), route('two', ['a'])], { thresholdFor: () => 1, now: NOW });
+
+  assert.deepEqual(entries.map(e => e.name), ['one', 'two']);
+  assert.deepEqual(routeHeadroom(accounts, [], { now: NOW }), []);
+  assert.deepEqual(routeHeadroom(accounts, null, { now: NOW }), []);
+});
+
+test('a route reports the soonest reset of the bucket that binds', () => {
+  const [entry] = routeHeadroom(
+    [
+      seat('a', { rateLimitTier: 'default_claude_ai', quota: { unified7d: 0.9, unified7dReset: NOW + 4 * HOUR } }),
+      seat('b', { rateLimitTier: 'default_claude_ai', quota: { unified7d: 0.9, unified7dReset: NOW + HOUR } }),
+    ],
+    [route('bulk', ['a', 'b'])],
+    { thresholdFor: () => 1, now: NOW },
+  );
+
+  assert.equal(entry.value.nextResetAt, NOW + HOUR);
+});
+
+test('a route measures against the threshold rotation stops at, per bucket', () => {
+  // The weekly ceiling is lower than the session one here, so the weekly is the
+  // binding bucket even though more of the session window has been spent.
+  const [entry] = routeHeadroom(
+    [seat('a', { rateLimitTier: 'default_claude_ai', quota: { unified7d: 0.45, unified5h: 0.5 } })],
+    [route('bulk', ['a'])],
+    { thresholdFor: bucket => (bucket === 'unified7d' ? 0.5 : 1) },
+  );
+
+  assert.equal(entry.bucket, 'unified7d');
+  assert.equal(entry.value.utilization, 0.9);
+});
+
+test('routeMembership answers exactly the membership getRoutes resolves', () => {
+  // The fleet sampler reads the cheap one on the request path and the dashboard
+  // reads the full one per frame. They must not disagree about who is in a
+  // route, or the bar and the burn tag beside it would be measuring two fleets.
+  const am = new AccountManager([
+    oauth('a', { rateLimitTier: 'default_claude_ai' }),
+    oauth('b', { rateLimitTier: 'default_claude_ai' }),
+  ], 0.98, {
+    routes: [
+      { name: 'bulk', match: ['claude-haiku-*'], accounts: ['a'] },
+      // Lists nobody: constrains models, not accounts, so it reaches the pool.
+      { name: 'wide', match: ['claude-opus-*'], accounts: [] },
+    ],
+  });
+  // A Fable bucket nothing routes brings the auto-created route out too.
+  am.accounts[0].quota.unified7dFable = 0.5;
+
+  const shape = rs => rs.map(r => [r.name, r.accounts.map(a => a.name).join(' ')]);
+  assert.deepEqual(shape(am.routeMembership()), shape(am.getRoutes()));
+});
+
+test('the fleet series is sampled over the pool the routes reach', () => {
+  // The projection takes its RATE from this series and its remainder from the
+  // aggregate on screen, so the two have to be the same measurement.
+  const am = new AccountManager([
+    oauth('routed', { rateLimitTier: 'default_claude_ai' }),
+    oauth('stranded', { rateLimitTier: 'default_claude_max_20x' }),
+  ], 1, { routes: [{ name: 'bulk', match: ['claude-haiku-*'], accounts: ['routed'] }] });
+  Object.assign(am.accounts[0].quota, { unified7d: 0.5, unified7dReset: Date.now() + HOUR });
+  Object.assign(am.accounts[1].quota, { unified7d: 0, unified7dReset: Date.now() + HOUR });
+
+  am._recordFleetSamples();
+  const series = am.projection.samples.get('fleet:anthropic:unified7d');
+  // The stranded 20x seat would drag this to 10/21 ≈ 0.024 if it were counted.
+  assert.equal(series.at(-1).u, 0.5);
 });

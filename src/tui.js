@@ -23,7 +23,7 @@ import { sanitizeText, safeLine } from './safe-text.js';
 // all read them from there, so they cannot drift apart (#426).
 import { MAX_PROBE_SECONDS, ROUTE_COLORS } from './config-ops.js';
 import { isLocalUpstream } from './provider.js';
-import { ThroughputMeter, requestRate, liveRate, formatRate } from './throughput.js';
+import { ThroughputMeter, requestRate, formatRate } from './throughput.js';
 import { renderSpeedo, speedoWidth, SPEEDO_MIN_H, SPEEDO_MAX_H } from './speedo.js';
 
 // ── ANSI helpers ─────────────────────────────────────────────
@@ -1069,11 +1069,7 @@ export class TUI {
    */
   onRequestProgress(id, { chars, at }) {
     const r = this.active.get(id);
-    if (!r) return;
-    if (r.firstAt == null) r.firstAt = at;
-    r.lastAt = at;
-    r.chars = (r.chars || 0) + chars;
-    this.throughput.progress(chars, at);
+    if (r) this.throughput.progress(id, chars, at, r.model || null);
   }
 
   onRequestEnd(id, info) {
@@ -1087,14 +1083,16 @@ export class TUI {
     const sid = info.sessionId || r?.sessionId || null;
     const pin = (info.pinned || r?.pinned) ? dim(' [pin]') : '';
     // The server times output only while the meter is on, and says so by
-    // carrying `outputTokens` at all: without it there is nothing to settle.
-    let rate = '';
-    if (r && info.outputTokens !== undefined) {
-      const timing = { outputTokens: info.outputTokens, firstAt: info.firstTokenAt, lastAt: info.lastTokenAt, startedAt: r.started, endedAt: now };
-      this.throughput.complete({ ...timing, chars: r.chars || 0 });
-      const tps = this._throughputOn() ? requestRate(timing) : null;
-      if (tps != null) rate = `, ${formatRate(tps)} tok/s`;
-    }
+    // carrying `outputTokens` at all. A buffered response is timed from when
+    // the attempt that answered was sent, not from when the client asked:
+    // a hold or a failover before it is not generation.
+    const timing = {
+      outputTokens: info.outputTokens, firstAt: info.firstTokenAt, lastAt: info.lastTokenAt,
+      dispatchedAt: info.dispatchedAt ?? r?.started ?? null, endedAt: now, model: info.model || r?.model || null,
+    };
+    this.throughput.finish(id, timing);
+    const tps = r && this._throughputOn() ? requestRate({ ...timing, startedAt: timing.dispatchedAt }) : null;
+    const rate = tps != null ? `, ${formatRate(tps)} tok/s` : '';
     this._addLog(`${this._sessionTag(sid)} ${info.method} ${info.path}${model} → ${acct}${pin} (${info.status}, ${dur}s${rate})`);
     if (this.active.size === 0) this._retick();   // animating → idle
   }
@@ -2457,15 +2455,15 @@ export class TUI {
 
     // Active requests
     const now = Date.now();
-    for (const [, r] of this.active) {
+    for (const [id, r] of this.active) {
       const el = ((now - r.started) / 1000).toFixed(1);
       const sp = cyan(SPINNER[this.frame]);
       const m = r.model ? dim(` (${r.model})`) : ''; // filled in as soon as the model is peeked from the stream
       const pin = r.pinned ? dim(' [pin]') : '';
       const a = r.account ? ` → ${r.account}${pin}` : '';
-      // An estimate from the text streamed so far, and marked as one: the
-      // exact figure is on the finished line.
-      const tps = meter ? liveRate({ chars: r.chars, firstAt: r.firstAt, now }) : null;
+      // The meter's estimate for this request, and marked as one: the exact
+      // figure is on the finished line.
+      const tps = meter ? this.throughput.liveRate(id, now) : null;
       const est = tps != null ? ` ~${formatRate(tps)} tok/s` : '';
       lines.push(` ${sp} ${gray(r.t)}  ${this._sessionTag(r.sessionId)} ${r.method} ${r.path}${m}${a} ${dim(`(${el}s...${est})`)}`);
     }

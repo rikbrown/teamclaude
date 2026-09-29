@@ -10,6 +10,11 @@
 // under the hub with its unit below it. The needle is never drawn over the
 // reading: it stops at the text's edge and picks up past it.
 //
+// The arc is lit in one colour up to the reading and dim past it. No green,
+// yellow and red zones: the scale follows the fleet's own recent peak, so the
+// top of it is "busier than lately", not a limit, and a zone would change
+// colour the moment the scale stepped up under the same reading.
+//
 // Pure: a reading and a size in, lines out. Colour comes from the painter the
 // caller hands over, so the dial is drawn with the same SGR helpers as the rest
 // of the frame.
@@ -30,20 +35,18 @@ const SWEEP = 240 * DEG;  // clockwise from START to full scale
 const HALF_STROKE = 0.75;
 // Clear dots between the needle's tip and the inside of the arc.
 const TIP_GAP = 3.5;
-// Where the arc turns yellow, then red, as a fraction of the sweep.
-const ZONES = [0.6, 0.85];
 
 // Braille dot bits by [row][column] within a cell (Unicode's dots 1-8).
 const DOT_BITS = [[0x01, 0x08], [0x02, 0x10], [0x04, 0x20], [0x40, 0x80]];
 const BRAILLE_BLANK = 0x2800;
 
 const SGR = (/** @type {string} */ code) => (/** @type {string} */ s) => `\x1b[${code}m${s}\x1b[0m`;
-/** @typedef {{ green: (s: string) => string, yellow: (s: string) => string, red: (s: string) => string, dim: (s: string) => string, bold: (s: string) => string }} Painter */
+/** @typedef {{ cyan: (s: string) => string, dim: (s: string) => string, bold: (s: string) => string }} Painter */
 /** @type {Painter} */
-const DEFAULT_PAINT = { green: SGR('32'), yellow: SGR('33'), red: SGR('31'), dim: SGR('2'), bold: SGR('1') };
+const DEFAULT_PAINT = { cyan: SGR('36'), dim: SGR('2'), bold: SGR('1') };
 
 /** @typedef {'blank'|'arc'|'arc-dim'|'needle'|'value'|'unit'|'label'} CellKind */
-/** @typedef {{ ch: string, kind: CellKind, zone: number }} Cell */
+/** @typedef {{ ch: string, kind: CellKind }} Cell */
 
 /**
  * The radius, in dots, of the largest arc a dial `height` rows tall holds. The
@@ -85,8 +88,6 @@ export function formatScale(n) {
   return String(Math.round(n));
 }
 
-/** @param {number} f */
-const zoneOf = (f) => (f < ZONES[0] ? 0 : f < ZONES[1] ? 1 : 2);
 
 /**
  * The dial as a grid of cells, before any colour: what each cell shows and what
@@ -99,7 +100,7 @@ export function speedoCells({ rate, max, width, height }) {
   width = Math.max(0, Math.floor(width));
   height = Math.max(0, Math.floor(height));
   /** @type {Cell[][]} */
-  const cells = Array.from({ length: height }, () => Array.from({ length: width }, () => ({ ch: ' ', kind: /** @type {CellKind} */ ('blank'), zone: 0 })));
+  const cells = Array.from({ length: height }, () => Array.from({ length: width }, () => ({ ch: ' ', kind: /** @type {CellKind} */ ('blank') })));
   if (!width || !height) return cells;
 
   const frac = max > 0 && rate > 0 ? Math.min(1, rate / max) : 0;
@@ -147,12 +148,11 @@ export function speedoCells({ rate, max, width, height }) {
   const centre = width / 2;
   const colFor = (/** @type {string} */ text) => Math.round(centre - text.length / 2);
 
-  const valueZone = zoneOf(frac);
-  /** @type {{ row: number, col: number, text: string, kind: CellKind, zone: number }[]} */
+  /** @type {{ row: number, col: number, text: string, kind: CellKind }[]} */
   const texts = [];
   const value = formatRate(rate);
-  texts.push({ row: valueRow, col: colFor(value), text: value, kind: 'value', zone: valueZone });
-  if (unitRow < height) texts.push({ row: unitRow, col: colFor('tok/s'), text: 'tok/s', kind: 'unit', zone: 0 });
+  texts.push({ row: valueRow, col: colFor(value), text: value, kind: 'value' });
+  if (unitRow < height) texts.push({ row: unitRow, col: colFor('tok/s'), text: 'tok/s', kind: 'unit' });
 
   // Nothing but text in the box around the reading: the needle stops at its
   // edge, a column clear of the widest line.
@@ -166,7 +166,7 @@ export function speedoCells({ rate, max, width, height }) {
     const endX = R * Math.cos(30 * DEG);
     const place = (/** @type {string} */ text, /** @type {number} */ dotX) => {
       const col = Math.round(dotX / 2 - text.length / 2);
-      return { row: labelRow, col: Math.max(0, Math.min(width - text.length, col)), text, kind: /** @type {CellKind} */ ('label'), zone: 0 };
+      return { row: labelRow, col: Math.max(0, Math.min(width - text.length, col)), text, kind: /** @type {CellKind} */ ('label') };
     };
     const ends = [place('0', cx - endX), place(formatScale(max), cx + endX)];
     const clear = (/** @type {{ row: number, col: number, text: string }} */ a) =>
@@ -198,9 +198,9 @@ export function speedoCells({ rate, max, width, height }) {
       }
       if (!bits) continue;
       const ch = String.fromCodePoint(BRAILLE_BLANK + bits);
-      if (needle) { cells[r][c] = { ch, kind: 'needle', zone: 0 }; continue; }
+      if (needle) { cells[r][c] = { ch, kind: 'needle' }; continue; }
       const f = fn ? fsum / fn : 0;
-      cells[r][c] = { ch, kind: frac > 0 && f <= frac ? 'arc' : 'arc-dim', zone: zoneOf(f) };
+      cells[r][c] = { ch, kind: frac > 0 && f <= frac ? 'arc' : 'arc-dim' };
     }
   }
 
@@ -208,7 +208,7 @@ export function speedoCells({ rate, max, width, height }) {
     if (t.row < 0 || t.row >= height) continue;
     for (let i = 0; i < t.text.length; i++) {
       const c = t.col + i;
-      if (c >= 0 && c < width) cells[t.row][c] = { ch: t.text[i], kind: t.kind, zone: t.zone };
+      if (c >= 0 && c < width) cells[t.row][c] = { ch: t.text[i], kind: t.kind };
     }
   }
   return cells;
@@ -224,14 +224,15 @@ export function speedoCells({ rate, max, width, height }) {
  * @returns {string[]}
  */
 export function renderSpeedo({ rate, max, width, height, paint = DEFAULT_PAINT }) {
-  const zone = [paint.green, paint.yellow, paint.red];
-  /** @type {Record<CellKind, (s: string, z: number) => string>} */
+  // Cyan is the dashboard's accent for what is live — the spinner, the active
+  // count — and the lit arc is exactly that.
+  /** @type {Record<CellKind, (s: string) => string>} */
   const style = {
     blank: (s) => s,
-    arc: (s, z) => zone[z](s),
-    'arc-dim': (s, z) => paint.dim(zone[z](s)),
+    arc: (s) => paint.cyan(s),
+    'arc-dim': (s) => paint.dim(s),
     needle: (s) => paint.bold(s),
-    value: (s, z) => paint.bold(zone[z](s)),
+    value: (s) => paint.bold(s),
     unit: (s) => paint.dim(s),
     label: (s) => paint.dim(s),
   };
@@ -240,9 +241,9 @@ export function renderSpeedo({ rate, max, width, height, paint = DEFAULT_PAINT }
     let run = '';
     /** @type {Cell|null} */
     let head = null;
-    const flush = () => { if (head) out += style[head.kind](run, head.zone); run = ''; };
+    const flush = () => { if (head) out += style[head.kind](run); run = ''; };
     for (const cell of row) {
-      if (!head || cell.kind !== head.kind || cell.zone !== head.zone) { flush(); head = cell; }
+      if (!head || cell.kind !== head.kind) { flush(); head = cell; }
       run += cell.ch;
     }
     flush();

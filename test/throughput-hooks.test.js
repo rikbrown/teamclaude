@@ -131,6 +131,7 @@ test('an Anthropic stream reports each output event with its characters, and the
     assert.equal(info.firstTokenAt, calls.progress[0].at);
     assert.equal(info.lastTokenAt, calls.progress[calls.progress.length - 1].at);
     assert.ok(info.lastTokenAt > info.firstTokenAt);
+    assert.ok(info.dispatchedAt <= info.firstTokenAt, 'the attempt was sent before it answered');
   });
 });
 
@@ -235,6 +236,32 @@ test('a failed-over attempt counts nothing, and the attempt that served counts o
     assert.equal(seen.length, 2, 'the request failed over');
     assert.equal(sum(calls.progress), ANTHROPIC_CHARS);
     assert.equal(calls.end[0].info.outputTokens, 500);
+  });
+});
+
+// A buffered answer is timed from the attempt that answered, so the time spent
+// on an attempt that was refused is not counted as generating it.
+test('a buffered answer after a failover carries the dispatch of the attempt that answered', async () => {
+  const t0 = Date.now();
+  await withProxy({
+    accounts: (p) => [claude('a', p), claude('b', p)],
+    handler: async (req, res, seen) => {
+      if (seen.length === 1) {
+        await sleep(150);
+        res.writeHead(429, { 'retry-after': '60', 'content-type': 'application/json' });
+        res.end(JSON.stringify({ type: 'error', error: { type: 'rate_limit_error' } }));
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ type: 'message', content: [], usage: { input_tokens: 5, output_tokens: 42 } }));
+    },
+    config: { throughputMeter: true },
+  }, async ({ port, calls, seen }) => {
+    await post(port, '/v1/messages', { model: 'claude-opus-5', messages: [] });
+    assert.equal(seen.length, 2, 'the request failed over');
+    const { info } = calls.end[0];
+    assert.equal(info.outputTokens, 42);
+    assert.ok(info.dispatchedAt >= t0 + 150, `dispatched ${info.dispatchedAt - t0} ms in, before the refusal came back`);
   });
 });
 

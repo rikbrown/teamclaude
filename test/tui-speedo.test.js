@@ -50,8 +50,13 @@ function traffic(tui) {
   tui.onRequestStart(1, { method: 'POST', path: '/v1/messages', sessionId: 'abc123' });
   tui.active.get(1).started = now - 12_000;
   for (let t = 10; t >= 0; t--) tui.onRequestProgress(1, { chars: 400, at: now - t * 1000 });
-  tui.throughput.complete({ outputTokens: 8_000, chars: 0, firstAt: now - 9_000, lastAt: now - 500, startedAt: now - 11_000, endedAt: now - 500 });
+  tui.throughput.finish('earlier', { outputTokens: 8_000, firstAt: now - 9_000, lastAt: now - 500, endedAt: now - 500, model: 'm' });
 }
+
+/** The frame line of the activity entry or request that contains `needle`. */
+const lineOf = (tui, width, needle) => render(tui, width).frame.find(l => l.includes(needle))?.trimEnd();
+
+const END = { method: 'POST', path: '/v1/messages', account: 'seat1@example.com', status: 200, model: 'claude-opus-5-5', sessionId: null };
 
 /**
  * Render at `width`×`height`: the painted frame's lines (ANSI stripped), the
@@ -132,8 +137,9 @@ test('off, a finished request\'s line is what it always was, even if the server 
   // end carries a count, but the operator has turned it off since.
   const tui = tuiFor(riksFleet(), { throughputMeter: false });
   tui.onRequestStart(9, { method: 'POST', path: '/v1/messages', sessionId: null });
-  tui.onRequestEnd(9, { method: 'POST', path: '/v1/messages', account: 'seat1@example.com', status: 200, model: 'm', sessionId: null, outputTokens: 500, firstTokenAt: 0, lastTokenAt: 5_000 });
+  tui.onRequestEnd(9, { ...END, outputTokens: 500, firstTokenAt: 0, lastTokenAt: 5_000 });
   assert.match(strip(tui.log[0].msg), /\(200, \d+\.\ds\)$/);
+  assert.match(lineOf(tui, 200, 'seat1@example.com (200'), /\(200, \d+\.\ds\)$/);
 });
 
 // ------------------------------------------------------------ on: per request
@@ -141,44 +147,84 @@ test('off, a finished request\'s line is what it always was, even if the server 
 test('a finished request carries its exact rate inside the parentheses', () => {
   const tui = tuiFor(riksFleet(), { throughputMeter: true });
   tui.onRequestStart(9, { method: 'POST', path: '/v1/messages', sessionId: null });
-  tui.onRequestEnd(9, { method: 'POST', path: '/v1/messages', account: 'seat1@example.com', status: 200, model: 'claude-opus-5-5', sessionId: null, outputTokens: 840, firstTokenAt: 1_000, lastTokenAt: 11_000 });
-  assert.match(strip(tui.log[0].msg), /POST \/v1\/messages \(claude-opus-5-5\) → seat1@example\.com \(200, \d+\.\ds, 84 tok\/s\)$/);
+  tui.onRequestEnd(9, { ...END, outputTokens: 840, firstTokenAt: 1_000, lastTokenAt: 11_000 });
+  assert.match(lineOf(tui, 200, 'seat1@example.com (200'), /POST \/v1\/messages \(claude-opus-5-5\) → seat1@example\.com \(200, \d+\.\ds, 84 tok\/s\)$/);
 });
 
 test('a request with no measurable rate keeps the line it always had', () => {
   const tui = tuiFor(riksFleet(), { throughputMeter: true });
   for (const [id, extra] of [[1, { outputTokens: null, firstTokenAt: null, lastTokenAt: null }], [2, { outputTokens: 50, firstTokenAt: 1_000, lastTokenAt: 1_100 }]]) {
     tui.onRequestStart(id, { method: 'POST', path: '/v1/messages', sessionId: null });
-    tui.onRequestEnd(id, { method: 'POST', path: '/v1/messages', account: 'a', status: 200, model: null, sessionId: null, ...extra });
-    assert.match(strip(tui.log[0].msg), /\(200, \d+\.\ds\)$/, JSON.stringify(extra));
+    tui.onRequestEnd(id, { ...END, account: `acct${id}`, ...extra });
+    assert.match(lineOf(tui, 200, `acct${id} (200`), /\(200, \d+\.\ds\)$/, JSON.stringify(extra));
   }
 });
 
-test('a streaming request shows a marked estimate once it has streamed for a second', () => {
+// A buffered response has no generation interval, and the time before the
+// attempt that answered was sent (a quota hold, a failover) is not generation.
+test('a buffered response is timed from the dispatch of the attempt that answered', () => {
   const tui = tuiFor(riksFleet(), { throughputMeter: true });
   const now = Date.now();
-  tui.onRequestStart(1, { method: 'POST', path: '/v1/messages', sessionId: null });
+  tui.onRequestStart(9, { method: 'POST', path: '/v1/messages', sessionId: null });
+  tui.active.get(9).started = now - 95_000;
+  tui.onRequestEnd(9, { ...END, outputTokens: 1_000, firstTokenAt: null, lastTokenAt: null, dispatchedAt: now - 5_000 });
+  const [, tps] = lineOf(tui, 200, 'seat1@example.com (200').match(/, (\d+) tok\/s\)$/) || [];
+  assert.ok(tps >= 195 && tps <= 200, `read ${tps}, where the 90 s hold would read 10`);
+});
+
+test('a streaming request shows a marked estimate once it has generated for a second', () => {
+  const tui = tuiFor(riksFleet(), { throughputMeter: true });
+  const now = Date.now();
+  tui.onRequestStart(1, { method: 'POST', path: '/v1/messages', sessionId: 'aaa111' });
   tui.active.get(1).started = now - 3_000;
   tui.onRequestProgress(1, { chars: 10, at: now - 300 });
-  const line = () => render(tui, 230).frame.find(l => l.includes('/v1/messages') && l.includes('s...')).trimEnd();
-  assert.match(line(), /\(\d+\.\ds\.\.\.\)$/, 'no estimate before a second of text');
-  tui.active.get(1).firstAt = now - 2_000;
-  tui.active.get(1).chars = 672;
-  // 168 estimated tokens over two seconds: 84, less whatever time the test took.
-  const [, tps] = line().match(/\(\d+\.\ds\.\.\. ~(\d+) tok\/s\)$/) || [];
+  assert.match(lineOf(tui, 230, 'aaa111'), /\(\d+\.\ds\.\.\.\)$/, 'no estimate before a second of generating');
+  tui.onRequestStart(2, { method: 'POST', path: '/v1/messages', sessionId: 'bbb222' });
+  tui.active.get(2).started = now - 3_000;
+  tui.onRequestProgress(2, { chars: 0, at: now - 2_000 });
+  tui.onRequestProgress(2, { chars: 672, at: now });
+  // 168 tokens of text over two seconds: 84, less whatever time the test took.
+  const [, tps] = lineOf(tui, 230, 'bbb222').match(/\(\d+\.\ds\.\.\. ~(\d+) tok\/s\)$/) || [];
   assert.ok(tps >= 78 && tps <= 84, `estimate ${tps}`);
+});
+
+// Hidden thinking streams nothing for its tokens; once the model has a pace
+// the line reads at it, where a character count read zero.
+test('a request thinking in silence reads at its model\'s pace, not at zero', () => {
+  const tui = tuiFor(riksFleet(), { throughputMeter: true });
+  const now = Date.now();
+  tui.onRequestStart(1, { method: 'POST', path: '/v1/messages', sessionId: 'aaa111' });
+  tui.onRequestModel(1, { model: 'claude-opus-5-5' });
+  tui.onRequestProgress(1, { chars: 0, at: now - 40_000 });
+  tui.onRequestEnd(1, { ...END, outputTokens: 3_000, firstTokenAt: now - 40_000, lastTokenAt: now - 30_000 });   // 300 tok/s
+  tui.onRequestStart(2, { method: 'POST', path: '/v1/messages', sessionId: 'bbb222' });
+  tui.onRequestModel(2, { model: 'claude-opus-5-5' });
+  tui.onRequestProgress(2, { chars: 0, at: now - 5_000 });   // a thinking block opens
+  const [, tps] = lineOf(tui, 230, 'bbb222').match(/ ~(\d+) tok\/s\)$/) || [];
+  assert.ok(tps >= 290 && tps <= 300, `estimate ${tps}`);
 });
 
 test('the progress hook adds to counters and never paints', () => {
   const tui = tuiFor(riksFleet(), { throughputMeter: true });
   tui.onRequestStart(1, { method: 'POST', path: '/v1/messages', sessionId: null });
+  tui.onRequestModel(1, { model: 'm' });
   let renders = 0;
   tui.render = () => { renders++; };
   tui.onRequestProgress(1, { chars: 40, at: Date.now() });
   tui.onRequestProgress(1, { chars: 2, at: Date.now() });
   tui.onRequestProgress(999, { chars: 7, at: Date.now() });   // a request this TUI never opened
   assert.equal(renders, 0);
-  assert.equal(tui.active.get(1).chars, 42);
+  assert.equal(tui.throughput.streams.get(1).chars, 42);
+  assert.equal(tui.throughput.streams.get(1).model, 'm');
+  assert.equal(tui.throughput.streams.has(999), false);
+});
+
+test('a request\'s end settles its stream in the meter', () => {
+  const tui = tuiFor(riksFleet(), { throughputMeter: true });
+  tui.onRequestStart(1, { method: 'POST', path: '/v1/messages', sessionId: null });
+  tui.onRequestProgress(1, { chars: 40, at: Date.now() });
+  tui.onRequestEnd(1, { ...END, outputTokens: null, firstTokenAt: null, lastTokenAt: null, status: 499 });
+  assert.equal(tui.throughput.streams.size, 0);
 });
 
 // ------------------------------------------------------------ on: the dial
@@ -321,10 +367,22 @@ test('the settings screen names the setting', () => {
 // ------------------------------------------------------------ the cadence
 
 test('the tick stays fast while the reading falls back to zero, and only then', () => {
+  let now = 1e12;
   const tui = tuiFor(riksFleet(), { throughputMeter: true });
+  tui.throughput.now = () => now;
   assert.equal(tui._tickDelay(), 5_000, 'idle, and nothing to settle');
-  tui.throughput.progress(400, Date.now());
+  tui.throughput.progress('s', 400, now);
+  assert.equal(tui._tickDelay(), 500, 'a stream in flight');
+  tui.throughput.finish('s', { outputTokens: 100, firstAt: now, lastAt: now, endedAt: now });
+  // The last tokens sit in the second they were booked in, and leave the
+  // window a second after the window's length has passed.
+  now += 10_999;
+  assert.ok(tui.throughput.rate() > 0);
   assert.equal(tui._tickDelay(), 500, 'a reading still on its way down');
+  now += 1;
+  assert.equal(tui.throughput.rate(), 0);
+  assert.equal(tui._tickDelay(), 5_000, 'the needle is at zero, so the cadence can slow');
+  tui.throughput.progress('t', 400, now);
   tui.config.throughputMeter = false;
   assert.equal(tui._tickDelay(), 5_000, 'off, the cadence is what it was');
 });

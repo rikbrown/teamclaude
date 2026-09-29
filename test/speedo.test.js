@@ -101,16 +101,19 @@ test('the needle never crosses the reading or its unit', () => {
   }
 });
 
-test('the arc runs green to red from zero to full scale, lit up to the reading', () => {
+// One colour, lit up to the reading: the scale follows the fleet's recent peak,
+// so a green-to-red zone would say nothing a reading of 900 on 1k and 1,001 on
+// 2k did not contradict.
+test('the arc is lit up to the reading and dim past it, in one colour', () => {
   const [w, h] = SIZES[SIZES.length - 1];
   const arcs = (rate) => speedoCells({ rate, max: 1_000, width: w, height: h }).flat().filter(c => c.kind === 'arc' || c.kind === 'arc-dim');
-  const all = arcs(1_000);
-  assert.ok(all.every(c => c.kind === 'arc'), 'a full reading lights the whole arc');
-  assert.deepEqual(new Set(all.map(c => c.zone)), new Set([0, 1, 2]));
+  assert.ok(arcs(1_000).every(c => c.kind === 'arc'), 'a full reading lights the whole arc');
   assert.ok(arcs(0).every(c => c.kind === 'arc-dim'), 'an idle dial is lit nowhere');
   const half = arcs(500);
-  assert.ok(half.some(c => c.kind === 'arc') && half.some(c => c.kind === 'arc-dim'));
-  assert.ok(half.filter(c => c.kind === 'arc').every(c => c.zone === 0), 'half scale is still in the green');
+  const lit = half.filter(c => c.kind === 'arc').length;
+  assert.ok(lit > 0 && lit < half.length, 'half scale lights part of it');
+  assert.ok(Math.abs(lit / half.length - 0.5) < 0.15, `half scale lit ${lit} of ${half.length}`);
+  assert.ok(arcs(900).every(c => !('zone' in c)), 'no zones');
 });
 
 test('the scale ends are labelled when they fit, and never on the arc', () => {
@@ -140,10 +143,12 @@ test('no colour runs on past its cell, or past the dial', () => {
 
 test('the painter the caller hands over is the one used', () => {
   const tag = (name) => (s) => `<${name}>${s}</${name}>`;
-  const paint = { green: tag('g'), yellow: tag('y'), red: tag('r'), dim: tag('d'), bold: tag('b') };
+  const paint = { cyan: tag('c'), dim: tag('d'), bold: tag('b') };
   const lines = renderSpeedo({ rate: 900, max: 1_000, width: speedoWidth(10), height: 10, paint });
   const all = lines.join('\n');
-  assert.match(all, /<b><r>900<\/r><\/b>/, 'the reading is bold, in the colour of its zone');
+  assert.match(all, /<b>900<\/b>/, 'the reading is bold');
+  assert.match(all, /<c>[\u2801-\u28ff]+<\/c>/, 'the lit arc is cyan');
+  assert.match(all, /<d>[\u2801-\u28ff]+<\/d>/, 'the rest of the arc is dim');
   assert.match(all, /<d>tok\/s<\/d>/);
   assert.doesNotMatch(all, /\x1b/, 'a raw escape bypassed the painter');
 });

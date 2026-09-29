@@ -10,39 +10,65 @@
 //
 // WHY AN ESTIMATE AT ALL. Neither dialect reports output tokens as they are
 // generated: Anthropic states them once, cumulatively, in `message_delta` near
-// the end, and a Responses stream only in its terminal event. A live figure has
-// to come from the text itself, so the meter counts streamed characters and
-// divides by CHARS_PER_TOKEN, then corrects to the exact count when it lands.
+// the end, and a Responses stream only in its terminal event. And the text a
+// stream shows is a poor guide to what it generates: a reasoning model spends
+// most of its tokens on thinking that is hidden or summarised, so a turn can
+// stream a few hundred characters for thousands of tokens. So an in-flight
+// stream is estimated from how long it has been generating, at the pace its
+// model has been measured at, with the text it has shown as a floor (see
+// ThroughputMeter). Only exact counts are ever booked.
 //
 // Pure: no I/O, and every function that needs the time takes it, or takes a
 // clock, so the tests drive time by hand.
 
-/** Characters per output token, for the live estimate only. English prose and
- *  code both sit near four; the exact count replaces the guess at completion,
- *  so a better constant would only move where the needle waits for it. */
+/** Characters per output token, for the floor under a live estimate. English
+ *  prose and code both sit near four. It is only ever a floor: the tokens a
+ *  stream has generated are at least the tokens it has shown. */
 export const CHARS_PER_TOKEN = 4;
 
 /** Seconds the fleet rate is averaged over. Short enough that the needle
  *  follows the fleet within a few seconds and an idle fleet reads zero ten
  *  seconds after its last token. Long enough to smooth over the bursts a
- *  stream arrives in, and to give a completion's correction somewhere to land:
- *  it is spread back over the seconds the tokens were generated in (see
- *  ThroughputMeter.complete), and only the part inside this window moves the
- *  needle. */
+ *  stream arrives in, and to hold a fair share of a finished stream's tokens:
+ *  they are spread over the seconds they were generated in, and only the part
+ *  inside this window moves the needle. */
 export const WINDOW_SEC = 10;
 
 /** One-second buckets kept. The window reads the newest WINDOW_SEC of them; the
- *  rest is room for a correction that reaches back further than the window. */
+ *  rest is room for a finished stream whose generation reaches back further. */
 export const RING_SEC = 60;
+
+/** The most output tokens one request is booked for. Far past any real turn;
+ *  it is here so a wild count from upstream cannot carry the scale to Infinity. */
+export const MAX_REQUEST_TOKENS = 10_000_000;
+
+/** The fastest a single stream is taken to generate, in tok/s, when a finished
+ *  one teaches its model's pace. A stream that arrives all at once has no pace
+ *  to learn, and without a ceiling one such turn would inflate every estimate
+ *  for that model until enough slower turns had averaged it away. */
+export const MAX_STREAM_RATE = 5_000;
 
 /** Shortest generation interval a per-request rate is shown for. A reply that
  *  arrives in one burst has no measurable pace, and dividing by a few
  *  milliseconds would print a number nobody could have generated. */
 export const MIN_INTERVAL_MS = 250;
 
-/** Streaming time before an in-progress request shows a live estimate. The
+/** Generating time before an in-progress request shows a live estimate. The
  *  first deltas arrive together, so an earlier figure is mostly noise. */
 export const LIVE_AFTER_MS = 1_000;
+
+/** How much of each finished turn's rate goes into its model's pace. A quarter:
+ *  one odd turn moves the estimate a little, and a model that really changes
+ *  pace is followed within a handful of turns. */
+export const MODEL_RATE_WEIGHT = 0.25;
+
+/** Models whose pace is remembered. A fleet uses a handful; past this the one
+ *  heard from least recently is forgotten. */
+export const MODEL_RATE_KEYS = 32;
+
+/** In-flight streams the meter follows at once. Every stream is settled when
+ *  its request ends, so this is a bound against a leak, not a working limit. */
+export const MAX_STREAMS = 512;
 
 /** Floor of the dial's scale, in tok/s: an idle fleet's needle rests on a scale
  *  that means something rather than one that stretches a trickle to full. */
@@ -137,6 +163,15 @@ export class OutputTracker {
     this.chars = 0;
     /** @type {number|null} settled output tokens, once upstream has stated them */
     this.outputTokens = null;
+    /** @type {number|null} ms epoch the upstream attempt that answered was sent */
+    this.dispatchedAt = null;
+  }
+
+  /** The upstream attempt is being sent now. Called once per attempt, so the
+   *  one that answered is the last: a buffered response is timed from here,
+   *  which leaves out the holds, the queueing and the attempts before it. */
+  dispatched() {
+    this.dispatchedAt = this.now();
   }
 
   /** Read one parsed SSE event.
@@ -160,41 +195,40 @@ export class OutputTracker {
 
   /** The fields the request's end hook carries. */
   summary() {
-    return { outputTokens: this.outputTokens, firstTokenAt: this.firstTokenAt, lastTokenAt: this.lastTokenAt };
+    return { outputTokens: this.outputTokens, firstTokenAt: this.firstTokenAt, lastTokenAt: this.lastTokenAt, dispatchedAt: this.dispatchedAt };
   }
 }
+
+/** A finite time, or null. @param {unknown} v */
+const time = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+
+/** A token count clamped to what one request can be booked for, or null when it
+ *  is not a count at all. @param {unknown} v */
+const tokens = (v) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.min(v, MAX_REQUEST_TOKENS) : null);
 
 /**
  * The exact rate of a finished request in tok/s, or null when there is none to
  * show: the count is unknown or zero, or the interval is too short to measure.
  *
  * The interval is the generation, first output event to last, when the
- * response streamed. A buffered response has no such interval, so its whole
- * duration stands in for it, time to first token included.
+ * response streamed. A buffered response has no such interval, so the time
+ * from dispatching the attempt that answered to the end stands in for it,
+ * time to first token included.
  *
  * @param {{ outputTokens?: number|null, firstAt?: number|null, lastAt?: number|null, startedAt?: number|null, endedAt?: number|null }} r
  * @returns {number|null}
  */
 export function requestRate({ outputTokens, firstAt = null, lastAt = null, startedAt = null, endedAt = null }) {
-  if (typeof outputTokens !== 'number' || !(outputTokens > 0)) return null;
-  const span = firstAt != null && lastAt != null ? lastAt - firstAt
-    : startedAt != null && endedAt != null ? endedAt - startedAt
+  const n = tokens(outputTokens);
+  if (!n) return null;
+  const first = time(firstAt);
+  const last = time(lastAt);
+  const from = time(startedAt);
+  const to = time(endedAt);
+  const span = first !== null && last !== null ? last - first
+    : from !== null && to !== null ? to - from
       : NaN;
-  return span >= MIN_INTERVAL_MS ? outputTokens / (span / 1000) : null;
-}
-
-/**
- * The estimated rate of a request still streaming, or null until it has
- * streamed text for LIVE_AFTER_MS. Estimated from its characters, so a stream
- * whose reasoning is hidden reads low until the exact count lands.
- *
- * @param {{ chars?: number, firstAt?: number|null, now: number }} r
- * @returns {number|null}
- */
-export function liveRate({ chars = 0, firstAt = null, now }) {
-  if (firstAt == null || !(chars > 0)) return null;
-  const span = now - firstAt;
-  return span >= LIVE_AFTER_MS ? chars / CHARS_PER_TOKEN / (span / 1000) : null;
+  return span >= MIN_INTERVAL_MS ? n / (span / 1000) : null;
 }
 
 /**
@@ -215,6 +249,7 @@ export function formatRate(n) {
  */
 export function niceCeil(v) {
   if (!(v > MIN_SCALE)) return MIN_SCALE;
+  if (!Number.isFinite(v)) return MIN_SCALE;
   const base = 10 ** Math.floor(Math.log10(v));
   // The tolerance absorbs log10's rounding, so a value already on a step (1000)
   // stays there instead of moving up to the next one.
@@ -224,16 +259,29 @@ export function niceCeil(v) {
 
 const mod = (/** @type {number} */ x, /** @type {number} */ n) => ((x % n) + n) % n;
 
+/** @typedef {{ chars: number, firstAt: number, lastAt: number, model: string|null }} Stream */
+
 /**
  * The fleet's output rate: tokens generated across every request in the last
- * WINDOW_SEC seconds, divided by WINDOW_SEC, kept in one-second buckets.
+ * WINDOW_SEC seconds, divided by WINDOW_SEC.
  *
- * A streaming request adds its estimate as it arrives. When it finishes, the
- * difference between the exact count and that estimate is spread evenly over
- * the seconds it generated in, so a turn that streamed little text but many
- * tokens (hidden or summarised reasoning) puts them back where they were made
- * rather than into one spike at the end. A buffered response, which streamed
- * nothing, spreads its whole count over its duration.
+ * TWO KINDS OF TOKEN, KEPT APART. The one-second buckets hold only SETTLED
+ * tokens: a finished stream's exact count, spread evenly over the seconds from
+ * its first output event to its last. Nothing is ever taken back out of them,
+ * because nothing that goes in is a guess.
+ *
+ * A stream still in flight is never written to the buckets. Each reading
+ * works out its share afresh: its estimate so far, spread evenly over the time
+ * it has been generating, and the part of that inside the window. The estimate
+ * is the larger of its text (CHARS_PER_TOKEN) and its generating time at its
+ * model's measured pace. The pace is learnt from that model's finished turns;
+ * until there is one, the text alone stands. So a reasoning turn that streams
+ * a few hundred characters for thousands of tokens reads at its model's usual
+ * pace while it runs, not at the pace of its visible text, and its exact count
+ * replaces the estimate when it lands with a small step rather than a jump.
+ *
+ * Generating time runs from the stream's first output event to now, not to its
+ * latest one: hidden thinking sends nothing while it thinks.
  */
 export class ThroughputMeter {
   /** @param {{ now?: () => number, windowSec?: number, ringSec?: number }} [opts] */
@@ -243,8 +291,10 @@ export class ThroughputMeter {
     this.ring = new Float64Array(Math.max(ringSec, windowSec + 1));
     /** @type {number|null} the second the newest bucket holds */
     this.headSec = null;
-    /** ms epoch of the latest token written anywhere in the ring. */
-    this.lastAt = -Infinity;
+    /** @type {Map<unknown, Stream>} streams in flight, by request id */
+    this.streams = new Map();
+    /** @type {Map<string, number>} each model's measured pace, tok/s, least recently heard first */
+    this.paces = new Map();
     /** Recent peak rate, decayed (PEAK_HALF_LIFE_MS). */
     this.peak = 0;
     /** @type {number|null} when the peak was last decayed */
@@ -253,48 +303,118 @@ export class ThroughputMeter {
     this.scale = MIN_SCALE;
   }
 
-  /** Estimated tokens from `chars` of text streamed at `at`.
-   *  @param {number} chars @param {number} [at] */
-  progress(chars, at = this.now()) {
-    if (chars > 0) this._bump(Math.floor(at / 1000), chars / CHARS_PER_TOKEN, at);
+  /**
+   * Output streamed for request `id`: `chars` of text at `at`, from `model`.
+   * The first call starts the stream's generating time.
+   * @param {unknown} id @param {number} chars @param {number} at @param {string|null} [model]
+   */
+  progress(id, chars, at, model = null) {
+    const t = time(at);
+    if (t === null) return;
+    const n = typeof chars === 'number' && Number.isFinite(chars) && chars > 0 ? chars : 0;
+    let s = this.streams.get(id);
+    if (!s) {
+      if (this.streams.size >= MAX_STREAMS) this.streams.delete(this.streams.keys().next().value);
+      s = { chars: 0, firstAt: t, lastAt: t, model: null };
+      this.streams.set(id, s);
+    }
+    s.chars += n;
+    if (t > s.lastAt) s.lastAt = t;
+    if (model) s.model = model;
   }
 
   /**
-   * Settle a finished request. `chars` is what it streamed, and so what
-   * progress() already estimated; without an exact count the estimate stands.
+   * Request `id` has ended. With an exact count, that count is booked over its
+   * generation, first output event to last, and the turn teaches its model's
+   * pace. A buffered response streamed nothing, so its count is booked from
+   * the dispatch of the attempt that answered to the end.
    *
-   * @param {{ outputTokens?: number|null, chars?: number, firstAt?: number|null, lastAt?: number|null, startedAt?: number|null, endedAt?: number|null }} r
+   * With no count (a client that left, a stream that died), a stream books the
+   * part of its estimate it can vouch for, its visible text, and not the part
+   * that was a guess from its model's pace.
+   *
+   * @param {unknown} id
+   * @param {{ outputTokens?: number|null, firstAt?: number|null, lastAt?: number|null, dispatchedAt?: number|null, endedAt?: number|null, model?: string|null }} [r]
    */
-  complete({ outputTokens = null, chars = 0, firstAt = null, lastAt = null, startedAt = null, endedAt = null }) {
-    if (typeof outputTokens !== 'number' || !Number.isFinite(outputTokens)) return;
-    if (firstAt != null) {
-      this._spread(outputTokens - chars / CHARS_PER_TOKEN, firstAt, lastAt ?? firstAt);
-    } else if (endedAt != null) {
-      this._spread(outputTokens, startedAt ?? endedAt, endedAt);
+  finish(id, { outputTokens = null, firstAt = null, lastAt = null, dispatchedAt = null, endedAt = null, model = null } = {}) {
+    const s = this.streams.get(id);
+    this.streams.delete(id);
+    const end = time(endedAt);
+    if (end !== null) this._observe(end);
+    const n = tokens(outputTokens);
+    const first = time(firstAt) ?? s?.firstAt ?? null;
+    const last = time(lastAt) ?? s?.lastAt ?? first;
+    if (n === null) {
+      if (s && first !== null && last !== null) this._spread(s.chars / CHARS_PER_TOKEN, first, last);
+      return;
     }
+    if (first !== null && last !== null) {
+      this._spread(n, first, last);
+      const pace = requestRate({ outputTokens: n, firstAt: first, lastAt: last });
+      const name = model || s?.model;
+      if (pace !== null && name) this._learn(name, Math.min(pace, MAX_STREAM_RATE));
+      return;
+    }
+    const from = time(dispatchedAt);
+    if (end !== null) this._spread(n, from ?? end, end);
+  }
+
+  /** The measured pace of `model`, tok/s, or null before any of its turns has
+   *  finished with a count. @param {string|null|undefined} model */
+  modelRate(model) {
+    return model ? this.paces.get(model) ?? null : null;
+  }
+
+  /** Tokens a stream in flight has generated by `at`, by estimate, and for how
+   *  long it has been generating.
+   *  @param {Stream} s @param {number} at */
+  _estimate(s, at) {
+    const genMs = Math.max(0, at - s.firstAt);
+    const pace = this.modelRate(s.model) ?? 0;
+    const est = Math.min(Math.max(s.chars / CHARS_PER_TOKEN, (genMs / 1000) * pace), MAX_REQUEST_TOKENS);
+    return { est, genMs };
+  }
+
+  /** The estimated rate of request `id` while it streams, or null before it has
+   *  been generating for LIVE_AFTER_MS or while there is nothing to estimate
+   *  from. The same estimate the fleet reading uses, over its generating time.
+   *  @param {unknown} id @param {number} [at] */
+  liveRate(id, at = this.now()) {
+    const s = this.streams.get(id);
+    if (!s) return null;
+    const { est, genMs } = this._estimate(s, at);
+    return genMs >= LIVE_AFTER_MS && est > 0 ? est / (genMs / 1000) : null;
   }
 
   /** Fleet tok/s over the window ending at `at`.
    *  @param {number} [at] */
   rate(at = this.now()) {
-    const sec = Math.floor(at / 1000);
-    this._advance(sec);
+    const t = this._observe(at);
+    const sec = Math.floor(t / 1000);
     const n = this.ring.length;
     const w = this.windowSec;
     // The current second is partly elapsed, so the window takes the same
     // fraction LESS of the second it reaches back into: exactly `w` seconds
     // either way, and the needle slides between buckets instead of stepping.
-    const into = (at - sec * 1000) / 1000;
+    const into = Math.min(1, Math.max(0, (t - sec * 1000) / 1000));
     let sum = 0;
     for (let k = 0; k < w; k++) sum += this.ring[mod(sec - k, n)];
     sum += this.ring[mod(sec - w, n)] * (1 - into);
-    return Math.max(0, sum / w);
+    const from = t - w * 1000;
+    for (const s of this.streams.values()) {
+      const { est, genMs } = this._estimate(s, t);
+      if (!est) continue;
+      sum += genMs > 0 ? est * (Math.min(genMs, t - from) / genMs) : est;
+    }
+    const r = sum / w;
+    return Number.isFinite(r) && r > 0 ? r : 0;
   }
 
-  /** Whether any token landed in the window ending at `at`.
+  /** Whether the reading is anything but a settled zero: a stream in flight, or
+   *  tokens still in the window. The TUI keeps its fast tick for exactly as long.
    *  @param {number} [at] */
   recent(at = this.now()) {
-    return at - this.lastAt < this.windowSec * 1000;
+    return this.streams.size > 0 || this.rate(at) > 0;
   }
 
   /**
@@ -307,9 +427,11 @@ export class ThroughputMeter {
    */
   sample(at = this.now()) {
     const rate = this.rate(at);
-    const dt = this.sampledAt === null ? 0 : Math.max(0, at - this.sampledAt);
-    this.sampledAt = at;
-    this.peak = Math.max(rate, this.peak * 0.5 ** (dt / PEAK_HALF_LIFE_MS));
+    const t = time(at) ?? 0;
+    const dt = this.sampledAt === null ? 0 : Math.max(0, t - this.sampledAt);
+    this.sampledAt = t;
+    const decayed = this.peak * 0.5 ** (dt / PEAK_HALF_LIFE_MS);
+    this.peak = Number.isFinite(decayed) ? Math.max(rate, decayed) : rate;
     if (rate > this.scale) {
       this.scale = niceCeil(rate);
     } else {
@@ -317,6 +439,40 @@ export class ThroughputMeter {
       if (fit < this.scale) this.scale = fit;
     }
     return { rate, peak: this.peak, scale: this.scale };
+  }
+
+  /** Fold one finished turn's pace into its model's.
+   *  @param {string} model @param {number} pace */
+  _learn(model, pace) {
+    const was = this.paces.get(model);
+    this.paces.delete(model);
+    this.paces.set(model, was === undefined ? pace : was + MODEL_RATE_WEIGHT * (pace - was));
+    if (this.paces.size > MODEL_RATE_KEYS) {
+      const oldest = this.paces.keys().next();
+      if (!oldest.done) this.paces.delete(oldest.value);
+    }
+  }
+
+  /**
+   * Move the ring's head to the time `at`, emptying the seconds it passes, and
+   * return the time to read at. A clock that stepped back by more than a second
+   * would read slots that belong to other seconds through the ring's modulo, so
+   * the ring starts over there; a smaller step back is jitter, and reads at the
+   * head.
+   * @param {number} at
+   */
+  _observe(at) {
+    const t = time(at) ?? (this.headSec === null ? 0 : this.headSec * 1000);
+    const sec = Math.floor(t / 1000);
+    if (this.headSec === null) { this.headSec = sec; return t; }
+    if (sec < this.headSec - 1) {
+      this.ring.fill(0);
+      this.headSec = sec;
+      return t;
+    }
+    if (sec < this.headSec) return this.headSec * 1000;
+    this._advance(sec);
+    return t;
   }
 
   /** Move the ring's head forward to `sec`, emptying the seconds it passes.
@@ -330,32 +486,30 @@ export class ThroughputMeter {
     this.headSec = sec;
   }
 
-  /** Add `tokens` to second `sec`, if it is still in the ring. Never below zero:
-   *  a correction that takes more than a bucket holds takes it to zero.
-   *  @param {number} sec @param {number} tokens @param {number} at */
-  _bump(sec, tokens, at) {
+  /** Add `amount` to second `sec`, if it is still in the ring.
+   *  @param {number} sec @param {number} amount */
+  _bump(sec, amount) {
     this._advance(sec);
     const head = /** @type {number} */ (this.headSec);
-    if (sec <= head - this.ring.length) return;
-    const i = mod(sec, this.ring.length);
-    this.ring[i] = Math.max(0, this.ring[i] + tokens);
-    if (at > this.lastAt) this.lastAt = at;
+    if (sec <= head - this.ring.length || sec > head) return;
+    this.ring[mod(sec, this.ring.length)] += amount;
   }
 
-  /** `tokens` spread evenly over [from, to], the part inside the ring only.
-   *  @param {number} tokens @param {number} from @param {number} to */
-  _spread(tokens, from, to) {
-    if (!Number.isFinite(tokens) || tokens === 0) return;
-    if (!(to > from)) { this._bump(Math.floor(to / 1000), tokens, to); return; }
+  /** `amount` spread evenly over [from, to], the part inside the ring only.
+   *  Never negative: the ring holds only what was generated.
+   *  @param {number} amount @param {number} from @param {number} to */
+  _spread(amount, from, to) {
+    if (!Number.isFinite(amount) || !(amount > 0)) return;
+    if (!(to > from)) { this._bump(Math.floor(to / 1000), amount); return; }
     const last = Math.floor(to / 1000);
     this._advance(last);
     const head = /** @type {number} */ (this.headSec);
     const first = Math.max(Math.floor(from / 1000), head - this.ring.length + 1);
-    const perMs = tokens / (to - from);
+    const perMs = amount / (to - from);
     for (let s = first; s <= last; s++) {
       const lo = Math.max(from, s * 1000);
       const hi = Math.min(to, (s + 1) * 1000);
-      if (hi > lo) this._bump(s, perMs * (hi - lo), Math.min(to, hi));
+      if (hi > lo) this._bump(s, perMs * (hi - lo));
     }
   }
 }

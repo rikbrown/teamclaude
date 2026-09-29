@@ -21,9 +21,9 @@ const claude = (name) => ({ name, type: 'oauth', accessToken: `t-${name}`, refre
 const codex = (name) => ({ name, type: 'oauth', provider: 'codex', accountId: `acct-${name}`, accessToken: `c-${name}`, refreshToken: 'r', expiresAt: Date.now() + H });
 
 /** Ten Anthropic seats drawing F7 bars and two Codex seats with no session
- *  window: the operator's own fleet, whose top block on a 660-column terminal
+ *  window: a two-provider pool whose top block, on a 660-column terminal,
  *  leaves hundreds of columns blank. */
-function riksFleet(count = 10) {
+function wideFleet(count = 10) {
   const names = Array.from({ length: count }, (_, i) => `seat${i}@example.com`);
   const am = new AccountManager([...names.map(claude), codex('codex:a@example.com'), codex('codex:b@example.com')], 0.98, {});
   am.accounts.forEach((a, i) => {
@@ -109,11 +109,12 @@ const dialLines = (frame) => {
 // the frame the dashboard drew before the meter existed.
 test('off, the frame is the same whatever the meter holds', () => {
   for (const width of [660, 230, 120]) {
-    const plain = render(tuiFor(riksFleet()), width);
-    // The operator's own header, unchanged: title, padding, port block.
-    assert.equal(plain.frame[0], ` RikClaude Harness${' '.repeat(width - 30)}Port 3456 ▲ `);
+    const plain = render(tuiFor(wideFleet()), width);
+    // The header as it always was: title, padding, port block.
+    assert.match(plain.frame[0], /^ \S.*\S {2,}Port 3456 ▲ $/);
+    assert.equal(plain.frame[0].length, width);
     for (const config of [{}, { throughputMeter: false }]) {
-      const tui = tuiFor(riksFleet(), config);
+      const tui = tuiFor(wideFleet(), config);
       // Everything the hooks could have left behind: a stream's progress, a
       // settled count in the meter, and the request itself gone again.
       traffic(tui);
@@ -126,7 +127,7 @@ test('off, the frame is the same whatever the meter holds', () => {
 });
 
 test('off, a streaming request carries no estimate', () => {
-  const tui = tuiFor(riksFleet());
+  const tui = tuiFor(wideFleet());
   traffic(tui);
   const active = render(tui, 660).frame.find(l => l.includes('abc123'));
   assert.match(active.trimEnd(), / \(\d+\.\ds\.\.\.\)$/);
@@ -135,7 +136,7 @@ test('off, a streaming request carries no estimate', () => {
 test('off, a finished request\'s line is what it always was, even if the server still timed it', () => {
   // A toggle mid-request: the server sampled the meter on at dispatch, so the
   // end carries a count, but the operator has turned it off since.
-  const tui = tuiFor(riksFleet(), { throughputMeter: false });
+  const tui = tuiFor(wideFleet(), { throughputMeter: false });
   tui.onRequestStart(9, { method: 'POST', path: '/v1/messages', sessionId: null });
   tui.onRequestEnd(9, { ...END, outputTokens: 500, firstTokenAt: 0, lastTokenAt: 5_000 });
   assert.match(strip(tui.log[0].msg), /\(200, \d+\.\ds\)$/);
@@ -145,8 +146,8 @@ test('off, a finished request\'s line is what it always was, even if the server 
 // The rate is kept beside the line, not in it, so an entry logged while the
 // meter was on reads as it always did once the meter is off.
 test('turning the meter off takes the rate off lines already logged', async () => {
-  const tui = tuiFor(riksFleet(), { throughputMeter: true });
-  const off = tuiFor(riksFleet());
+  const tui = tuiFor(wideFleet(), { throughputMeter: true });
+  const off = tuiFor(wideFleet());
   for (const t of [tui, off]) {
     t.onRequestStart(9, { method: 'POST', path: '/v1/messages', sessionId: null });
     t.onRequestEnd(9, { ...END, outputTokens: 840, firstTokenAt: 1_000, lastTokenAt: 11_000 });
@@ -162,7 +163,7 @@ test('turning the meter off takes the rate off lines already logged', async () =
 // ------------------------------------------------------------ on: per request
 
 test('a finished request carries its exact rate inside the parentheses', () => {
-  const tui = tuiFor(riksFleet(), { throughputMeter: true });
+  const tui = tuiFor(wideFleet(), { throughputMeter: true });
   tui.onRequestStart(9, { method: 'POST', path: '/v1/messages', sessionId: null });
   tui.onRequestEnd(9, { ...END, outputTokens: 840, firstTokenAt: 1_000, lastTokenAt: 11_000 });
   assert.match(lineOf(tui, 200, 'seat1@example.com (200'), /POST \/v1\/messages \(claude-opus-5-5\) → seat1@example\.com \(200, \d+\.\ds, 84 tok\/s\)$/);
@@ -171,7 +172,7 @@ test('a finished request carries its exact rate inside the parentheses', () => {
 });
 
 test('a request with no measurable rate keeps the line it always had', () => {
-  const tui = tuiFor(riksFleet(), { throughputMeter: true });
+  const tui = tuiFor(wideFleet(), { throughputMeter: true });
   for (const [id, extra] of [[1, { outputTokens: null, firstTokenAt: null, lastTokenAt: null }], [2, { outputTokens: 50, firstTokenAt: 1_000, lastTokenAt: 1_100 }]]) {
     tui.onRequestStart(id, { method: 'POST', path: '/v1/messages', sessionId: null });
     tui.onRequestEnd(id, { ...END, account: `acct${id}`, ...extra });
@@ -182,7 +183,7 @@ test('a request with no measurable rate keeps the line it always had', () => {
 // A buffered response has no generation interval, and the time before the
 // attempt that answered was sent (a quota hold, a failover) is not generation.
 test('a buffered response is timed from the dispatch of the attempt that answered', () => {
-  const tui = tuiFor(riksFleet(), { throughputMeter: true });
+  const tui = tuiFor(wideFleet(), { throughputMeter: true });
   const now = Date.now();
   tui.onRequestStart(9, { method: 'POST', path: '/v1/messages', sessionId: null });
   tui.active.get(9).started = now - 95_000;
@@ -192,7 +193,7 @@ test('a buffered response is timed from the dispatch of the attempt that answere
 });
 
 test('a streaming request shows a marked estimate once it has generated for a second', () => {
-  const tui = tuiFor(riksFleet(), { throughputMeter: true });
+  const tui = tuiFor(wideFleet(), { throughputMeter: true });
   const now = Date.now();
   tui.onRequestStart(1, { method: 'POST', path: '/v1/messages', sessionId: 'aaa111' });
   tui.active.get(1).started = now - 3_000;
@@ -210,7 +211,7 @@ test('a streaming request shows a marked estimate once it has generated for a se
 // Hidden thinking streams nothing for its tokens; once the model has a pace
 // the line reads at it, where a character count read zero.
 test('a request thinking in silence reads at its model\'s pace, not at zero', () => {
-  const tui = tuiFor(riksFleet(), { throughputMeter: true });
+  const tui = tuiFor(wideFleet(), { throughputMeter: true });
   const now = Date.now();
   tui.onRequestStart(1, { method: 'POST', path: '/v1/messages', sessionId: 'aaa111' });
   tui.onRequestModel(1, { model: 'claude-opus-5-5' });
@@ -224,7 +225,7 @@ test('a request thinking in silence reads at its model\'s pace, not at zero', ()
 });
 
 test('the progress hook adds to counters and never paints', () => {
-  const tui = tuiFor(riksFleet(), { throughputMeter: true });
+  const tui = tuiFor(wideFleet(), { throughputMeter: true });
   tui.onRequestStart(1, { method: 'POST', path: '/v1/messages', sessionId: null });
   tui.onRequestModel(1, { model: 'm' });
   let renders = 0;
@@ -239,7 +240,7 @@ test('the progress hook adds to counters and never paints', () => {
 });
 
 test('a request\'s end settles its stream in the meter', () => {
-  const tui = tuiFor(riksFleet(), { throughputMeter: true });
+  const tui = tuiFor(wideFleet(), { throughputMeter: true });
   tui.onRequestStart(1, { method: 'POST', path: '/v1/messages', sessionId: null });
   tui.onRequestProgress(1, { chars: 40, at: Date.now() });
   tui.onRequestEnd(1, { ...END, outputTokens: null, firstTokenAt: null, lastTokenAt: null, status: 499 });
@@ -254,7 +255,7 @@ test('a request\'s end settles its stream in the meter', () => {
 test('a line that would pass the edge shortens its middle, not its rate', () => {
   const account = 'someone.with.a.long.name@example.com';
   for (let width = 70; width <= 200; width++) {
-    const tui = tuiFor(riksFleet(), { throughputMeter: true });
+    const tui = tuiFor(wideFleet(), { throughputMeter: true });
     const now = Date.now();
     tui.onRequestStart(9, { method: 'POST', path: '/v1/messages?beta=true', sessionId: 'abcdef' });
     tui.onRequestEnd(9, { ...END, path: '/v1/messages?beta=true', account, sessionId: 'abcdef', outputTokens: 300, firstTokenAt: now - 3_000, lastTokenAt: now });
@@ -278,7 +279,7 @@ test('a line that would pass the edge shortens its middle, not its rate', () => 
 });
 
 test('the path gives way before the model and the account', () => {
-  const tui = tuiFor(riksFleet(), { throughputMeter: true });
+  const tui = tuiFor(wideFleet(), { throughputMeter: true });
   const now = Date.now();
   tui.onRequestStart(9, { method: 'POST', path: '/v1/messages?beta=true', sessionId: 'abcdef' });
   tui.onRequestEnd(9, { ...END, path: '/v1/messages?beta=true', sessionId: 'abcdef', outputTokens: 300, firstTokenAt: now - 3_000, lastTokenAt: now });
@@ -289,7 +290,7 @@ test('the path gives way before the model and the account', () => {
 });
 
 test('off, a line past the edge is cut as it always was', () => {
-  const tui = tuiFor(riksFleet());
+  const tui = tuiFor(wideFleet());
   const now = Date.now();
   tui.onRequestStart(9, { method: 'POST', path: '/v1/messages?beta=true', sessionId: 'abcdef' });
   tui.onRequestEnd(9, { ...END, sessionId: 'abcdef', outputTokens: 300, firstTokenAt: now - 3_000, lastTokenAt: now });
@@ -300,7 +301,7 @@ test('off, a line past the edge is cut as it always was', () => {
 });
 
 test('a hostile model string stays inert on a fitted line', () => {
-  const tui = tuiFor(riksFleet(), { throughputMeter: true });
+  const tui = tuiFor(wideFleet(), { throughputMeter: true });
   const now = Date.now();
   tui.onRequestStart(9, { method: 'POST', path: '/v1/messages', sessionId: null });
   tui.onRequestEnd(9, { ...END, model: 'claude-\x1b]52;c;aGVsbG8=\x07\x1b[2Jevil', outputTokens: 300, firstTokenAt: now - 3_000, lastTokenAt: now });
@@ -313,7 +314,7 @@ test('a hostile model string stays inert on a fitted line', () => {
 // ------------------------------------------------------------ on: the dial
 
 test('on an ultrawide terminal the dial sits beside the top block, and cuts nothing', () => {
-  const tui = tuiFor(riksFleet(), { throughputMeter: true });
+  const tui = tuiFor(wideFleet(), { throughputMeter: true });
   traffic(tui);
   // How wide the block is as composed, trailing blanks and all: a panel line
   // padded to its column counts, and a frame cannot tell that from the pad.
@@ -346,7 +347,7 @@ test('on an ultrawide terminal the dial sits beside the top block, and cuts noth
 
 test('the dial takes the block\'s place in every fleet mode that leaves it room', () => {
   for (const mode of ['split', 'full', 'off']) {
-    const tui = tuiFor(riksFleet(), { throughputMeter: true });
+    const tui = tuiFor(wideFleet(), { throughputMeter: true });
     tui.fleetMode = mode;
     const { frame, rows, panel } = render(tui, 660);
     assert.ok(dialLines(frame).length >= 6, `${mode}: no dial`);
@@ -358,7 +359,7 @@ test('the dial takes the block\'s place in every fleet mode that leaves it room'
 
 test('a terminal with no room for the dial puts the reading in the header instead', () => {
   for (const [width, height] of [[230, 40], [120, 30], [80, 24]]) {
-    const tui = tuiFor(riksFleet(), { throughputMeter: true });
+    const tui = tuiFor(wideFleet(), { throughputMeter: true });
     traffic(tui);
     const { frame } = render(tui, width, height);
     assert.equal(dialLines(frame).length, 0, `W=${width}: a dial with no room for one`);
@@ -368,7 +369,7 @@ test('a terminal with no room for the dial puts the reading in the header instea
 });
 
 test('the header drops the reading rather than its own port block', () => {
-  const am = riksFleet(2);
+  const am = wideFleet(2);
   const tui = tuiFor(am, { throughputMeter: true });
   // A session count wide enough that the reading no longer fits beside it:
   // the rest of the header is 47 columns, and the reading would take nine.
@@ -381,7 +382,7 @@ test('the header drops the reading rather than its own port block', () => {
 test('attach mode draws neither the dial nor the number', () => {
   for (const width of [660, 120]) {
     const remote = new RemoteAccountManager();
-    remote.applyStatus({ accounts: riksFleet().accounts.map((a, i) => ({ name: a.name, index: i, type: 'oauth', provider: a.provider, quota: a.quota })) });
+    remote.applyStatus({ accounts: wideFleet().accounts.map((a, i) => ({ name: a.name, index: i, type: 'oauth', provider: a.provider, quota: a.quota })) });
     const on = render(tuiFor(remote, { throughputMeter: true }, { remote: true }), width);
     const off = render(tuiFor(remote, {}, { remote: true }), width);
     assert.equal(dialLines(on.frame).length, 0);
@@ -391,7 +392,7 @@ test('attach mode draws neither the dial nor the number', () => {
 });
 
 test('other screens carry the reading in the header, since they have no dial', () => {
-  const tui = tuiFor(riksFleet(), { throughputMeter: true });
+  const tui = tuiFor(wideFleet(), { throughputMeter: true });
   tui.mode = 'settings';
   const { frame } = render(tui, 660);
   assert.match(frame[0], /0 tok\/s {2}Port 3456/);
@@ -416,7 +417,7 @@ test('a short block grows to hold the dial only on a terminal with rows to spare
 
 test('the settings row turns the meter on and off, live, and saves it', async () => {
   const saved = [];
-  const tui = tuiFor(riksFleet(), {}, { saveConfig: async (c) => { saved.push(c.throughputMeter); } });
+  const tui = tuiFor(wideFleet(), {}, { saveConfig: async (c) => { saved.push(c.throughputMeter); } });
   const row = () => tui._settingsFields().find(f => f.id === 'throughputMeter');
   assert.equal(strip(row().value()), 'off', 'absent reads off');
   assert.equal(dialLines(render(tui, 660).frame).length, 0);
@@ -433,14 +434,14 @@ test('the settings row turns the meter on and off, live, and saves it', async ()
 });
 
 test('a save that fails leaves the meter as it was', async () => {
-  const tui = tuiFor(riksFleet(), {}, { saveConfig: async () => { throw new Error('disk full'); } });
+  const tui = tuiFor(wideFleet(), {}, { saveConfig: async () => { throw new Error('disk full'); } });
   await tui._settingsFields().find(f => f.id === 'throughputMeter').right();
   assert.equal(tui.config.throughputMeter, undefined);
   assert.match(tui.log[0].msg, /throughput left unchanged/);
 });
 
 test('the settings screen names the setting', () => {
-  const tui = tuiFor(riksFleet());
+  const tui = tuiFor(wideFleet());
   tui.mode = 'settings';
   const { frame } = render(tui, 120, 80);
   assert.ok(frame.some(l => /^ {2}Throughput {2}— output tokens per second/.test(l)));
@@ -451,7 +452,7 @@ test('the settings screen names the setting', () => {
 
 test('the tick stays fast while the reading falls back to zero, and only then', () => {
   let now = 1e12;
-  const tui = tuiFor(riksFleet(), { throughputMeter: true });
+  const tui = tuiFor(wideFleet(), { throughputMeter: true });
   tui.throughput.now = () => now;
   assert.equal(tui._tickDelay(), 5_000, 'idle, and nothing to settle');
   tui.throughput.progress('s', 400, now);

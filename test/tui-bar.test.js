@@ -343,6 +343,10 @@ function renderBackendRow(backend, config = { quotaBarPercent: true }, width = 1
     accountManager: am, config: { proxy: { port: 1 }, accounts: [], routes: [], ...config }, sx: null,
     saveConfig: async () => {}, syncAccounts: async () => 0, onQuit: () => {}, probeQuota: () => {},
   });
+  // The bar width is measured against the whole line. [f] defaults to the
+  // split view, which hands part of it to the fleet panel — a layout with its
+  // own coverage in tui-fleet.test.js.
+  tui.fleetMode = 'off';
   const cols = Object.getOwnPropertyDescriptor(process.stdout, 'columns');
   const rows = Object.getOwnPropertyDescriptor(process.stdout, 'rows');
   Object.defineProperty(process.stdout, 'columns', { value: width, configurable: true });

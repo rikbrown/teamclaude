@@ -38,6 +38,10 @@ function screen(am, width, { remote = false } = {}) {
     saveConfig: async () => {}, syncAccounts: async () => 0, onQuit: () => {}, probeQuota: () => {},
     remote,
   });
+  // The fleet panel would take its third of the line beside the panes; these
+  // tests are about how the panes divide the whole of it (tui-fleet.test.js
+  // covers the two together).
+  tui.fleetMode = 'off';
   const cols = Object.getOwnPropertyDescriptor(process.stdout, 'columns');
   const rows = Object.getOwnPropertyDescriptor(process.stdout, 'rows');
   Object.defineProperty(process.stdout, 'columns', { value: width, configurable: true });

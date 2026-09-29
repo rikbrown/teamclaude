@@ -2907,7 +2907,7 @@ export class TUI {
       if (logRows < Math.ceil((H * 2) / 3)) return false;
       for (let i = 0; i < grow; i++) block.push('');
     }
-    const dial = renderSpeedo({ rate: meter.rate, max: meter.scale, width: w, height: h, paint: { green, yellow, red, dim, bold } });
+    const dial = renderSpeedo({ rate: meter.rate, max: meter.scale, width: w, height: h, paint: { cyan, dim, bold } });
     // truncate closes any colour the block's line left open, as sideBySide
     // does, so a row that ends mid-bar cannot bleed into the gutter.
     for (let i = 0; i < h; i++) block[1 + i] = rpad(truncate(block[1 + i], used), used) + FLEET_GUTTER_PAD + dial[i];

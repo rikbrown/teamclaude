@@ -282,6 +282,21 @@ test("a seat's own switch threshold is its ceiling, not the fleet's", () => {
   assert.ok(Math.abs(weekly.spentWeight - 1) < 1e-9);
 });
 
+// Upstream's money cap (#466): past it, rotation refuses the seat whatever its
+// windows say, so what is left of them is headroom nothing will spend. Still a
+// seat the pool has, though, so it stays in the tally.
+test('a seat past its money cap is out of the figures and still in the tally', () => {
+  const spend = { enabled: true, usedMinor: 2500, exponent: 2 };
+  const anthropic = pool(fleetAggregate([
+    seat('capped', { rateLimitTier: 'default_claude_ai', maxSpend: 20, quota: { unified7d: 0.1, spend } }),
+    seat('open', { rateLimitTier: 'default_claude_ai', quota: { unified7d: 0.5 } }),
+  ], { thresholdFor: () => 1, now: NOW }), 'anthropic');
+
+  assert.equal(anthropic.total, 2);
+  assert.equal(anthropic.counted, 1);
+  assert.equal(anthropic.buckets.unified7d.utilization, 0.5);
+});
+
 test('a per-account cap is the harder ceiling and lowers that seat alone', () => {
   const groups = fleetAggregate([
     seat('capped', { rateLimitTier: 'default_claude_ai', maxUsage: { unified7d: 0.5 }, quota: { unified7d: 0.25 } }),

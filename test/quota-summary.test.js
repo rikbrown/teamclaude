@@ -372,6 +372,22 @@ test('headroom is measured against the threshold rotation actually stops at', ()
   assert.equal(anthropic.buckets.unified7d.utilization, 0.5);
 });
 
+// Upstream's per-account `switchThreshold` (#428) is a ceiling rotation
+// honours, so the aggregate has to honour it too: asked with the bucket alone,
+// the lookup answers the fleet figure and credits the seat with headroom it
+// will never be allowed to spend.
+test("a seat's own switch threshold is its ceiling, not the fleet's", () => {
+  const am = new AccountManager([], 0.98);
+  const weekly = pool(fleetAggregate([
+    seat('low', { rateLimitTier: 'default_claude_ai', switchThreshold: 0.5, quota: { unified7d: 0.5 } }),
+    seat('std', { rateLimitTier: 'default_claude_ai', quota: { unified7d: 0.5 } }),
+  ], { thresholdFor: (bucket, account) => am.thresholdFor(bucket, account), now: NOW }), 'anthropic').buckets.unified7d;
+
+  // Spendable is 0.5 + 0.98, and the first seat has spent all of its share.
+  assert.ok(Math.abs(weekly.capacityWeight - 1.48) < 1e-9);
+  assert.ok(Math.abs(weekly.spentWeight - 1) < 1e-9);
+});
+
 test('a per-account cap is the harder ceiling and lowers that seat alone', () => {
   const groups = fleetAggregate([
     seat('capped', { rateLimitTier: 'default_claude_ai', maxUsage: { unified7d: 0.5 }, quota: { unified7d: 0.25 } }),

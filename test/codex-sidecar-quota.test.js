@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { AccountManager } from '../src/account-manager.js';
-import { collectRateLimitHeaders, codexQuotaRejected } from '../src/server.js';
+import { collectRateLimitHeaders } from '../src/server.js';
 
 // Covers the codex-proxy feature's quota half: OpenAI/Codex rate-limit telemetry
 // (`x-codex-primary/secondary-*` response headers, as forwarded by a translating
@@ -100,14 +100,7 @@ test('collectRateLimitHeaders keeps anthropic-ratelimit-* and x-codex-*, drops t
 
 // ── durable 429 classification ───────────────────────────────────────────────
 
-test('codexQuotaRejected is true when either codex window is spent', () => {
-  assert.equal(codexQuotaRejected({ 'x-codex-primary-used-percent': '100' }), true);
-  assert.equal(codexQuotaRejected({ 'x-codex-primary-used-percent': '104.2' }), true);
-  assert.equal(codexQuotaRejected({ 'x-codex-secondary-used-percent': '100' }), true);
-});
-
-test('codexQuotaRejected is false below the limit or without codex headers', () => {
-  assert.equal(codexQuotaRejected({ 'x-codex-primary-used-percent': '99.4' }), false);
-  assert.equal(codexQuotaRejected({ 'anthropic-ratelimit-unified-5h-status': 'rejected' }), false);
-  assert.equal(codexQuotaRejected({}), false);
-});
+// A spent window is read through `codexSpentWindows` (codex-quota.js), whose
+// cases live in codex-quota-rejection.test.js. A forwarded `x-codex-*` header
+// reaches it exactly as a direct Codex one does, so there is nothing
+// sidecar-specific left to pin here.

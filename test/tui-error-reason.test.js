@@ -26,6 +26,10 @@ function listed(am, width = 140) {
     saveConfig: async () => {}, syncAccounts: async () => 0, onQuit: () => {}, probeQuota: () => {},
     remote: am instanceof RemoteAccountManager,
   });
+  // The reason line wraps to the row pane. [f] defaults to the split view,
+  // which hands part of the line to the fleet panel (tui-fleet.test.js covers
+  // the two together); these tests read the line at the full width.
+  tui.fleetMode = 'off';
   const cols = Object.getOwnPropertyDescriptor(process.stdout, 'columns');
   const rows = Object.getOwnPropertyDescriptor(process.stdout, 'rows');
   Object.defineProperty(process.stdout, 'columns', { value: width, configurable: true });

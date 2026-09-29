@@ -226,14 +226,20 @@ are eligible on the way back. This separation lets one route list both.
 5. **Restart the server.** `sidecars[].env` is read only at startup, so a config reload does not
    apply the change — and killing the sidecar only starts it again with the old environment.
 
-Rotation, quota bars, the session-reset countdown and `teamclaude disable` then work for ChatGPT
-accounts as they do for Claude accounts. The sidecar no longer appears in the account table. It
-appears beneath it as a `⚙` readout line that shows its supervised process state. Two things differ:
+Rotation, quota bars, tokens, the session-reset countdown and `teamclaude disable` then work for
+ChatGPT accounts as they do for Claude accounts. The sidecar no longer appears in the account table.
+It appears beneath it as a `⚙` readout line that shows its supervised process state. One thing
+differs:
 
 - **Each turn appears twice** in the activity list and the request log, once per hop.
-- **Tokens are booked against the sidecar account**, not the ChatGPT one. Nothing parses the
-  Responses body shape for usage, so a ChatGPT row reads `N req · 0 tok`. Its quota bars are
-  unaffected — those come from the `x-codex-*` headers on the second hop.
+
+Tokens are booked once, on the **second** hop, against the ChatGPT account that served it — the same
+hop its quota bars come from. The sidecar account is skipped deliberately: it holds a stub login and
+spends nothing of its own, and the usage it reports on the way in is the pool's own figures
+translated, so booking both hops would double every number. Its row therefore reads `N req · 0 tok`
+in `teamclaude status`, which is the truth — the requests are real, the spend belongs to the pool.
+Per-client accounting (`proxy.clientKeys`) still comes from the first hop, the only one that can see
+who asked.
 
 Read [Terms of service](#terms-of-service) before setting this up.
 

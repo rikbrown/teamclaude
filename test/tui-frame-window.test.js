@@ -54,7 +54,7 @@ test('the settings screen keeps its footer on a terminal shorter than the list',
       tui.setIdx = i;
       const rows = frameAt(tui, H);
       assert.equal(rows.length, H);
-      assert.match(rows[0], /TeamClaude/, 'the header holds still');
+      assert.match(rows[0], /RikClaude Harness/, 'the header holds still');
       assert.match(rows[H - 1], /navigate.*Esc back/, `H=${H}, row "${fields[i].label}": the footer fell off the frame`);
       assert.ok(rows.some(r => r.includes('▸') && r.includes(fields[i].label)),
         `H=${H}: the cursor row "${fields[i].label}" scrolled out of its own window`);

@@ -4,6 +4,7 @@ import http from 'node:http';
 import { AccountManager } from '../src/account-manager.js';
 import { createProxyServer } from '../src/server.js';
 import { normalizeResponsesUsage, responsesEventUsage, isResponsesBody } from '../src/responses-usage.js';
+import { ClientUsageTracker } from '../src/client-usage.js';
 
 // A Codex account is a passthrough, so its usage arrives in OpenAI's vocabulary
 // while every counter in this proxy speaks Anthropic's. Nothing read the
@@ -388,4 +389,118 @@ test('an Anthropic buffered response is still booked unchanged', async () => {
     proxy.close();
     upstream.close();
   }
+});
+
+// ---------------------------------------------------------------- the conduit
+
+// A conduit hop is the SAME tokens twice. The sidecar rebuilds an Anthropic
+// usage report out of the Responses figures the pool sent it, so booking both
+// hops would double every number — and while the two ACCOUNT rows are distinct,
+// a session is one row carrying the same id on both hops, so its context and
+// spend would read twice the truth.
+//
+// So the accounting MOVES to the hop that really spent rather than being added
+// to it. Same predicate as the quota guard in codex-conduit-quota.test.js, for
+// the same reason: what a conduit reports belongs to whoever served.
+const oauth = (name, extra = {}) => ({ name, type: 'oauth', accessToken: 't-' + name, refreshToken: 'r', expiresAt: Date.now() + 3600_000, ...extra });
+const conduit = () => oauth('codex', { upstream: 'http://127.0.0.1:18765', priority: 100 });
+const pooled = (name, extra = {}) => oauth(name, { provider: 'codex', accountId: 'acct-' + name, ...extra });
+const ANTHROPIC_USAGE = { input_tokens: 2, cache_read_input_tokens: 377127, cache_creation_input_tokens: 1092, output_tokens: 714 };
+
+test('a conduit books no tokens, in either scope', () => {
+  const am = new AccountManager([conduit(), pooled('one')], 0.98);
+  am.updateUsage(0, ANTHROPIC_USAGE.input_tokens, ANTHROPIC_USAGE.output_tokens);
+  am.beginSession(SID, {});
+  am.recordTokenUsage(0, SID, MODEL, ANTHROPIC_USAGE);
+  assert.equal(am.accounts[0].usage.totalInputTokens, 0);
+  assert.equal(am.accounts[0].usage.totalOutputTokens, 0);
+  assert.equal(am.accounts[0].usage.totalCacheReadTokens, 0);
+  assert.equal(am.sessionTracker.sessions.get(SID)?.tokens?.get(BUCKET), undefined,
+    'the inbound hop doubled the session, which is the one row both hops share');
+});
+
+test('the pooled account the conduit relays to books normally', () => {
+  const am = new AccountManager([conduit(), pooled('one')], 0.98);
+  am.updateUsage(1, 10, 3);
+  am.beginSession(SID, {});
+  am.recordTokenUsage(1, SID, MODEL, ANTHROPIC_USAGE);
+  assert.equal(am.accounts[1].usage.totalInputTokens, 10);
+  assert.equal(am.accounts[1].usage.totalCacheReadTokens, ANTHROPIC_USAGE.cache_read_input_tokens);
+  assert.equal(am.sessionTracker.sessions.get(SID)?.tokens?.get(BUCKET)?.reports, 1);
+});
+
+// A STANDALONE sidecar holds its own ChatGPT login: there is no second hop
+// through this proxy, so what it reports is the only report there will ever be.
+// Dropping it would trade a doubled figure for a missing one.
+test('a standalone sidecar keeps booking its own tokens', () => {
+  const am = new AccountManager([oauth('claude-1'), conduit()], 0.98);
+  am.updateUsage(1, 10, 3);
+  am.beginSession(SID, {});
+  am.recordTokenUsage(1, SID, 'claude-opus-5', ANTHROPIC_USAGE);
+  assert.equal(am.accounts[1].usage.totalInputTokens, 10);
+  assert.equal(am.accounts[1].usage.totalCacheReadTokens, ANTHROPIC_USAGE.cache_read_input_tokens);
+});
+
+// A pooled ChatGPT account reached through a local relay is loopback-addressed
+// and sits beside other Codex accounts, so a conduit test made of those two
+// facts alone swallows it — and then the account that really served books
+// nothing, which is the bug this whole file exists to fix, reintroduced from
+// the other end. What separates them is the wire: a conduit is reached on
+// `/v1/messages` and carries no `provider`, because docs/openai.md says giving
+// one breaks the setup outright.
+test('a pooled ChatGPT account behind a local relay is not mistaken for a conduit', () => {
+  const am = new AccountManager([conduit(), pooled('one', { upstream: 'http://127.0.0.1:9911' }), pooled('two')], 0.98);
+  am.updateUsage(1, 10, 3);
+  assert.equal(am.accounts[1].usage.totalInputTokens, 10);
+});
+
+// WHY THE GUARD LIVES IN THE ACCOUNT MANAGER AND NOT AT THE CALL SITE.
+//
+// The inbound hop is the ONLY one that can see who asked: the outbound one
+// arrives from the sidecar on loopback with no key and no client identity, so
+// per-client accounting has nowhere else to come from. Suppressing the conduit
+// one layer higher — in the SSE parser, say — would look equivalent and would
+// silently end `proxy.clientKeys` reporting for every gpt-* turn.
+test('a conduit hop still attributes its tokens to the client that asked', async () => {
+  const upstream = http.createServer(async (req, res) => {
+    for await (const c of req) void c;
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ type: 'message', content: [], usage: ANTHROPIC_USAGE }));
+  });
+  const upstreamPort = await listen(upstream);
+  const am = new AccountManager([
+    oauth('codex', { upstream: `http://127.0.0.1:${upstreamPort}`, priority: 100 }),
+    pooled('one'),
+  ], 0.98);
+  const tracker = new ClientUsageTracker();
+  const proxy = createProxyServer(am, { proxy: { clientKeys: [{ name: 'claude-code', key: 'cc-key' }] } }, {}, null, tracker);
+  const port = await listen(proxy);
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/v1/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': 'cc-key' },
+      body: JSON.stringify({ model: 'gpt-6-astra', messages: [] }),
+    });
+    await res.text();
+    assert.equal(res.status, 200);
+    const out = tracker.export();
+    assert.equal(out['claude-code']?.inputTokens, ANTHROPIC_USAGE.input_tokens,
+      'the only hop that knows the client stopped reporting its tokens');
+    assert.equal(out['claude-code'].outputTokens, ANTHROPIC_USAGE.output_tokens);
+    assert.equal(am.accounts[0].usage.totalInputTokens, 0,
+      'the conduit booked the tokens as well, which is the double count');
+  } finally {
+    proxy.close();
+    upstream.close();
+  }
+});
+
+// A session with no live account behind it is still a real spend, so the
+// session scope survives an index nothing matches. Pinned because the conduit
+// guard reads the account by index and an over-eager one would swallow this.
+test('a report against an unknown account still reaches the session', () => {
+  const am = new AccountManager([conduit(), pooled('one')], 0.98);
+  am.beginSession(SID, {});
+  am.recordTokenUsage(99, SID, MODEL, ANTHROPIC_USAGE);
+  assert.equal(am.sessionTracker.sessions.get(SID)?.tokens?.get(BUCKET)?.input, ANTHROPIC_USAGE.input_tokens);
 });

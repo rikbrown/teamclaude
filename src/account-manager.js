@@ -129,6 +129,17 @@ const PERSISTED_QUOTA_FIELDS = [
   // until something next reads /wham/usage — and the row that says so is the
   // only place an operator sees one at all.
   'resetCredits',
+  // The Codex subscription tier, a string from the response headers or the
+  // usage payload. Both sources are traffic, so without this a restarted server
+  // cannot name an account's plan until it next serves a request — and a plan
+  // an account is on does not change over a restart.
+  'planType',
+  // Codex's model-scoped weekly buckets, `{ [slug]: { name, utilization,
+  // resetAt, seenAt } }`. Learned the same way and just as lossy on restart,
+  // and the per-entry `seenAt` is load-bearing beyond the reading itself: it is
+  // what orders the eviction that keeps the table under its cap, so dropping
+  // the table also drops the history that decides what makes room next.
+  'codexModelBuckets',
   // Whether the last Codex reading stated a 5-hour window at all (see
   // _updateCodexQuota). A fact about the subscription's shape rather than a
   // counter, so it holds across a restart: without it a restored Codex row
@@ -5073,6 +5084,20 @@ export class AccountManager {
       if (!match || !match.quota) continue;
       for (const f of PERSISTED_QUOTA_FIELDS) {
         if (match.quota[f] != null) account.quota[f] = match.quota[f];
+      }
+      // Both writers of the Codex bucket table cap it, because its keys are
+      // upstream header names; restoring is the one way in that never passed a
+      // cap. A file we wrote cannot be over the ceiling, but an edited or
+      // half-written one can, and it would then stand until some slug this
+      // server has never seen turns up to evict the surplus. Newest readings
+      // kept, which is the same order the eviction there works in.
+      /** @type {typeof account.quota & CodexLearnedQuota} */
+      const quota = account.quota;
+      const restoredBuckets = quota.codexModelBuckets;
+      if (restoredBuckets && Object.keys(restoredBuckets).length > MAX_CODEX_MODEL_BUCKETS) {
+        quota.codexModelBuckets = Object.fromEntries(Object.entries(restoredBuckets)
+          .sort((a, b) => (b[1]?.seenAt || 0) - (a[1]?.seenAt || 0))
+          .slice(0, MAX_CODEX_MODEL_BUCKETS));
       }
       for (const field of ['organizationType', 'rateLimitTier', 'seatTier', 'hasClaudeMax', 'hasClaudePro']) {
         if (match.profile?.[field] != null) account[field] = match.profile[field];

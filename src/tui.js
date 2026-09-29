@@ -723,6 +723,50 @@ function cleanRequestInfo(info) {
   return out;
 }
 
+/** `s` in at most `w` display columns, ending in `…` when it had to be cut.
+ *  For the plain request fields (path, model, account), which carry no colour.
+ *  @param {string} s @param {number} w */
+function ellipsize(s, w) {
+  if (vw(s) <= w) return s;
+  if (w <= 0) return '';
+  if (w === 1) return '…';
+  return `${truncate(s, w - 1).slice(0, -RESET.length)}…`;
+}
+
+// Columns each request field keeps before the next one gives any up.
+const REQ_PATH_FLOOR = 8;
+const REQ_MODEL_FLOOR = 8;
+const REQ_ACCOUNT_FLOOR = 8;
+
+/**
+ * An activity line's descriptive middle — the path, the model and the account —
+ * in at most `budget` columns. Used only while the throughput meter is on, whose
+ * rate sits at the END of the line: without a budget, a line that already ran
+ * to the edge lost `tok/s` to fitLine, which is the reading the meter adds.
+ *
+ * The fields give way in order of how little they say: the path first (it is
+ * nearly always `/v1/messages`), then the model, then the account, each down to
+ * a floor, and only then the whole middle. `model` is drawn dim on an
+ * in-flight line and plain on a finished one, as before; `account` null draws
+ * no arrow, as for a request not yet routed.
+ *
+ * @param {{ path: string, model: string|null, account: string|null, pin: string, dimModel: boolean }} p
+ * @param {number} budget
+ */
+function requestMiddle({ path, model, account, pin, dimModel }, budget) {
+  const compose = (/** @type {string} */ pa, /** @type {string|null} */ mo, /** @type {string|null} */ ac) => {
+    const m = mo ? ` (${mo})` : '';
+    return `${pa}${dimModel && m ? dim(m) : m}${ac != null ? ` → ${ac}${pin}` : ''}`;
+  };
+  let [pa, mo, ac] = [path, model, account];
+  const over = () => vw(compose(pa, mo, ac)) - budget;
+  if (over() > 0) pa = ellipsize(pa, Math.max(REQ_PATH_FLOOR, vw(pa) - over()));
+  if (over() > 0 && mo) mo = ellipsize(mo, Math.max(REQ_MODEL_FLOOR, vw(mo) - over()));
+  if (over() > 0 && ac != null) ac = ellipsize(ac, Math.max(REQ_ACCOUNT_FLOOR, vw(ac) - over()));
+  const out = compose(pa, mo, ac);
+  return over() > 0 ? `${truncate(out, Math.max(0, budget - 1))}…` : out;
+}
+
 // A stored key, shown enough to recognise and no more. First-4/last-4 on a key
 // of eight characters or fewer is the whole key; a short one shows its tail only.
 export function maskKey(key) {
@@ -1124,19 +1168,33 @@ export class TUI {
       dispatchedAt: info.dispatchedAt ?? r?.started ?? null, endedAt: now, model: info.model || r?.model || null,
     };
     this.throughput.finish(id, timing);
-    const tps = r && this._throughputOn() ? requestRate({ ...timing, startedAt: timing.dispatchedAt }) : null;
-    const rate = tps != null ? `, ${formatRate(tps)} tok/s` : '';
-    this._addLog(`${this._sessionTag(sid)} ${info.method} ${info.path}${model} → ${acct}${pin} (${info.status}, ${dur}s${rate})`);
+    const tps = r ? requestRate({ ...timing, startedAt: timing.dispatchedAt }) : null;
+    const tag = this._sessionTag(sid);
+    // The line as it has always read. The rate is kept beside it rather than in
+    // it, and drawn only while the meter is on (see _requestLine), so turning
+    // the meter off gives back the old line for every entry, however it was
+    // logged; and the pieces are kept so the line can be fitted around it.
+    this._addLog(`${tag} ${info.method} ${info.path}${model} → ${acct}${pin} (${info.status}, ${dur}s)`, {
+      head: `${tag} ${info.method} `, path: info.path, model: info.model || null, account: acct, pin,
+      status: info.status, dur, tps,
+    });
     if (this.active.size === 0) this._retick();   // animating → idle
   }
 
-  _addLog(msg) {
+  /**
+   * @param {string} msg
+   * @param {{ head: string, path: string, model: string|null, account: string, pin: string, status: any, dur: string, tps: number|null }|null} [req]
+   *   a request's line in pieces, for the throughput meter's rendering of it
+   */
+  _addLog(msg, req = null) {
     // The screen copy keeps the colour callers painted on, and only that: a
     // request's model string is repainted from this list every frame for as
     // long as the entry lives, so an escape stored here would fire 200 times.
     msg = scrubLine(msg).replace(/^\[TeamClaude\]\s*/, '');
+    // The pieces are scrubbed by the same rule, since they are drawn in its place.
+    if (req) req = { ...req, head: scrubLine(req.head), path: scrubLine(req.path), model: req.model && scrubLine(req.model), account: scrubLine(req.account) };
     const t = timestamp();
-    this.log.unshift({ t, msg });
+    this.log.unshift(req ? { t, msg, req } : { t, msg });
     if (this.log.length > 200) this.log.length = 200;
     // sanitizeText, not `strip`: the latter removes SGR colour only, so an
     // erase or cursor-move sequence reached the file, as did a newline.
@@ -2528,17 +2586,26 @@ export class TUI {
       const m = r.model ? dim(` (${r.model})`) : ''; // filled in as soon as the model is peeked from the stream
       const pin = r.pinned ? dim(' [pin]') : '';
       const a = r.account ? ` → ${r.account}${pin}` : '';
+      if (!meter) {
+        lines.push(` ${sp} ${gray(r.t)}  ${this._sessionTag(r.sessionId)} ${r.method} ${r.path}${m}${a} ${dim(`(${el}s...)`)}`);
+        continue;
+      }
       // The meter's estimate for this request, and marked as one: the exact
-      // figure is on the finished line.
-      const tps = meter ? this.throughput.liveRate(id, now) : null;
+      // figure is on the finished line. Fitted like a finished line, so the
+      // elapsed time and the estimate at its end are never what gets cut.
+      const tps = this.throughput.liveRate(id, now);
       const est = tps != null ? ` ~${formatRate(tps)} tok/s` : '';
-      lines.push(` ${sp} ${gray(r.t)}  ${this._sessionTag(r.sessionId)} ${r.method} ${r.path}${m}${a} ${dim(`(${el}s...${est})`)}`);
+      const lead = ` ${sp} ${gray(r.t)}  ${this._sessionTag(r.sessionId)} ${r.method} `;
+      const tail = ` ${dim(`(${el}s...${est})`)}`;
+      const middle = requestMiddle({ path: r.path, model: r.model || null, account: r.account || null, pin, dimModel: true }, W - vw(lead) - vw(tail));
+      lines.push(lead + middle + tail);
     }
 
     // Completed log
     const space = Math.max(0, H - lines.length - footerH);
     for (let i = 0; i < space && i < this.log.length; i++) {
-      lines.push(`   ${gray(this.log[i].t)}  ${this.log[i].msg}`);
+      const e = this.log[i];
+      lines.push(meter && e.req ? this._requestLine(e, W) : `   ${gray(e.t)}  ${e.msg}`);
     }
     } // end non-settings body
 
@@ -2860,6 +2927,21 @@ export class TUI {
     return panelW >= FLEET_PANEL_MIN
       ? { panelW, leftW: W - FLEET_GUTTER - panelW }
       : { panelW: 0, leftW: W };
+  }
+
+  /**
+   * A finished request's activity line while the throughput meter is on: the
+   * line it has always been, with its rate inside the parentheses, and the
+   * middle shortened when the whole would pass W so the rate is not the part
+   * fitLine cuts.
+   * @param {{ t: string, msg: string, req: { head: string, path: string, model: string|null, account: string, pin: string, status: any, dur: string, tps: number|null } }} e
+   * @param {number} W
+   */
+  _requestLine(e, W) {
+    const { head, path, model, account, pin, status, dur, tps } = e.req;
+    const lead = `   ${gray(e.t)}  ${head}`;
+    const tail = ` (${status}, ${dur}s${tps != null ? `, ${formatRate(tps)} tok/s` : ''})`;
+    return lead + requestMiddle({ path, model, account, pin, dimModel: false }, W - vw(lead) - vw(tail)) + tail;
   }
 
   /**

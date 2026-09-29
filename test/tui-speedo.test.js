@@ -142,6 +142,23 @@ test('off, a finished request\'s line is what it always was, even if the server 
   assert.match(lineOf(tui, 200, 'seat1@example.com (200'), /\(200, \d+\.\ds\)$/);
 });
 
+// The rate is kept beside the line, not in it, so an entry logged while the
+// meter was on reads as it always did once the meter is off.
+test('turning the meter off takes the rate off lines already logged', async () => {
+  const tui = tuiFor(riksFleet(), { throughputMeter: true });
+  const off = tuiFor(riksFleet());
+  for (const t of [tui, off]) {
+    t.onRequestStart(9, { method: 'POST', path: '/v1/messages', sessionId: null });
+    t.onRequestEnd(9, { ...END, outputTokens: 840, firstTokenAt: 1_000, lastTokenAt: 11_000 });
+    t.log[0].t = '12:00:00';
+  }
+  assert.match(lineOf(tui, 200, 'seat1@example.com (200'), /, 84 tok\/s\)$/);
+  await tui._toggleThroughputMeter();
+  tui.log.shift();   // the toggle's own log line
+  assert.equal(lineOf(tui, 200, 'seat1@example.com (200'), lineOf(off, 200, 'seat1@example.com (200'));
+  assert.equal(render(tui, 200).buf, render(off, 200).buf);
+});
+
 // ------------------------------------------------------------ on: per request
 
 test('a finished request carries its exact rate inside the parentheses', () => {
@@ -149,6 +166,8 @@ test('a finished request carries its exact rate inside the parentheses', () => {
   tui.onRequestStart(9, { method: 'POST', path: '/v1/messages', sessionId: null });
   tui.onRequestEnd(9, { ...END, outputTokens: 840, firstTokenAt: 1_000, lastTokenAt: 11_000 });
   assert.match(lineOf(tui, 200, 'seat1@example.com (200'), /POST \/v1\/messages \(claude-opus-5-5\) → seat1@example\.com \(200, \d+\.\ds, 84 tok\/s\)$/);
+  // The stored line is the one the meter-off frame draws.
+  assert.match(strip(tui.log[0].msg), /seat1@example\.com \(200, \d+\.\ds\)$/);
 });
 
 test('a request with no measurable rate keeps the line it always had', () => {
@@ -225,6 +244,70 @@ test('a request\'s end settles its stream in the meter', () => {
   tui.onRequestProgress(1, { chars: 40, at: Date.now() });
   tui.onRequestEnd(1, { ...END, outputTokens: null, firstTokenAt: null, lastTokenAt: null, status: 499 });
   assert.equal(tui.throughput.streams.size, 0);
+});
+
+// ------------------------------------------------------------ on: line widths
+
+// The rate is at the END of the line, where fitLine cuts. So with the meter
+// on, a line that would pass the edge gives up its middle — path, then model,
+// then account — and keeps the parentheses whole.
+test('a line that would pass the edge shortens its middle, not its rate', () => {
+  const account = 'someone.with.a.long.name@example.com';
+  for (let width = 70; width <= 200; width++) {
+    const tui = tuiFor(riksFleet(), { throughputMeter: true });
+    const now = Date.now();
+    tui.onRequestStart(9, { method: 'POST', path: '/v1/messages?beta=true', sessionId: 'abcdef' });
+    tui.onRequestEnd(9, { ...END, path: '/v1/messages?beta=true', account, sessionId: 'abcdef', outputTokens: 300, firstTokenAt: now - 3_000, lastTokenAt: now });
+    tui.onRequestStart(8, { method: 'POST', path: '/v1/messages?beta=true', sessionId: 'fedcba' });
+    tui.onRequestModel(8, { model: 'claude-opus-5-5' });
+    tui.onRequestRouted(8, { account });
+    tui.active.get(8).started = now - 3_000;
+    tui.onRequestProgress(8, { chars: 0, at: now - 2_000 });
+    tui.onRequestProgress(8, { chars: 800, at: now });
+    const { frame } = render(tui, width);
+    const done = frame.find(l => l.includes('abcdef')).trimEnd();
+    const live = frame.find(l => l.includes('fedcba')).trimEnd();
+    assert.match(done, / \(200, \d+\.\ds, 100 tok\/s\)$/, `W=${width}: ${done}`);
+    assert.match(live, / \(\d+\.\ds\.\.\. ~\d+ tok\/s\)$/, `W=${width}: ${live}`);
+    for (const l of [done, live]) {
+      assert.ok(l.length <= width);
+      // Shortened only when it had to be, and then with a mark.
+      assert.equal(l.includes('…'), !l.includes(`/v1/messages?beta=true (claude-opus-5-5) → ${account}`), `W=${width}: ${l}`);
+    }
+  }
+});
+
+test('the path gives way before the model and the account', () => {
+  const tui = tuiFor(riksFleet(), { throughputMeter: true });
+  const now = Date.now();
+  tui.onRequestStart(9, { method: 'POST', path: '/v1/messages?beta=true', sessionId: 'abcdef' });
+  tui.onRequestEnd(9, { ...END, path: '/v1/messages?beta=true', sessionId: 'abcdef', outputTokens: 300, firstTokenAt: now - 3_000, lastTokenAt: now });
+  const full = lineOf(tui, 200, 'abcdef');
+  assert.match(lineOf(tui, full.length - 8, 'abcdef'), /POST \/v1\/messages\?… \(claude-opus-5-5\) → seat1@example\.com \(200/);
+  // Past the path's floor, the model gives way next, and the account last.
+  assert.match(lineOf(tui, full.length - 18, 'abcdef'), /POST \/v1\/mes… \(claude-opu…\) → seat1@example\.com \(200/);
+});
+
+test('off, a line past the edge is cut as it always was', () => {
+  const tui = tuiFor(riksFleet());
+  const now = Date.now();
+  tui.onRequestStart(9, { method: 'POST', path: '/v1/messages?beta=true', sessionId: 'abcdef' });
+  tui.onRequestEnd(9, { ...END, sessionId: 'abcdef', outputTokens: 300, firstTokenAt: now - 3_000, lastTokenAt: now });
+  const line = lineOf(tui, 80, 'abcdef');
+  assert.doesNotMatch(line, /…/);
+  assert.equal(line.length, 80);
+  assert.ok(`   ${tui.log[0].t}  ${strip(tui.log[0].msg)}`.startsWith(line));
+});
+
+test('a hostile model string stays inert on a fitted line', () => {
+  const tui = tuiFor(riksFleet(), { throughputMeter: true });
+  const now = Date.now();
+  tui.onRequestStart(9, { method: 'POST', path: '/v1/messages', sessionId: null });
+  tui.onRequestEnd(9, { ...END, model: 'claude-\x1b]52;c;aGVsbG8=\x07\x1b[2Jevil', outputTokens: 300, firstTokenAt: now - 3_000, lastTokenAt: now });
+  for (const width of [70, 200]) {
+    const { buf } = render(tui, width);
+    assert.doesNotMatch(buf.replace(/\x1b\[[0-9;]*m|\x1b\[H|\x1b\[\?25[hl]/g, ''), /\x1b|\x07/);
+  }
 });
 
 // ------------------------------------------------------------ on: the dial

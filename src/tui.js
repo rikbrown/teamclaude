@@ -2812,9 +2812,10 @@ export class TUI {
    */
   _fleetLines(W, routes = this.am.getRoutes()) {
     // Same lookup the row bars use, and for the same reason: each bucket reddens
-    // at ITS threshold. Guarded because a stand-in manager may carry only the
-    // single number.
-    const thFor = (/** @type {string} */ k) => (typeof this.am.thresholdFor === 'function' ? this.am.thresholdFor(k) : this.am.switchThreshold);
+    // at ITS threshold. With an account, the account's own override wins, which
+    // is what the headroom sums need; the pool's bar colour asks without one.
+    // Guarded because a stand-in manager may carry only the single number.
+    const thFor = (/** @type {string} */ k, /** @type {any} */ a = null) => (typeof this.am.thresholdFor === 'function' ? this.am.thresholdFor(k, a) : this.am.switchThreshold);
     const now = Date.now();
     // The pool's burn comes from its members' rates (see aggregateHeadroom), so
     // the manager's own lookup is handed over rather than a series sampled here.
@@ -2952,7 +2953,7 @@ export class TUI {
    *
    * @param {number} W columns this block is laid out in
    * @param {Array<any>} routes the resolved routing view
-   * @param {(bucket: string) => number} thFor per-bucket switch threshold
+   * @param {(bucket: string, account?: any) => number} thFor per-bucket switch threshold, an account's own override first
    * @param {number} now
    */
   _routeLines(W, routes, thFor, now) {

@@ -98,6 +98,7 @@ const SCREENS = [
   ['select, switch attached', t => { t.mode = 'select'; t.selAction = 'switch'; t.remote = true; }],
   ['select, toggle', t => { t.mode = 'select'; t.selAction = 'toggle'; }],
   ['select, remove', t => { t.mode = 'select'; t.selAction = 'remove'; }],
+  ['select, reorder', t => { t.mode = 'select'; t.selAction = 'reorder'; }],
   ['add', t => { t.mode = 'add'; }],
   ['input', t => {
     t.mode = 'input'; t.inputPrompt = 'Switch threshold (%)'; t.inputBuf = '95'; t.inputSecret = false;

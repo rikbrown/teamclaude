@@ -80,3 +80,15 @@ test('the crash log sits next to the config', () => {
     else process.env.TEAMCLAUDE_CONFIG = prev;
   }
 });
+
+test('an entry names the error\'s code and syscall, not just its message', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'tc-crash-'));
+  try {
+    const { code, logged } = await crashIn(dir,
+      `setTimeout(() => { const e = new Error('write EPIPE'); e.code = 'EPIPE'; e.syscall = 'write'; throw e; }, 0);`);
+    assert.equal(code, 1);
+    assert.match(logged, /uncaughtException \(EPIPE write\) ===/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

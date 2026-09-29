@@ -651,6 +651,9 @@ async function serverCommand() {
     // Read by the TUI on every frame, so a hand edit lands on the next reload.
     config.quotaBarPercent = diskConfig.quotaBarPercent === true;
     config.accountSort = ACCOUNT_SORTS.includes(diskConfig.accountSort) ? diskConfig.accountSort : 'arranged';
+    // Read by the server per request and by the TUI per frame, so the reload
+    // is the whole application: the next request is timed, or is not.
+    config.throughputMeter = diskConfig.throughputMeter === true;
     // Read by `run`/`env` from disk, but the TUI settings screen shows it live.
     config.defaultClientMode = diskConfig.defaultClientMode === 'base-url' ? 'base-url' : 'mitm';
     // The fleet switch for spending Codex reset credits. The redeemer reads it
@@ -753,6 +756,7 @@ async function serverCommand() {
         if (config.eventLogging != null) diskConfig.eventLogging = config.eventLogging;
         if (config.quotaBarPercent != null) diskConfig.quotaBarPercent = config.quotaBarPercent;
         if (config.accountSort != null) diskConfig.accountSort = config.accountSort;
+        if (config.throughputMeter != null) diskConfig.throughputMeter = config.throughputMeter;
         if (config.defaultClientMode != null) diskConfig.defaultClientMode = config.defaultClientMode;
         if (config.autoRedeemResets != null) diskConfig.autoRedeemResets = config.autoRedeemResets;
         if (config.blockedModels != null) diskConfig.blockedModels = config.blockedModels;
@@ -792,6 +796,9 @@ async function serverCommand() {
       onRequestStart: (id, info) => tui.onRequestStart(id, info),
       onRequestModel: (id, info) => tui.onRequestModel(id, info),
       onRequestRouted: (id, info) => tui.onRequestRouted(id, info),
+      // Fired from inside the stream reader, and only with `throughputMeter` on,
+      // so it is bound once here rather than wrapped in one more call.
+      onRequestProgress: tui.onRequestProgress.bind(tui),
       onRequestEnd: (id, info) => tui.onRequestEnd(id, info),
     };
   }

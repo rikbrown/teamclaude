@@ -470,3 +470,125 @@ test('the tick stays fast while the reading falls back to zero, and only then', 
   tui.config.throughputMeter = false;
   assert.equal(tui._tickDelay(), 5_000, 'off, the cadence is what it was');
 });
+
+// ------------------------------------------------------------ sidecar legs
+
+// A translating sidecar is a local-upstream account that calls back through the
+// proxy (docs/openai.md): Claude Code's request goes to the sidecar, and the
+// sidecar's translation of it comes back in on a Codex account. One generation,
+// two requests, and both report its tokens. The fleet counts the outer leg.
+
+const SESSION = 'fb1e69aa';
+const sidecar = { name: 'codex', type: 'oauth', accessToken: 'unused-local-sidecar', upstream: 'http://127.0.0.1:18765', priority: 100 };
+
+function sidecarFleet() {
+  const am = new AccountManager([claude('seat0@example.com'), sidecar, codex('codex:a@example.com')], 0.98, {});
+  for (const a of am.accounts) Object.assign(a.quota, { unified5h: 0.2, unified5hReset: Date.now() + H, unified7d: 0.3, unified7dReset: Date.now() + 24 * H });
+  return am;
+}
+
+/** A request from start to routing, as the server drives the hooks. */
+function open(tui, id, { path, sessionId = SESSION, model, account }) {
+  tui.onRequestStart(id, { method: 'POST', path, sessionId });
+  tui.onRequestModel(id, { model });
+  tui.onRequestRouted(id, { account });
+}
+const OUTER = { path: '/v1/messages?beta=true', model: 'gpt-6-astra', account: 'codex' };
+const INNER = { path: '/backend-api/codex/responses', model: 'gpt-6-astra', account: 'codex:a@example.com' };
+
+/** Stream `chars` of text from `from` to `to` and end with `tokens`. */
+function stream(tui, id, { from, to, chars = 400, tokens, path, account }) {
+  tui.onRequestProgress(id, { chars: 0, at: from });
+  tui.onRequestProgress(id, { chars, at: to });
+  tui.onRequestEnd(id, { method: 'POST', path, account, status: 200, model: 'gpt-6-astra', sessionId: SESSION, outputTokens: tokens, firstTokenAt: from, lastTokenAt: to });
+}
+
+const ringTotal = (tui) => tui.throughput.ring.reduce((s, v) => s + v, 0);
+
+test('a sidecar\'s round trip is counted once in the fleet, and each leg keeps its own rate', () => {
+  const tui = tuiFor(sidecarFleet(), { throughputMeter: true });
+  const now = Date.now();
+  open(tui, 1, OUTER);
+  open(tui, 2, INNER);
+  assert.equal(tui.active.get(1).nested, false, 'the outer leg is the one counted');
+  assert.equal(tui.active.get(2).nested, true);
+  // In flight: both lines estimate, and the fleet reads one stream's worth.
+  for (const id of [1, 2]) {
+    tui.active.get(id).started = now - 12_000;
+    tui.onRequestProgress(id, { chars: 0, at: now - 10_000 });
+    tui.onRequestProgress(id, { chars: 4_000, at: now });
+  }
+  const { frame } = render(tui, 230);
+  for (const needle of ['codex:a@example.com (', '→ codex (']) {
+    assert.match(frame.find(l => l.includes(needle)).trimEnd(), / ~100 tok\/s\)$/, needle);
+  }
+  assert.ok(Math.abs(tui.throughput.rate(now) - 100) < 1, `the fleet read ${tui.throughput.rate(now)}`);
+  // Finished: both lines carry their exact rate, the ring holds one count.
+  for (const [id, leg] of [[2, INNER], [1, OUTER]]) {
+    tui.onRequestEnd(id, { method: 'POST', path: leg.path, account: leg.account, status: 200, model: leg.model, sessionId: SESSION, outputTokens: 600, firstTokenAt: now - 10_000, lastTokenAt: now });
+  }
+  assert.ok(Math.abs(ringTotal(tui) - 600) < 1e-6, `the ring holds ${ringTotal(tui)}`);
+  const done = render(tui, 230).frame;
+  assert.match(done.find(l => l.includes('codex:a@example.com (200')).trimEnd(), /, 60 tok\/s\)$/);
+  assert.match(done.find(l => l.includes('→ codex (200')).trimEnd(), /, 60 tok\/s\)$/);
+});
+
+// One Claude Code session runs unrelated requests beside the round trip. They
+// are in the client's own dialect, which the sidecar's translation is not.
+test('an unrelated request in the same session is not taken for the inner leg', () => {
+  const tui = tuiFor(sidecarFleet(), { throughputMeter: true });
+  open(tui, 1, OUTER);
+  open(tui, 3, { path: '/v1/messages?beta=true', model: 'claude-fable-5-1', account: 'seat0@example.com' });
+  open(tui, 2, INNER);
+  assert.equal(tui.active.get(3).nested, false);
+  assert.equal(tui.active.get(2).nested, true);
+});
+
+test('two outer legs of one session are both counted', () => {
+  const tui = tuiFor(sidecarFleet(), { throughputMeter: true });
+  open(tui, 1, OUTER);
+  open(tui, 4, OUTER);
+  assert.equal(tui.active.get(1).nested, false);
+  assert.equal(tui.active.get(4).nested, false, 'a request on a local upstream is never an inner leg');
+});
+
+// A local backend that does not call back (a translator to another vendor)
+// never sends an inner leg, so there is nothing to leave out.
+test('a local upstream with no inner leg is counted as before', () => {
+  const tui = tuiFor(sidecarFleet(), { throughputMeter: true });
+  const now = Date.now();
+  open(tui, 1, OUTER);
+  stream(tui, 1, { from: now - 10_000, to: now, tokens: 600, ...OUTER });
+  assert.ok(Math.abs(ringTotal(tui) - 600) < 1e-6);
+});
+
+test('with no session on the legs nothing is paired, so both are counted', () => {
+  const tui = tuiFor(sidecarFleet(), { throughputMeter: true });
+  const now = Date.now();
+  open(tui, 1, { ...OUTER, sessionId: null });
+  open(tui, 2, { ...INNER, sessionId: null });
+  assert.equal(tui.active.get(2).nested, false);
+  stream(tui, 2, { from: now - 10_000, to: now, tokens: 600, ...INNER });
+  stream(tui, 1, { from: now - 10_000, to: now, tokens: 600, ...OUTER });
+  assert.ok(Math.abs(ringTotal(tui) - 1_200) < 1e-6, 'the known limit: both legs counted');
+});
+
+// The model name is the same string on both legs, so the inner leg would
+// teach the same model a second time, at Codex's own pace.
+test('an inner leg teaches its model nothing', () => {
+  const tui = tuiFor(sidecarFleet(), { throughputMeter: true });
+  const now = Date.now();
+  open(tui, 1, OUTER);
+  open(tui, 2, INNER);
+  stream(tui, 2, { from: now - 10_000, to: now, tokens: 300, ...INNER });
+  assert.equal(tui.throughput.modelRate('gpt-6-astra'), null);
+  stream(tui, 1, { from: now - 10_000, to: now, tokens: 600, ...OUTER });
+  assert.equal(tui.throughput.modelRate('gpt-6-astra'), 60);
+});
+
+test('with the meter off no leg is marked', () => {
+  const tui = tuiFor(sidecarFleet());
+  open(tui, 1, OUTER);
+  open(tui, 2, INNER);
+  assert.equal(tui.active.get(2).nested, undefined);
+});

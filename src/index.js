@@ -43,7 +43,7 @@ import { captureEarlyConsole } from './early-log.js';
 import { RemoteControl, createAttachSession } from './tui-remote.js';
 import { SxManager } from './sx.js';
 import { autoUpdate, checkForUpdate, currentVersion, resolveVersionLabel, runUpdate, installKind, updateAvailableFromCache, PKG_NAME } from './updater.js';
-import { drainServer, superviseServer, DRAIN_DEADLINE_MS, RESTART_COUNT_ENV, RESTART_EXIT_CODE, SUPERVISED_ENV } from './restart.js';
+import { drainServer, superviseServer, supervision, DRAIN_DEADLINE_MS, RESTART_EXIT_CODE } from './restart.js';
 import { createVersionSource, UpdateWatcher } from './update-watch.js';
 import { renderStatus, formatPercent } from './status-renderer.js';
 import { sanitizeText } from './safe-text.js';
@@ -532,8 +532,7 @@ async function serverCommand() {
   // that can ask for one — the `u` key and autoRestart — are wired only when the
   // answer is yes. `teamclaude server --supervise` sets this on its child, and
   // the shell loop in docs/usage.md exports it for the same reason.
-  const supervised = process.env[SUPERVISED_ENV] === '1';
-  const restartCount = Number(process.env[RESTART_COUNT_ENV]) || 0;
+  const { supervised, restartCount } = supervision();
 
   // Opt-in background quota probe (config.quotaProbeSeconds, default 0 = off).
   /** @type {Prober|null} */

@@ -23,6 +23,7 @@ import { forwardRefusal, guardedLookup, FORBIDDEN_FORWARD } from './forward-targ
 import { renderDashboardHtml, dashboardCsp } from './dashboard.js';
 import { createUsageRecorder, resolveUsageDimensions, usageDimensionHeaderNames } from './client-usage.js';
 import { responsesEventUsage, isResponsesBody, normalizeResponsesUsage } from './responses-usage.js';
+import { OutputTracker } from './throughput.js';
 import { classificationPath } from './classification-path.js';
 import { serveManagementMcp } from './mcp-tools.js';
 import { codexSpentWindows, isAccountWideCodexWindow } from './codex-quota.js';
@@ -1245,7 +1246,10 @@ export function clientSessionId(headers) {
  * @param {Object} opts.accountManager
  * @param {string} opts.upstream
  * @param {string|null} [opts.logDir]
- * @param {Object} [opts.hooks]  activity callbacks (onRequestStart, onRequestEnd, ...), all optional
+ * @param {Object} [opts.hooks]  activity callbacks (onRequestStart, onRequestEnd, ...), all optional.
+ *   onRequestProgress(reqId, { chars, at }) is called once per output event of
+ *   a streamed response, and only while `config.throughputMeter` is on: it runs
+ *   inside the stream reader, so it must stay O(1) and never render.
  * @param {Object|null} [opts.sx]
  * @param {number} [opts.holdMs]
  * @param {Object} [opts.config]  the live config object; read per request, never copied
@@ -1507,7 +1511,8 @@ export function createProxyRequestListener({ accountManager, upstream, logDir = 
 
       // stripOverage is sampled once here, at dispatch: retries and holds of
       // this request keep it, and a reload applies to subsequent requests.
-      const ctx = { account: null, status: null, tried: new Set(), reauthed: new Set(), model, advisorModel, streamRequested: parseRequestStream(body), fleetMessageThreads: config?.messageThreads === true, pinnedIndex, provider, holdBudgetMs: holdMs, pinKey, client, delivered: false, abandoned: false, onUsage: usageRecorder.onUsage, stripHeaders, stripOverage: shouldStripOverageHeaders(config), logLevel: resolveLogLevel(config), logMaxBodyBytes: resolveLogMaxBodyBytes(config) };
+      const output = hideActivity ? null : outputTrackerFor(config, hooks, reqId);
+      const ctx = { account: null, status: null, tried: new Set(), reauthed: new Set(), model, advisorModel, streamRequested: parseRequestStream(body), fleetMessageThreads: config?.messageThreads === true, pinnedIndex, provider, holdBudgetMs: holdMs, pinKey, client, delivered: false, abandoned: false, onUsage: usageRecorder.onUsage, output, stripHeaders, stripOverage: shouldStripOverageHeaders(config), logLevel: resolveLogLevel(config), logMaxBodyBytes: resolveLogMaxBodyBytes(config) };
       // Hold the session "in flight" across the WHOLE request (incl. retries and
       // a multi-minute streaming completion) so it stays counted as active and
       // never expires mid-request.
@@ -1563,7 +1568,9 @@ export function createProxyRequestListener({ accountManager, upstream, logDir = 
         // marked open would send the outer catch to call that same throwing hook
         // a second time for one request.
         openEntry = null;
-        if (!hideActivity) hooks.onRequestEnd?.(reqId, { method: req.method, path: req.url, account: ctx.account, status: ctx.status, model: ctx.model, sessionId, pinned: ctx.pinnedIndex != null, client });
+        // With the meter on, the end also carries the settled output count and
+        // when the output started and stopped; off, the entry is what it was.
+        if (!hideActivity) hooks.onRequestEnd?.(reqId, { method: req.method, path: req.url, account: ctx.account, status: ctx.status, model: ctx.model, sessionId, pinned: ctx.pinnedIndex != null, client, ...output?.summary() });
       }
     } catch (err) {
       reportFailure('[TeamClaude] Unhandled error:', err);
@@ -1602,6 +1609,23 @@ export function createProxyRequestListener({ accountManager, upstream, logDir = 
       answerUnhandled(res);
     }
   };
+}
+
+/**
+ * The throughput meter's tracker for one request, or null while the meter is off
+ * (`throughputMeter`, opt-in). Sampled at dispatch off the live config, like
+ * the telemetry mode, so the settings toggle lands on the next request. Off,
+ * there is no tracker, and the stream reader's whole cost is testing for one.
+ * A consumer with no progress hook (the headless activity log) gets none
+ * either way: nothing would read it.
+ *
+ * @param {any} config the live config
+ * @param {any} hooks
+ * @param {number} reqId
+ */
+function outputTrackerFor(config, hooks, reqId) {
+  const onProgress = hooks.onRequestProgress;
+  return config?.throughputMeter === true && typeof onProgress === 'function' ? new OutputTracker(reqId, onProgress) : null;
 }
 
 /**
@@ -3669,7 +3693,7 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
       const l = getLog();
       const bw = l ? l.bodyWriter('RESPONSE BODY (streamed)', contentType) : null;
       try {
-        await streamResponse(upstreamBody, res, account.index, accountManager, bw, ctx.onUsage, ctx.pinKey, ctx.model);
+        await streamResponse(upstreamBody, res, account.index, accountManager, bw, ctx.onUsage, ctx.pinKey, ctx.model, ctx.output);
         // Reached only when the stream completed. A stream that dies upstream
         // throws out of streamResponse, so it never marks itself delivered —
         // which is the failure the token counters cannot see, since a stream
@@ -3684,7 +3708,7 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
       l?.end();
     } else {
       const buf = Buffer.from(await upstreamRes.arrayBuffer());
-      extractUsageFromBody(buf, account.index, accountManager, ctx.onUsage, ctx.pinKey, ctx.model);
+      extractUsageFromBody(buf, account.index, accountManager, ctx.onUsage, ctx.pinKey, ctx.model, ctx.output);
       const l = getLog();
       if (l) { l.body('RESPONSE BODY', buf, contentType); l.end(); }
       res.end(buf);
@@ -3855,8 +3879,9 @@ export function readWithIdleTimeout(reader, ms) {
 
 /**
  * Stream an SSE response to the client, parsing usage data along the way.
+ * `output` is the throughput meter's tracker for this response, when it is on.
  */
-export async function streamResponse(webStream, res, accountIndex, accountManager, bodyWriter, onUsage = null, pinKey = null, model = null) {
+export async function streamResponse(webStream, res, accountIndex, accountManager, bodyWriter, onUsage = null, pinKey = null, model = null, output = null) {
   const reader = webStream.getReader();
   // A client that leaves while upstream is silent must not hold the pending
   // read — and with it the upstream socket and its admission permit — until
@@ -3876,7 +3901,7 @@ export async function streamResponse(webStream, res, accountIndex, accountManage
   // remembers that it did — the incremental counters would book the turn again
   // if a second terminal event arrived. See parseSSEDataLine.
   const responsesTurn = { settled: false };
-  const usage = createSseLineScanner(line => parseSSEDataLine(line, accountIndex, accountManager, onUsage, merged, responsesTurn));
+  const usage = createSseLineScanner(line => parseSSEDataLine(line, accountIndex, accountManager, onUsage, merged, responsesTurn, output));
 
   try {
     while (true) {
@@ -4032,8 +4057,9 @@ export function createSseLineScanner(onLine, maxChars = SSE_MAX_LINE_CHARS) {
  * @param {((inputTokens: number, outputTokens: number) => void)|null} [onUsage]
  * @param {Record<string, any>|null} [merged]
  * @param {{settled: boolean}|null} [responsesTurn] this stream's "already booked" flag
+ * @param {OutputTracker|null} [output] the throughput meter's tracker, when it is on
  */
-function parseSSEDataLine(line, accountIndex, accountManager, onUsage = null, merged = null, responsesTurn = null) {
+function parseSSEDataLine(line, accountIndex, accountManager, onUsage = null, merged = null, responsesTurn = null, output = null) {
   if (!line.startsWith('data: ')) return;
 
   try {
@@ -4046,6 +4072,7 @@ function parseSSEDataLine(line, accountIndex, accountManager, onUsage = null, me
       accountManager.updateUsage(accountIndex, 0, data.usage.output_tokens);
       onUsage?.(0, data.usage.output_tokens || 0);
       if (merged) Object.assign(merged, data.usage);
+      output?.settle(data.usage.output_tokens);
     } else if (!responsesTurn?.settled) {
       // Both sides settle at once here, so unlike the Anthropic branches above
       // this is a single incremental update rather than one per side — and it
@@ -4059,14 +4086,20 @@ function parseSSEDataLine(line, accountIndex, accountManager, onUsage = null, me
         accountManager.updateUsage(accountIndex, usage.input_tokens, usage.output_tokens);
         onUsage?.(usage.input_tokens, usage.output_tokens);
         if (merged) Object.assign(merged, usage);
+        output?.settle(usage.output_tokens);
       }
     }
+    // The same parsed event, read for generated text. After the usage branches,
+    // so a progress hook that throws costs only its own line: the catch below
+    // swallows it, and the accounting for this line has already run.
+    output?.event(data);
   } catch {
     // not valid JSON, skip
   }
 }
 
-function extractUsageFromBody(buffer, accountIndex, accountManager, onUsage = null, pinKey = null, model = null) {
+/** @param {OutputTracker|null} [output] the throughput meter's tracker, when it is on */
+function extractUsageFromBody(buffer, accountIndex, accountManager, onUsage = null, pinKey = null, model = null, output = null) {
   try {
     const json = JSON.parse(buffer.toString());
     if (json.usage) {
@@ -4083,6 +4116,9 @@ function extractUsageFromBody(buffer, accountIndex, accountManager, onUsage = nu
       accountManager.updateUsage(accountIndex, usage.input_tokens, usage.output_tokens);
       onUsage?.(usage.input_tokens || 0, usage.output_tokens || 0);
       accountManager.recordTokenUsage(accountIndex, pinKey, model, usage);
+      // Buffered, so there is no generation interval to time: the tracker's
+      // first and last token stay null and the reader times the whole request.
+      output?.settle(usage.output_tokens);
     }
   } catch {
     // not JSON or no usage

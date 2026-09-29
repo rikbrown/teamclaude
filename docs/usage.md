@@ -121,7 +121,7 @@ curl -X POST http://localhost:3456/teamclaude/priority \
 | `p` | Refresh quota on all accounts (one-shot probe of the zero-spend usage endpoint) |
 | `R` | Reload accounts from config |
 | `f` | Fleet view — cycles the pooled aggregate between **split** (beside the rows, the default), **full** (instead of the rows) and **off** |
-| `g` | Settings (threshold, quota probe, quota-bar contents, routing, add/remove/reorder accounts, upstream and account proxies, sx.org) |
+| `g` | Settings (threshold, quota probe, quota-bar contents, throughput meter, routing, add/remove/reorder accounts, upstream and account proxies, sx.org) |
 | `q` | Quit |
 
 In selection mode, use `j`/`k` or the arrow keys to navigate, `Enter` to confirm, `Esc` to cancel.
@@ -177,6 +177,18 @@ The view works when [attached](remote.md) to a server elsewhere, and the sidecar
 The settings screen is a list, not a set of letter shortcuts: `↑`/`↓` move between rows, `←`/`→` change the value in place (threshold by 1%, probe by 30s, modes cycle), `Enter` opens a row that needs typing or a sub-screen, `Esc` goes back.
 
 **Reorder accounts** opens the account list with the same two pairs of keys and one extra job for them: `↑`/`↓` pick the account, `←`/`→` move *that account* up and down the list, `Enter` or `Esc` goes back. Every move applies as you make it and is written a moment after the keys stop (or on leaving the screen), so there is nothing to confirm and nothing to cancel. An account moves among the accounts of its own provider: a mixed Claude and Codex fleet is drawn grouped by provider, so a move that would cross into the other group does nothing. This is the order the list is **drawn** in and nothing else — rotation order is [`priority`](routing.md#choosing-an-account), which the screen never touches. `teamclaude attach` draws the same order: each account in `/teamclaude/status` carries its `displayOrder` (`null` until it has been placed).
+
+### Throughput meter
+
+Off by default. Press **g** → **Throughput**, or set [`throughputMeter`](configuration.md) to `true`, to see how fast the fleet generates output:
+
+- **Each finished request** gets its output rate inside the parentheses of its activity line: `(200, 3.3s, 84 tok/s)`. The rate is the response's output tokens over the time from its first output to its last, so the wait for the first token does not count against it. A response that was not streamed is timed over the whole request. A reply generated in under a quarter of a second, or one whose output count never arrived, shows no rate.
+- **Each request still streaming** shows an estimate once it has streamed for a second: `(12.3s... ~84 tok/s)`. Neither API reports the output count until the end, so the estimate comes from the text streamed so far, at about four characters a token. Reasoning that is hidden or summarised streams little text for its tokens, so on those turns the estimate reads low until the exact count arrives.
+- **The whole fleet** gets a speedometer: the output tokens generated across every account and provider in the last ten seconds, divided by ten. Where the terminal has room past the account rows and the fleet panel, it is a dial beside them; otherwise it is a number at the start of the header's right block (`1.4k tok/s  Port 3456 ▲`). Never both. The dial's scale grows as soon as the rate passes it, and comes back down a few minutes after a burst.
+
+The fleet figure corrects itself as each request finishes. The difference between the estimate and the exact count is spread back over the seconds the output was generated in, so a turn with hidden reasoning adds its tokens where they were made rather than as one spike at the end.
+
+With the meter off, the proxy does no throughput work at all and the dashboard is unchanged. The server reads the setting per request, so turning it on or off applies from the next request. An [attached](remote.md) dashboard shows none of it: it does not see the server's request traffic.
 
 ## Run Claude Code through the proxy
 

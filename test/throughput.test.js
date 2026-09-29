@@ -273,6 +273,24 @@ test('a stream that ends with no count books its visible text, not its guessed p
   assert.equal(m.streams.size, 0);
 });
 
+// The second leg of one generation (a sidecar's callback, see the TUI) is
+// followed for its own line but left out of everything the fleet reads.
+test('a stream that is not counted keeps its own estimate and adds nothing else', () => {
+  const m = new ThroughputMeter({ now: () => 0 });
+  m.progress('inner', 0, 90_000, 'm', false);
+  m.progress('inner', 4_000, 100_000, 'm', false);
+  close(m.liveRate('inner', 100_000), 100);
+  assert.equal(m.rate(100_000), 0);
+  assert.equal(m.recent(100_000), false);
+  m.finish('inner', { outputTokens: 1_000, firstAt: 90_000, lastAt: 100_000, endedAt: 100_000, model: 'm' });
+  assert.equal(ringTotal(m), 0);
+  assert.equal(m.modelRate('m'), null);
+  assert.equal(m.streams.size, 0);
+  // Nor does a buffered one, which never had a stream to carry the mark.
+  m.finish('buffered', { outputTokens: 1_000, dispatchedAt: 95_000, endedAt: 100_000, counted: false });
+  assert.equal(ringTotal(m), 0);
+});
+
 // ------------------------------------------------------------ bad input
 
 test('a clock that steps back more than a second starts the ring over', () => {

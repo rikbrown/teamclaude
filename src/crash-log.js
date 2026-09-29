@@ -17,7 +17,11 @@ import { appendFileSync } from 'node:fs';
 export function installCrashHandlers(path, { exit = process.exit, log = process.stderr } = {}) {
   const report = (/** @type {string} */ kind) => (/** @type {any} */ err) => {
     const stack = err?.stack || String(err);
-    const entry = `\n=== ${new Date().toISOString()} ${kind} ===\n${stack}\n`;
+    // A bare "Error: write EPIPE" names neither the stream nor the call. The
+    // code and syscall are what turn the next one of these into a diagnosis
+    // rather than an afternoon of inference.
+    const detail = [err?.code, err?.syscall].filter(Boolean).join(' ');
+    const entry = `\n=== ${new Date().toISOString()} ${kind}${detail ? ` (${detail})` : ''} ===\n${stack}\n`;
     // 0600: a stack can carry request context. A write failure (read-only home,
     // full disk) must not mask the crash itself — stderr still gets the entry.
     try { appendFileSync(path, entry, { mode: 0o600 }); } catch { /* report to stderr regardless */ }

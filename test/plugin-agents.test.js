@@ -116,7 +116,8 @@ for (const file of agentFiles) {
     assert.ok(!front.description.includes(': '), "description contains ': '");
     assert.ok(front.name.endsWith(`-${front.effort}`), 'name must be <model>-<effort>');
     // The name spells the model family; the frontmatter may pin a version of it
-    // and the 1M window (`opus-high` → `claude-opus-5-5[1m]`, `fable-high` → `fable[1m]`).
+    // and the 1M window (`opus-high` → `claude-opus-5-5[1m]`, `sonnet-high` → `claude-sonnet-5-5[1m]`,
+    // `fable-high` → `fable[1m]`).
     const family = front.name.slice(0, -`-${front.effort}`.length);
     const model = front.model.replace(/\[1m\]$/, '');
     assert.ok(model === family || model.startsWith(`claude-${family}-`), `model ${front.model} does not match name ${front.name}`);
@@ -130,7 +131,7 @@ for (const file of agentFiles) {
 // any model family the roster has ever carried — must carry the prefix wherever
 // it appears in prose. Matched by shape rather than from the roster, so a name
 // that is commented out of the roster (or not in it yet) is still caught.
-const BARE_AGENT = /(?<![\w:.-])(?:fable|opus|gpt-(?:\*|[\w.]+?(?:-[a-z]+)?))-(?:low|medium|high|xhigh|max|\*)(?![\w-])/g;
+const BARE_AGENT = /(?<![\w:.-])(?:fable|opus|sonnet|gpt-(?:\*|[\w.]+?(?:-[a-z]+)?))-(?:low|medium|high|xhigh|max|\*)(?![\w-])/g;
 
 /** Every agent-shaped token in `text` that is not preceded by the namespace. */
 function bareUses(text) {
@@ -146,9 +147,9 @@ function ruleText(text) {
 }
 
 test('bareUses catches names the roster does not carry, and only bare ones', () => {
-  const bad = 'use fable-medium or gpt-6-astra-xhigh, `gpt-5.6-sol-*`, opus-* or gpt-*-*; model: fable-high';
-  assert.deepEqual(bareUses(bad), ['fable-medium', 'gpt-6-astra-xhigh', 'gpt-5.6-sol-*', 'opus-*', 'gpt-*-*', 'fable-high']);
-  assert.deepEqual(bareUses('`rikclaude-agents:fable-medium`, rikclaude-agents:gpt-*-*, gpt-6-astra, Fable, high effort'), []);
+  const bad = 'use fable-medium or gpt-6-astra-xhigh, `gpt-5.6-sol-*`, opus-*, sonnet-xhigh or gpt-*-*; model: fable-high';
+  assert.deepEqual(bareUses(bad), ['fable-medium', 'gpt-6-astra-xhigh', 'gpt-5.6-sol-*', 'opus-*', 'sonnet-xhigh', 'gpt-*-*', 'fable-high']);
+  assert.deepEqual(bareUses('`rikclaude-agents:fable-medium`, rikclaude-agents:gpt-*-*, rikclaude-agents:sonnet-high, gpt-6-astra, Fable, high effort'), []);
 });
 
 for (const file of agentFiles) {

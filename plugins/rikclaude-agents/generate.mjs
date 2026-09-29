@@ -51,7 +51,8 @@ const AGENT_PREFIX = 'rikclaude-agents:';
 // be a built-in alias) for the dispatch to reach anything.
 //
 // `model` overrides that derived id, to pin a version the name does not spell —
-// `opus-high` runs `claude-opus-5-5[1m]`, not whatever the `opus` alias points at.
+// `opus-high` runs `claude-opus-5-5[1m]`, not whatever the `opus` alias points at,
+// and `sonnet-high` runs `claude-sonnet-5-5[1m]`.
 // It also opts into 1M: a bare id or alias runs at 200K, only the `[1m]` spelling
 // gets the full window, which is why the Fable rows pin `fable[1m]`.
 // The frontmatter emits it unquoted: the parser takes the rest of the line, so
@@ -69,6 +70,8 @@ const AGENTS = [
   { name: 'fable-xhigh', label: 'Fable', model: 'fable[1m]', nesting: 'own', when: `Engineering sidekick, on par with GPT-6 Astra. Adversarial review for the most challenging reviews only, where ${AGENT_PREFIX}fable-high is not enough. Not for coding; use ${AGENT_PREFIX}opus-high or ${AGENT_PREFIX}opus-xhigh.` },
   { name: 'opus-high', label: 'Opus 5.5', model: 'claude-opus-5-5[1m]', nesting: 'brief', when: 'Default for coding tasks that are well defined, e.g. narrow fixes from PR feedback. Also the default for fact-finding.' },
   { name: 'opus-xhigh', label: 'Opus 5.5', model: 'claude-opus-5-5[1m]', nesting: 'brief', when: 'Default for larger, complex or ambiguous coding tasks.' },
+  { name: 'sonnet-high', label: 'Sonnet 5.5', model: 'claude-sonnet-5-5[1m]', nesting: 'none', when: `Exploration that needs no deep fact-finding, e.g. locating code or summarising a module. Not for coding; use ${AGENT_PREFIX}opus-high or ${AGENT_PREFIX}opus-xhigh.` },
+  { name: 'sonnet-xhigh', label: 'Sonnet 5.5', model: 'claude-sonnet-5-5[1m]', nesting: 'none', when: `Exploration across many files or naming conventions, where ${AGENT_PREFIX}sonnet-high is too shallow. For deep fact-finding use ${AGENT_PREFIX}opus-high. Not for coding.` },
   { name: 'gpt-6-astra-medium', label: 'GPT-6 Astra', nesting: 'none', when: 'Engineering sidekick, on par with Fable. Full-branch, architectural or technical design review.' },
   { name: 'gpt-6-astra-high', label: 'GPT-6 Astra', nesting: 'own', when: 'Engineering sidekick, on par with Fable. Full-branch, architectural or technical design review for only the most complex or critical challenges.' },
   // { name: 'gpt-6-astra-xhigh', label: 'GPT-6 Astra', nesting: 'own', when: 'Engineering sidekick, on par with Fable. Full-branch, architectural or technical design review for only the most complex or critical challenges.' },
@@ -81,7 +84,7 @@ const AGENTS = [
 
 // Named once so an agent prompt and the policy block cannot drift apart on the
 // one rule that matters most.
-const EFFORT_RULE = `Use only the effort-named agent types (\`${AGENT_PREFIX}fable-*\`, \`${AGENT_PREFIX}opus-*\`, \`${AGENT_PREFIX}gpt-*-*\`) — never dispatch a model directly, which silently inherits this session's effort.`;
+const EFFORT_RULE = `Use only the effort-named agent types (\`${AGENT_PREFIX}fable-*\`, \`${AGENT_PREFIX}opus-*\`, \`${AGENT_PREFIX}sonnet-*\`, \`${AGENT_PREFIX}gpt-*-*\`) — never dispatch a model directly, which silently inherits this session's effort.`;
 
 /** The paragraph that tells one agent whether it may launch agents of its own. */
 function nestingParagraph(nesting) {

@@ -255,12 +255,16 @@ function seatWeight(account, provider) {
  * may be absent. Clamped into 0-1: a threshold set above 1 would otherwise
  * credit the pool with quota the window does not have.
  *
+ * The threshold is asked for with the account, because an account can carry a
+ * `switchThreshold` of its own that rotation honours: a seat set to rotate at
+ * 50% has no headroom past 50%, whatever the fleet-wide figure says.
+ *
  * @param {any} account
  * @param {string} bucket
- * @param {((bucket: string) => number)|null} thresholdFor
+ * @param {((bucket: string, account?: any) => number)|null} thresholdFor
  */
 function usableLimit(account, bucket, thresholdFor) {
-  const threshold = typeof thresholdFor === 'function' ? thresholdFor(bucket) : null;
+  const threshold = typeof thresholdFor === 'function' ? thresholdFor(bucket, account) : null;
   const cap = resolveMaxUsage(account?.maxUsage, bucket);
   let limit = 1;
   if (Number.isFinite(threshold)) limit = Math.min(limit, Number(threshold));
@@ -273,7 +277,7 @@ function usableLimit(account, bucket, thresholdFor) {
  *
  * @param {Array<{account: any, weight: number}>} members
  * @param {string} bucket
- * @param {((bucket: string) => number)|null} thresholdFor
+ * @param {((bucket: string, account?: any) => number)|null} thresholdFor
  * @param {number} now
  * @param {((account: any, bucket: string) => number|null)|null} [rateFor]
  * @returns {FleetBucket|null}
@@ -497,7 +501,7 @@ const providerRank = (id) => {
  * operator needs told, and a pool that vanished would look like a config error.
  *
  * @param {Array<any>} accounts Manager accounts, or the `accounts` of a status payload.
- * @param {{thresholdFor?: ((bucket: string) => number)|null, now?: number, routes?: Array<any>|null, rateFor?: ((account: any, bucket: string) => number|null)|null}} [options]
+ * @param {{thresholdFor?: ((bucket: string, account?: any) => number)|null, now?: number, routes?: Array<any>|null, rateFor?: ((account: any, bucket: string) => number|null)|null}} [options]
  * @returns {Array<{provider: string, total: number, counted: number, buckets: Record<string, FleetBucket|null>}>}
  */
 export function fleetAggregate(accounts, { thresholdFor = null, now = Date.now(), routes = null, rateFor = null } = {}) {
@@ -567,7 +571,7 @@ export function fleetAggregate(accounts, { thresholdFor = null, now = Date.now()
  *
  * @param {Array<any>} accounts Manager accounts, or the `accounts` of a status payload.
  * @param {Array<any>} routes The resolved routing view — see routableNames.
- * @param {{thresholdFor?: ((bucket: string) => number)|null, now?: number, rateFor?: ((account: any, bucket: string) => number|null)|null}} [options]
+ * @param {{thresholdFor?: ((bucket: string, account?: any) => number)|null, now?: number, rateFor?: ((account: any, bucket: string) => number|null)|null}} [options]
  * @returns {Array<{name: string, counted: number, total: number, bucket: string|null, value: FleetBucket|null}>}
  */
 export function routeHeadroom(accounts, routes, { thresholdFor = null, now = Date.now(), rateFor = null } = {}) {

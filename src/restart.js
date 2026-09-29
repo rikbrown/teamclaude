@@ -22,6 +22,7 @@
 // the child fights it for the terminal.
 
 import { spawn } from 'node:child_process';
+import { envVar, LEGACY_ENV_PREFIX } from './brand.js';
 
 // "Restart me." Chosen from the sysexits.h range (EX_TEMPFAIL) so it cannot
 // collide with the 0/1 a crash or a clean quit already uses, and so a
@@ -46,9 +47,27 @@ export const RESTART_LOOP_WINDOW_MS = 60_000;
 // restart, neither of which may exit 75 unless something is actually waiting to
 // relaunch this process — otherwise "apply the update" reads as "kill the proxy
 // and every session on it". The documented shell one-liner exports it too.
-export const SUPERVISED_ENV = 'TEAMCLAUDE_SUPERVISED';
+//
+// Written under the legacy prefix, which stays canonical until the rename's
+// default flips, and read through envVar (see supervision) like every other
+// variable, so an operator's own loop may export either spelling.
+export const SUPERVISED_ENV = `${LEGACY_ENV_PREFIX}SUPERVISED`;
 // How many relaunches this process is, so it can say so once it is listening.
-export const RESTART_COUNT_ENV = 'TEAMCLAUDE_RESTARTS';
+export const RESTART_COUNT_ENV = `${LEGACY_ENV_PREFIX}RESTARTS`;
+
+/**
+ * Whether something is waiting to relaunch this process, and how many
+ * relaunches it is.
+ *
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {{ supervised: boolean, restartCount: number }}
+ */
+export function supervision(env = process.env) {
+  return {
+    supervised: envVar('SUPERVISED', env) === '1',
+    restartCount: Number(envVar('RESTARTS', env)) || 0,
+  };
+}
 
 /**
  * Stop taking work and wait for what is running to finish.

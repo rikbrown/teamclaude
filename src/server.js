@@ -3990,6 +3990,10 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
     let upstreamRes;
     let admittedLoad = 0;
     const entitlementEpoch = account.entitlementEpoch;
+    // For the throughput meter: this attempt is being sent. A later attempt
+    // overwrites it, so the time that survives is the answering attempt's, and
+    // a buffered answer is timed from here rather than from the client's ask.
+    ctx.output?.dispatched();
     try {
       upstreamRes = await upstreamFetch(upstreamUrl, {
         method,

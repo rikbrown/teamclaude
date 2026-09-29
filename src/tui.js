@@ -22,7 +22,7 @@ import { sanitizeText, safeLine } from './safe-text.js';
 // The setting rules live in one module; the CLI, the MCP tools and this screen
 // all read them from there, so they cannot drift apart (#426).
 import { MAX_PROBE_SECONDS, ROUTE_COLORS } from './config-ops.js';
-import { isLocalUpstream } from './provider.js';
+import { isLocalUpstream, providerForPath } from './provider.js';
 import { ThroughputMeter, requestRate, formatRate } from './throughput.js';
 import { renderSpeedo, speedoWidth, SPEEDO_MIN_H, SPEEDO_MAX_H } from './speedo.js';
 
@@ -1099,7 +1099,48 @@ export class TUI {
 
   onRequestRouted(id, info) {
     const r = this.active.get(id);
-    if (r) r.account = info.account == null ? info.account : safeLine(info.account, 64);
+    if (!r) return;
+    r.account = info.account == null ? info.account : safeLine(info.account, 64);
+    if (this._throughputOn()) this._markLeg(r, info.account);
+  }
+
+  /**
+   * Whether this request is the second leg of a generation the fleet meter
+   * already counts, decided once, when the request is first routed.
+   *
+   * A translating sidecar (the Codex one in docs/openai.md) is a local-upstream
+   * account that calls back through this proxy: Claude Code's request goes to
+   * the sidecar, and the sidecar's translation of it comes back in and is served
+   * by a real account. Both legs stream the same generation and both report its
+   * tokens, so counting both doubles it. The outer leg is the one counted: it is
+   * what the client asked for, and the sidecar hands it the translated count.
+   *
+   * The inner leg is recognised by what the sidecar forwards and nothing else
+   * does: the SAME session as a request the proxy is currently serving on a
+   * local upstream, in a DIFFERENT dialect from it (the path says which), since
+   * the leg is that request translated. The session alone is not enough, because
+   * one session runs unrelated requests side by side; those are in the client's
+   * own dialect. A request that is itself on a local upstream is an outer leg,
+   * never an inner one. With no session on either leg nothing can be paired, and
+   * a local backend that does not call back never sends an inner leg, so in both
+   * cases everything is counted, as before.
+   *
+   * O(active) once per routing, never per delta. A nested request still keeps
+   * its own estimate and its own finished rate; it is only left out of the sum.
+   *
+   * @param {Record<string, any>} r the active entry
+   * @param {string|null|undefined} name the account it was routed to
+   */
+  _markLeg(r, name) {
+    const acct = name == null ? null : this.am.accounts.find((/** @type {any} */ a) => a.name === name);
+    r.local = isLocalUpstream(acct);
+    r.dialect ??= providerForPath(r.path || '');
+    if (r.nested !== undefined) return;
+    r.nested = false;
+    if (r.local || !r.sessionId) return;
+    for (const o of this.active.values()) {
+      if (o !== r && o.local && o.sessionId === r.sessionId && o.dialect !== r.dialect) { r.nested = true; return; }
+    }
   }
 
   /**
@@ -1113,7 +1154,7 @@ export class TUI {
    */
   onRequestProgress(id, { chars, at }) {
     const r = this.active.get(id);
-    if (r) this.throughput.progress(id, chars, at, r.model || null);
+    if (r) this.throughput.progress(id, chars, at, r.model || null, !r.nested);
   }
 
   onRequestEnd(id, info) {
@@ -1134,7 +1175,7 @@ export class TUI {
       outputTokens: info.outputTokens, firstAt: info.firstTokenAt, lastAt: info.lastTokenAt,
       dispatchedAt: info.dispatchedAt ?? r?.started ?? null, endedAt: now, model: info.model || r?.model || null,
     };
-    this.throughput.finish(id, timing);
+    this.throughput.finish(id, { ...timing, counted: !r?.nested });
     const tps = r ? requestRate({ ...timing, startedAt: timing.dispatchedAt }) : null;
     const tag = this._sessionTag(sid);
     // The line as it has always read. The rate is kept beside it rather than in

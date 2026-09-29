@@ -23,6 +23,8 @@ import { sanitizeText, safeLine } from './safe-text.js';
 // all read them from there, so they cannot drift apart (#426).
 import { MAX_PROBE_SECONDS, ROUTE_COLORS } from './config-ops.js';
 import { isLocalUpstream } from './provider.js';
+import { ThroughputMeter, requestRate, liveRate, formatRate } from './throughput.js';
+import { renderSpeedo, speedoWidth, SPEEDO_MIN_H, SPEEDO_MAX_H } from './speedo.js';
 
 // ── ANSI helpers ─────────────────────────────────────────────
 
@@ -756,6 +758,9 @@ export class TUI {
 
     this.log = [];           // completed activity entries
     this.active = new Map(); // in-flight requests
+    // The fleet's output rate (config `throughputMeter`). Fed by the progress
+    // and end hooks, read once per frame; idle and empty while the setting is off.
+    this.throughput = new ThroughputMeter();
     this.mode = 'normal';    // normal | select | add | input | settings | pick
     // [f]: where the fleet aggregate is drawn — beside the account rows, in
     // place of them, or nowhere. Deliberately not a `mode` in the sense the
@@ -918,8 +923,21 @@ export class TUI {
   /** Fast while something is animating, slow when there is nothing to animate.
    *  A restart drain counts as animating: an idle tick is five seconds, and an
    *  elapsed counter that moves once every five of them reads as a frozen
-   *  screen — which is the complaint keeping the display up exists to answer. */
-  _tickDelay() { return (this.active.size > 0 || this._restartDrain) ? SPIN_MS : IDLE_TICK_MS; }
+   *  screen — which is the complaint keeping the display up exists to answer.
+   *  So does a throughput reading still falling back to zero after the last
+   *  request: at the idle cadence the needle would sit on a rate that has
+   *  already gone for up to five seconds. */
+  _tickDelay() {
+    const settling = this._throughputOn() && this.throughput.recent();
+    return (this.active.size > 0 || this._restartDrain || settling) ? SPIN_MS : IDLE_TICK_MS;
+  }
+
+  /** Whether the throughput readouts are drawn: config `throughputMeter`, and
+   *  never in attach mode, which sees none of the server's request traffic and
+   *  would draw a dial reading zero for ever. */
+  _throughputOn() {
+    return !this.remote && this.config?.throughputMeter === true;
+  }
 
   _scheduleTick() {
     if (!this.running) return;
@@ -1040,16 +1058,44 @@ export class TUI {
     if (r) r.account = info.account == null ? info.account : safeLine(info.account, 64);
   }
 
+  /**
+   * Output streamed for a request: `chars` of generated text at `at`. Called by
+   * the stream reader once per output event, and only while `throughputMeter`
+   * is on, so it adds to counters and nothing else. It never renders: the next
+   * tick draws what it added, and a paint here would put the terminal on the
+   * relay's path (#404).
+   * @param {number} id
+   * @param {{ chars: number, at: number }} info
+   */
+  onRequestProgress(id, { chars, at }) {
+    const r = this.active.get(id);
+    if (!r) return;
+    if (r.firstAt == null) r.firstAt = at;
+    r.lastAt = at;
+    r.chars = (r.chars || 0) + chars;
+    this.throughput.progress(chars, at);
+  }
+
   onRequestEnd(id, info) {
     info = cleanRequestInfo(info);
     const r = this.active.get(id);
     this.active.delete(id);
-    const dur = r ? ((Date.now() - r.started) / 1000).toFixed(1) : '?';
+    const now = Date.now();
+    const dur = r ? ((now - r.started) / 1000).toFixed(1) : '?';
     const acct = info.account || r?.account || '?';
     const model = info.model ? ` (${info.model})` : ''; // shown when the request named a model
     const sid = info.sessionId || r?.sessionId || null;
     const pin = (info.pinned || r?.pinned) ? dim(' [pin]') : '';
-    this._addLog(`${this._sessionTag(sid)} ${info.method} ${info.path}${model} → ${acct}${pin} (${info.status}, ${dur}s)`);
+    // The server times output only while the meter is on, and says so by
+    // carrying `outputTokens` at all: without it there is nothing to settle.
+    let rate = '';
+    if (r && info.outputTokens !== undefined) {
+      const timing = { outputTokens: info.outputTokens, firstAt: info.firstTokenAt, lastAt: info.lastTokenAt, startedAt: r.started, endedAt: now };
+      this.throughput.complete({ ...timing, chars: r.chars || 0 });
+      const tps = this._throughputOn() ? requestRate(timing) : null;
+      if (tps != null) rate = `, ${formatRate(tps)} tok/s`;
+    }
+    this._addLog(`${this._sessionTag(sid)} ${info.method} ${info.path}${model} → ${acct}${pin} (${info.status}, ${dur}s${rate})`);
     if (this.active.size === 0) this._retick();   // animating → idle
   }
 
@@ -1221,6 +1267,16 @@ export class TUI {
       left: () => this._toggleQuotaBarPercent(),
       right: () => this._toggleQuotaBarPercent(),
       enter: () => this._toggleQuotaBarPercent(),
+    });
+
+    fields.push({
+      id: 'throughputMeter',
+      label: 'Throughput',
+      hint: '←→ toggle',
+      value: () => (this.config.throughputMeter === true ? green('on') : gray('off')),
+      left: () => this._toggleThroughputMeter(),
+      right: () => this._toggleThroughputMeter(),
+      enter: () => this._toggleThroughputMeter(),
     });
 
     fields.push({
@@ -1928,6 +1984,18 @@ export class TUI {
     if (this.running) this.render();
   }
 
+  async _toggleThroughputMeter() {
+    // Off unless it says true, so a config that predates the key reads off and
+    // its first toggle writes true. The server samples the shared config per
+    // request, so the assignment starts or stops the timing from the next one.
+    const prev = this.config.throughputMeter;
+    const on = prev !== true;
+    this.config.throughputMeter = on;
+    if (!await this._saveSetting('throughput', () => { this.config.throughputMeter = prev; })) return;
+    this._addLog(`Throughput meter: ${on ? 'on' : 'off'}`);
+    if (this.running) this.render();
+  }
+
   async _cycleEventLogging(dir = 1) {
     // Claude Code telemetry display/handling: show → hide → block → show.
     const order = ['show', 'hide', 'block'];
@@ -2275,7 +2343,6 @@ export class TUI {
     // ▼ marks a dashboard that lost contact with the server it polls (attach
     // mode): what is on screen is the last snapshot, not the current state.
     const live = this.am.connected === false ? red('▼') : green('▲');
-    const right = `${sessStr}Port ${port} ${live} `;
     // Title, padding, port block — and nothing between them. The build this
     // checkout runs is named once, in the corner of the footer.
     //
@@ -2284,8 +2351,16 @@ export class TUI {
     // can leave the two blocks alone wider than the line, and ' '.repeat(-1)
     // throws. There the header overruns and fitLine takes its tail, as it has
     // since long before there was a label to lose.
-    lines.push(left + ' '.repeat(Math.max(1, W - vw(left) - vw(right))) + right);
+    const header = (/** @type {string} */ lead = '') => {
+      const right = `${lead}${sessStr}Port ${port} ${live} `;
+      return left + ' '.repeat(Math.max(1, W - vw(left) - vw(right))) + right;
+    };
+    lines.push(header());
     lines.push(' ' + dim('─'.repeat(W - 2)));
+    // The fleet's output rate, read once for the frame: as a dial beside the top
+    // block when there is room for one, else as a number in the header.
+    const meter = this._throughputOn() ? this.throughput.sample() : null;
+    let dialDrawn = false;
 
     const footerH = 2;
     // While a prompt is open (mode 'input') keep showing the screen it was
@@ -2340,10 +2415,10 @@ export class TUI {
       // panel sits beside the cursor rather than in its way, and dropping it
       // would make the screen jump twice over one keypress.
       const fleet = this.fleetMode === 'full' && view === 'select' ? 'split' : this.fleetMode;
+      /** @type {string[]} */
+      let block;
       if (fleet === 'full') {
-        lines.push('');
-        lines.push(...this._fleetLines(W, routes));
-        lines.push(...this._conduitLines());
+        block = ['', ...this._fleetLines(W, routes), ...this._conduitLines()];
       } else {
         // The panel is composed first, because whether there is one at all
         // decides the width the rows are laid out against — and a fleet with
@@ -2361,8 +2436,10 @@ export class TUI {
         // and on the LEFT, under the rows they belong beside, not under a
         // column of pool aggregates they are deliberately absent from.
         left.push(...this._conduitLines());
-        lines.push(...(panel.length ? sideBySide(left, ['', ...panel], rowsW) : left));
+        block = panel.length ? sideBySide(left, ['', ...panel], rowsW) : left;
       }
+      if (meter) dialDrawn = this._placeSpeedo(block, W, H, meter);
+      lines.push(...block);
     }
 
     // Routing is surfaced inline on each account row (see _renderAcct): a colored
@@ -2386,7 +2463,11 @@ export class TUI {
       const m = r.model ? dim(` (${r.model})`) : ''; // filled in as soon as the model is peeked from the stream
       const pin = r.pinned ? dim(' [pin]') : '';
       const a = r.account ? ` → ${r.account}${pin}` : '';
-      lines.push(` ${sp} ${gray(r.t)}  ${this._sessionTag(r.sessionId)} ${r.method} ${r.path}${m}${a} ${dim(`(${el}s...)`)}`);
+      // An estimate from the text streamed so far, and marked as one: the
+      // exact figure is on the finished line.
+      const tps = meter ? liveRate({ chars: r.chars, firstAt: r.firstAt, now }) : null;
+      const est = tps != null ? ` ~${formatRate(tps)} tok/s` : '';
+      lines.push(` ${sp} ${gray(r.t)}  ${this._sessionTag(r.sessionId)} ${r.method} ${r.path}${m}${a} ${dim(`(${el}s...${est})`)}`);
     }
 
     // Completed log
@@ -2395,6 +2476,14 @@ export class TUI {
       lines.push(`   ${gray(this.log[i].t)}  ${this.log[i].msg}`);
     }
     } // end non-settings body
+
+    // No dial on this screen, or no room for one: the reading goes in the
+    // header's right block instead, and only if the line still holds the rest
+    // of that block whole. Never both, so a reading is never shown twice.
+    if (meter && !dialDrawn) {
+      const withRate = header(`${formatRate(meter.rate)} ${dim('tok/s')}  `);
+      if (vw(withRate) <= W) lines[0] = withRate;
+    }
 
     // A body taller than the terminal used to push the footer off the bottom,
     // and the footer is where a prompt is typed: on a settings screen longer
@@ -2705,6 +2794,56 @@ export class TUI {
     return panelW >= FLEET_PANEL_MIN
       ? { panelW, leftW: W - FLEET_GUTTER - panelW }
       : { panelW: 0, leftW: W };
+  }
+
+  /**
+   * Set the throughput dial beside the dashboard's top block, past everything
+   * the block draws. Returns whether it was drawn; when it was not, the reading
+   * goes in the header instead.
+   *
+   * NOTHING IN THE BLOCK MOVES. Its lines are composed already, the rows and
+   * the panel both, and the dial takes only the columns past the widest of
+   * them, across the gutter the panel sits behind — the measure sideBySide
+   * takes of the rows, for the same reason: on a wide terminal the block ends
+   * long before the edge. So the dial can only occupy columns the frame was
+   * leaving blank, in every fleet mode alike, and a block that runs to the edge
+   * (a narrow terminal, or `full` composed to the whole line) leaves it no room
+   * rather than being cut to make some. It is measured in display columns and
+   * drawn exactly as wide as speedoWidth says, so the line cannot pass W.
+   *
+   * HEIGHT. Beside the block below its first line (the spacer, or the pane
+   * titles), where the panel starts, and as tall as that within SPEEDO_MIN_H to
+   * SPEEDO_MAX_H. A block shorter than the smallest dial is lengthened with
+   * blank lines only if the activity pane still keeps two thirds of the
+   * terminal. On a short terminal the log is worth more than a picture of a
+   * number the header can carry.
+   *
+   * @param {string[]} block the top block's lines, changed in place
+   * @param {number} W terminal columns
+   * @param {number} H terminal rows
+   * @param {{ rate: number, scale: number }} meter
+   * @returns {boolean}
+   */
+  _placeSpeedo(block, W, H, meter) {
+    const used = block.reduce((w, l) => Math.max(w, vw(l)), 0);
+    const beside = block.length - 1;
+    const h = Math.min(SPEEDO_MAX_H, Math.max(SPEEDO_MIN_H, beside));
+    const w = speedoWidth(h);
+    if (used + FLEET_GUTTER + w > W) return false;
+    const grow = h - beside;
+    if (grow > 0) {
+      // What the activity pane keeps: the frame less the header and footer
+      // (two lines each), the lengthened block, and the blank and the title
+      // line above the log.
+      const logRows = H - 4 - (block.length + grow) - 2;
+      if (logRows < Math.ceil((H * 2) / 3)) return false;
+      for (let i = 0; i < grow; i++) block.push('');
+    }
+    const dial = renderSpeedo({ rate: meter.rate, max: meter.scale, width: w, height: h, paint: { green, yellow, red, dim, bold } });
+    // truncate closes any colour the block's line left open, as sideBySide
+    // does, so a row that ends mid-bar cannot bleed into the gutter.
+    for (let i = 0; i < h; i++) block[1 + i] = rpad(truncate(block[1 + i], used), used) + FLEET_GUTTER_PAD + dial[i];
+    return true;
   }
 
   /** Manager indices of the accounts drawn as rows — the seats that rotate —
@@ -3340,6 +3479,10 @@ export class TUI {
     // ── Quota bars
     lines.push(bold('  Quota bars') + dim('  — what the bar on each account row carries'));
     lines.push(row(byId('quotaBarPercent')));
+    lines.push('');
+    // ── Throughput
+    lines.push(bold('  Throughput') + dim('  — output tokens per second, per request and for the whole fleet'));
+    lines.push(row(byId('throughputMeter')));
     lines.push('');
     // ── Activity log
     lines.push(bold('  Activity log') + dim('  — what to do with Claude Code\'s telemetry'));

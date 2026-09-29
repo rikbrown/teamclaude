@@ -23,5 +23,5 @@ From the `rikclaude-agents` plugin. Its agents are namespaced, so a dispatch alw
   GPT-6 Astra, use Fable as your partner instead.
 - Batch reviews. Eight tasks, simple ones included, are a few logical review rounds — not eight
   reviews.
-- For exploration that needs no deep fact-finding, Sonnet or the built-in `Explore` agent is fine.
-  Sonnet has no effort-named agent, so dispatch it directly.
+- For exploration that needs no deep fact-finding, `rikclaude-agents:sonnet-high` or the built-in
+  `Explore` agent is fine. Use `rikclaude-agents:sonnet-xhigh` when it spans many files.

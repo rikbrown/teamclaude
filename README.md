@@ -1,7 +1,7 @@
 # TeamClaude
 
 > **Fork notice (rikbrown).** This fork adds two features on top of
-> [KarpelesLab/teamclaude](https://github.com/KarpelesLab/teamclaude), currently based on upstream 1.1.20:
+> [KarpelesLab/teamclaude](https://github.com/KarpelesLab/teamclaude), currently based on upstream 1.1.22:
 >
 > - **[OpenAI models via a Codex sidecar](docs/openai.md)** (`sidecars` + `customModels`, opt-in):
 >   route `gpt-*` requests through a supervised local translating proxy to a ChatGPT subscription,
@@ -22,7 +22,7 @@
 > ```
 >
 > Already have upstream installed globally? Run `npm uninstall -g @karpeleslab/teamclaude` first —
-> both packages provide the `teamclaude` command.
+> both packages provide the `teamclaude` and `teamrouter` commands.
 >
 > Branch: `rik/main`. Everything else matches upstream.
 

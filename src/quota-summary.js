@@ -1,5 +1,5 @@
 import { providerOf, isLocalUpstream } from './provider.js';
-import { resolveMaxUsage } from './model.js';
+import { resolveMaxUsage, spendCapReached } from './model.js';
 
 /** Resolve a subscription's quota capacity relative to a Claude Pro account. */
 export function quotaTier(account) {
@@ -430,6 +430,9 @@ function routableNames(routes) {
  *   - A seat this build cannot price is skipped but still counted, so
  *     `counted` of `total` can say how much of the pool the figures actually
  *     cover instead of quietly shrinking the fleet.
+ *   - A seat past its money cap (`maxSpend`) is the same: rotation refuses it
+ *     until the cap is raised, so its unspent window is headroom nothing will
+ *     spend, but it is still a seat the pool has.
  *   - `include`, when given, is the same shape of exclusion: out of the
  *     figures, still in the tally.
  *
@@ -445,6 +448,7 @@ function countedPool(accounts, include = null) {
   for (const account of accounts || []) {
     if (!account || account.disabled || isLocalUpstream(account)) continue;
     total++;
+    if (account.maxSpend != null && spendCapReached(account.maxSpend, account.quota?.spend)) continue;
     if (include && !include(account)) continue;
     const weight = seatWeight(account, providerOf(account));
     if (weight == null) continue;

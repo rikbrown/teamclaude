@@ -108,6 +108,9 @@ export function createDefaultConfig() {
     sessionTitles: { enabled: false, width: 18 },
     quotaBarPercent: false,
     accountSort: 'arranged',
+    // Tokens-per-second readouts in the TUI. Off unless asked for: with it off
+    // the proxy does no throughput work at all (see OutputTracker).
+    throughputMeter: false,
     projection: { enabled: true, windowMinutes: 90, wasteFloor: 0.1 },
     eventLogging: 'hide',
     defaultClientMode: 'mitm',

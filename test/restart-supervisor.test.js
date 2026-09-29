@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { superviseServer, RESTART_EXIT_CODE, RESTART_COUNT_ENV, SUPERVISED_ENV } from '../src/restart.js';
+import { superviseServer, supervision, RESTART_EXIT_CODE, RESTART_COUNT_ENV, SUPERVISED_ENV } from '../src/restart.js';
 
 // A foreground TUI cannot re-exec itself — the parent exits, the shell prints a
 // prompt, and the child fights it for the terminal — so the drain ends in an
@@ -139,4 +139,13 @@ test('a server that cannot be started is reported once, not retried forever', as
   const spawn = () => { throw new Error('ENOENT'); };
   assert.equal(await supervise(/** @type {any} */ (spawn), { log: line => said.push(line) }), 1);
   assert.match(said.join('\n'), /Could not start the server/);
+});
+
+// Upstream's rename reads every variable under both prefixes (brand.js), and an
+// operator supervising by hand exports this marker themselves. Read literally,
+// a TEAMROUTER_ spelling would leave the server believing nothing relaunches it.
+test('the supervised marker and the relaunch count are read under either prefix', () => {
+  assert.deepEqual(supervision({ TEAMCLAUDE_SUPERVISED: '1', TEAMCLAUDE_RESTARTS: '3' }), { supervised: true, restartCount: 3 });
+  assert.deepEqual(supervision({ TEAMROUTER_SUPERVISED: '1', TEAMROUTER_RESTARTS: '2' }), { supervised: true, restartCount: 2 });
+  assert.deepEqual(supervision({}), { supervised: false, restartCount: 0 });
 });

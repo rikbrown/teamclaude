@@ -535,6 +535,7 @@ async function serverCommand() {
     // Read by the server per request and by the TUI per frame, so the reload
     // is the whole application: the next request is timed, or is not.
     config.throughputMeter = diskConfig.throughputMeter === true;
+    config.accountSort = diskConfig.accountSort === 'weekly-reset' ? 'weekly-reset' : 'arranged';
     // Read by `run`/`env` from disk, but the TUI settings screen shows it live.
     config.defaultClientMode = diskConfig.defaultClientMode === 'base-url' ? 'base-url' : 'mitm';
     // The fleet switch for spending Codex reset credits. The redeemer reads it
@@ -636,6 +637,7 @@ async function serverCommand() {
         if (config.eventLogging != null) diskConfig.eventLogging = config.eventLogging;
         if (config.quotaBarPercent != null) diskConfig.quotaBarPercent = config.quotaBarPercent;
         if (config.throughputMeter != null) diskConfig.throughputMeter = config.throughputMeter;
+        if (config.accountSort != null) diskConfig.accountSort = config.accountSort;
         if (config.defaultClientMode != null) diskConfig.defaultClientMode = config.defaultClientMode;
         if (config.autoRedeemResets != null) diskConfig.autoRedeemResets = config.autoRedeemResets;
         if (config.blockedModels != null) diskConfig.blockedModels = config.blockedModels;

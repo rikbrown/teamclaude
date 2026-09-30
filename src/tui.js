@@ -286,6 +286,23 @@ const PANE_MIN = 62;
 // the feature, and there is nothing to migrate.
 const listRank = (/** @type {any} */ a) => (Number.isFinite(a?.displayOrder) ? a.displayOrder : Infinity);
 
+// How the account list is ordered inside each provider group (`accountSort`).
+// `arranged` is the operator's own order (listRank); `weekly-reset` puts the
+// account whose weekly window ends soonest first, so quota that is about to
+// expire unspent is at the top of the list.
+const ACCOUNT_SORTS = ['arranged', 'weekly-reset'];
+/** @type {Record<string, string>} */
+const ACCOUNT_SORT_LABELS = { arranged: 'arranged', 'weekly-reset': 'weekly reset' };
+
+// When the account's weekly window resets — the sort key behind `weekly-reset`.
+// No reading (an API-key account, or one that has not reported) and a reset
+// that has already passed both sort last: the second is a window that has just
+// started over, so its next reset is the one furthest away.
+const weeklyResetRank = (/** @type {any} */ a, /** @type {number} */ now) => {
+  const t = a?.quota?.unified7dReset;
+  return Number.isFinite(t) && t > now ? t : Infinity;
+};
+
 // How long a reorder waits after the last move before it is written. Longer
 // than a terminal's key-repeat interval, so a held arrow is one write; short
 // enough that the file is current by the time anyone looks at it.
@@ -1468,6 +1485,21 @@ export class TUI {
       });
     }
 
+    if (this.am.accounts.length > 1) {
+      fields.push({
+        id: 'accountSort',
+        label: 'Sort accounts',
+        hint: '←→ cycle',
+        value: () => {
+          const s = this._accountSort();
+          return s === 'arranged' ? gray(ACCOUNT_SORT_LABELS[s]) : green(ACCOUNT_SORT_LABELS[s]);
+        },
+        left: () => this._cycleAccountSort(-1),
+        right: () => this._cycleAccountSort(+1),
+        enter: () => this._cycleAccountSort(+1),
+      });
+    }
+
     fields.push({
       id: 'upstreamProxy',
       label: 'Upstream proxy',
@@ -2090,6 +2122,24 @@ export class TUI {
     this.config.throughputMeter = on;
     if (!await this._saveSetting('throughput', () => { this.config.throughputMeter = prev; })) return;
     this._addLog(`Throughput meter: ${on ? 'on' : 'off'}`);
+    if (this.running) this.render();
+  }
+
+  /** The configured account sort; anything unknown reads as `arranged`. */
+  _accountSort() {
+    const s = this.config?.accountSort;
+    return ACCOUNT_SORTS.includes(s) ? s : 'arranged';
+  }
+
+  async _cycleAccountSort(dir = 1) {
+    // Read by _displayOrder on every frame, so the assignment is the whole
+    // application and the save is only what survives a restart.
+    const prev = this.config.accountSort;
+    const cur = this._accountSort();
+    const next = ACCOUNT_SORTS[(ACCOUNT_SORTS.indexOf(cur) + dir + ACCOUNT_SORTS.length) % ACCOUNT_SORTS.length];
+    this.config.accountSort = next;
+    if (!await this._saveSetting('account sort', () => { this.config.accountSort = prev; })) return;
+    this._addLog(`Account sort: ${ACCOUNT_SORT_LABELS[next]}`);
     if (this.running) this.render();
   }
 
@@ -2983,17 +3033,32 @@ export class TUI {
    *  rows — see _keySelect, which walks this order but still stores an index.
    *  Which is also why the arrangement is a sort key rather than a permutation
    *  of `am.accounts`: see _doMoveAccount.
+   *
+   *  With `accountSort: "weekly-reset"` the soonest weekly reset goes before
+   *  the arrangement, which then only breaks ties. Not on the reorder screen,
+   *  and not when `arranged` is asked for: the arrangement is what that screen
+   *  edits, so it must see that order.
+   *
+   *  @param {{ arranged?: boolean }} [opts]
    */
-  _displayOrder() {
+  _displayOrder({ arranged = false } = {}) {
+    const byReset = !arranged && this.config?.accountSort === 'weekly-reset'
+      && !(this.mode === 'select' && this.selAction === 'reorder');
+    const now = Date.now();
     return this.am.accounts
       .map((/** @type {any} */ _, /** @type {number} */ i) => i)
       .filter(i => !isLocalUpstream(this.am.accounts[i]))
       .sort((/** @type {number} */ x, /** @type {number} */ y) => {
         const px = PROVIDER_ORDER.indexOf(providerOf(this.am.accounts[x]));
         const py = PROVIDER_ORDER.indexOf(providerOf(this.am.accounts[y]));
-        // Provider, then the arrangement: the provider is what a row IS, so a
-        // number the operator set never crosses it.
+        // Provider, then the sort, then the arrangement: the provider is what a
+        // row IS, so no sort and no number the operator set crosses it.
         if (px !== py) return px - py;
+        if (byReset) {
+          const tx = weeklyResetRank(this.am.accounts[x], now);
+          const ty = weeklyResetRank(this.am.accounts[y], now);
+          if (tx !== ty) return tx < ty ? -1 : 1; // Infinity - Infinity is NaN, so compare
+        }
         const rx = listRank(this.am.accounts[x]);
         const ry = listRank(this.am.accounts[y]);
         // Infinity !== Infinity is false, so two unplaced accounts fall through
@@ -3281,9 +3346,13 @@ export class TUI {
    *  Every account except the locally-served ones. _displayOrder already leaves
    *  those out (they draw as conduit lines, not rows), so they hold no position
    *  and their array slots are simply stepped over.
+   *
+   *  Always in the arranged order, whatever `accountSort` says: a move
+   *  renumbers every account from this list, so a sorted list here would
+   *  write the sort into `displayOrder`.
    */
   _arrangeable() {
-    return this._displayOrder();
+    return this._displayOrder({ arranged: true });
   }
 
   /** The rows that carry ►: the cursor, or in a mixed pool each provider's current
@@ -3624,6 +3693,11 @@ export class TUI {
     lines.push(row(byId('addAccount')));
     if (byId('removeAccount')) lines.push(row(byId('removeAccount')));
     if (byId('orderAccounts')) lines.push(row(byId('orderAccounts')));
+    if (byId('accountSort')) {
+      lines.push(row(byId('accountSort')));
+      lines.push(dim('  Weekly reset lists the account whose week ends soonest first;'));
+      lines.push(dim('  the arranged order breaks ties.'));
+    }
     lines.push('');
     // ── Network
     // Drawn before the sx.org block, which returns early when sx is unavailable:

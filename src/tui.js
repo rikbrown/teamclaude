@@ -287,21 +287,36 @@ const PANE_MIN = 62;
 const listRank = (/** @type {any} */ a) => (Number.isFinite(a?.displayOrder) ? a.displayOrder : Infinity);
 
 // How the account list is ordered inside each provider group (`accountSort`).
-// `arranged` is the operator's own order (listRank); `weekly-reset` puts the
-// account whose weekly window ends soonest first, so quota that is about to
+// `arranged` is the operator's own order (listRank). Each of the others puts
+// the account whose window ends soonest first, so quota that is about to
 // expire unspent is at the top of the list.
-const ACCOUNT_SORTS = ['arranged', 'weekly-reset'];
+//
+// The window each sort reads. S7 and F7 are the family's own weekly bucket
+// where the account has one, else the all-models weekly, which is what governs
+// that family on such an account — the rule quota-summary.js resolves a
+// family's window by.
+/** @type {Record<string, (q: any) => any>} */
+const SORT_RESET = {
+  'session-reset': q => q.unified5hReset,
+  'weekly-reset': q => q.unified7dReset,
+  'sonnet-reset': q => (q.unified7dSonnet != null ? q.unified7dSonnetReset : q.unified7dReset),
+  'fable-reset': q => (q.unified7dFable != null ? q.unified7dFableReset : q.unified7dReset),
+};
+export const ACCOUNT_SORTS = ['arranged', ...Object.keys(SORT_RESET)];
 /** @type {Record<string, string>} */
-const ACCOUNT_SORT_LABELS = { arranged: 'arranged', 'weekly-reset': 'weekly reset' };
+const ACCOUNT_SORT_LABELS = {
+  arranged: 'arranged',
+  'session-reset': 'session reset',
+  'weekly-reset': 'weekly reset',
+  'sonnet-reset': 'S7 reset',
+  'fable-reset': 'F7 reset',
+};
 
-// When the account's weekly window resets — the sort key behind `weekly-reset`.
-// No reading (an API-key account, or one that has not reported) and a reset
+// The sort key: when the window resets. No reading (an API-key account, one
+// that has not reported, a five-hour window nothing has opened) and a reset
 // that has already passed both sort last: the second is a window that has just
 // started over, so its next reset is the one furthest away.
-const weeklyResetRank = (/** @type {any} */ a, /** @type {number} */ now) => {
-  const t = a?.quota?.unified7dReset;
-  return Number.isFinite(t) && t > now ? t : Infinity;
-};
+const resetRank = (/** @type {any} */ t, /** @type {number} */ now) => (Number.isFinite(t) && t > now ? t : Infinity);
 
 // How long a reorder waits after the last move before it is written. Longer
 // than a terminal's key-repeat interval, so a held arrow is one write; short
@@ -3034,16 +3049,16 @@ export class TUI {
    *  Which is also why the arrangement is a sort key rather than a permutation
    *  of `am.accounts`: see _doMoveAccount.
    *
-   *  With `accountSort: "weekly-reset"` the soonest weekly reset goes before
-   *  the arrangement, which then only breaks ties. Not on the reorder screen,
-   *  and not when `arranged` is asked for: the arrangement is what that screen
+   *  With a reset sort (`accountSort`) the soonest reset goes before the
+   *  arrangement, which then only breaks ties. Not on the reorder screen, and
+   *  not when `arranged` is asked for: the arrangement is what that screen
    *  edits, so it must see that order.
    *
    *  @param {{ arranged?: boolean }} [opts]
    */
   _displayOrder({ arranged = false } = {}) {
-    const byReset = !arranged && this.config?.accountSort === 'weekly-reset'
-      && !(this.mode === 'select' && this.selAction === 'reorder');
+    const resetOf = arranged || (this.mode === 'select' && this.selAction === 'reorder')
+      ? null : SORT_RESET[this._accountSort()];
     const now = Date.now();
     return this.am.accounts
       .map((/** @type {any} */ _, /** @type {number} */ i) => i)
@@ -3054,9 +3069,9 @@ export class TUI {
         // Provider, then the sort, then the arrangement: the provider is what a
         // row IS, so no sort and no number the operator set crosses it.
         if (px !== py) return px - py;
-        if (byReset) {
-          const tx = weeklyResetRank(this.am.accounts[x], now);
-          const ty = weeklyResetRank(this.am.accounts[y], now);
+        if (resetOf) {
+          const tx = resetRank(resetOf(this.am.accounts[x].quota || {}), now);
+          const ty = resetRank(resetOf(this.am.accounts[y].quota || {}), now);
           if (tx !== ty) return tx < ty ? -1 : 1; // Infinity - Infinity is NaN, so compare
         }
         const rx = listRank(this.am.accounts[x]);
@@ -3695,8 +3710,9 @@ export class TUI {
     if (byId('orderAccounts')) lines.push(row(byId('orderAccounts')));
     if (byId('accountSort')) {
       lines.push(row(byId('accountSort')));
-      lines.push(dim('  Weekly reset lists the account whose week ends soonest first;'));
-      lines.push(dim('  the arranged order breaks ties.'));
+      lines.push(dim('  A reset sort lists the account whose window ends soonest first;'));
+      lines.push(dim('  S7/F7 read the weekly window on an account without one. The'));
+      lines.push(dim('  arranged order breaks ties.'));
     }
     lines.push('');
     // ── Network

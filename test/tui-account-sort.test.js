@@ -2,9 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { TUI } from '../src/tui.js';
 
-// Sorting the account list by when each account's weekly window resets.
+// Sorting the account list by when one of each account's windows resets.
 //
-// `accountSort: "weekly-reset"` changes the order the rows are DRAWN in and
+// A reset sort (`accountSort`) changes the order the rows are DRAWN in and
 // nothing else. The arrangement (`displayOrder`) is still what the reorder
 // screen edits and still breaks ties, and provider groups keep their places,
 // exactly as they do in the arranged order.
@@ -16,16 +16,20 @@ const HOUR = 3600_000;
 const DAY = 24 * HOUR;
 
 /**
- * @param {{ names?: string[], resets?: Record<string, number|null>, providers?: Record<string, string>,
- *   upstreams?: Record<string, string>, accountSort?: string, save?: (c: any) => Promise<void> }} [opts]
+ * `resets` is each account's all-models weekly reset; `quotas` sets any other
+ * quota field on top of it.
+ *
+ * @param {{ names?: string[], resets?: Record<string, number|null>, quotas?: Record<string, Record<string, any>>,
+ *   providers?: Record<string, string>, upstreams?: Record<string, string>, accountSort?: string,
+ *   save?: (c: any) => Promise<void> }} [opts]
  */
-function makeTUI({ names = ['alpha', 'bravo', 'charlie'], resets = {}, providers = {}, upstreams = {}, accountSort, save } = {}) {
+function makeTUI({ names = ['alpha', 'bravo', 'charlie'], resets = {}, quotas = {}, providers = {}, upstreams = {}, accountSort, save } = {}) {
   /** @type {any[]} */
   const saved = [];
   const accounts = names.map((name, index) => ({
     index, id: `entry-${index}`, name, type: 'oauth', credential: 't',
     provider: providers[name], priority: 0, displayOrder: null, upstream: upstreams[name] || null,
-    quota: { unified7d: 0.5, unified7dReset: resets[name] ?? null },
+    quota: { unified7d: 0.5, unified7dReset: resets[name] ?? null, ...quotas[name] },
   }));
   const am = {
     accounts,
@@ -98,6 +102,43 @@ test('the arranged order breaks ties', () => {
   assert.deepEqual(shown(tui), ['bravo', 'alpha', 'charlie']);
 });
 
+test('session reset lists the soonest five-hour reset first, and an unopened window last', () => {
+  const now = Date.now();
+  const { tui } = makeTUI({
+    accountSort: 'session-reset',
+    // The weekly order is the reverse, so a sort that read it would show.
+    resets: { alpha: now + DAY, bravo: now + 3 * DAY, charlie: now + 5 * DAY },
+    quotas: {
+      alpha: { unified5h: null, unified5hReset: null },
+      bravo: { unified5h: 0.4, unified5hReset: now + 4 * HOUR },
+      charlie: { unified5h: 0.9, unified5hReset: now + HOUR },
+    },
+  });
+  assert.deepEqual(shown(tui), ['charlie', 'bravo', 'alpha']);
+});
+
+for (const [sort, family, key] of /** @type {const} */ ([
+  ['fable-reset', 'F7', 'unified7dFable'],
+  ['sonnet-reset', 'S7', 'unified7dSonnet'],
+])) {
+  test(`${family} reset reads the family's own weekly bucket, and the weekly on a row without one`, () => {
+    const now = Date.now();
+    const { tui } = makeTUI({
+      names: ['own-late', 'none', 'own-soon'],
+      accountSort: sort,
+      resets: { 'own-late': now + HOUR, none: now + 2 * DAY, 'own-soon': now + 6 * DAY },
+      quotas: {
+        // Its own bucket resets late, whatever its weekly says.
+        'own-late': { [key]: 0.3, [`${key}Reset`]: now + 4 * DAY },
+        // No bucket of its own: the weekly is the window that governs the family.
+        none: { [key]: null, [`${key}Reset`]: null },
+        'own-soon': { [key]: 0.8, [`${key}Reset`]: now + DAY },
+      },
+    });
+    assert.deepEqual(shown(tui), ['own-soon', 'none', 'own-late']);
+  });
+}
+
 test('provider groups keep their places, and local backends stay off the list', () => {
   const now = Date.now();
   const { tui } = makeTUI({
@@ -156,15 +197,28 @@ test('the settings row cycles the sort, saves it, and the list follows at once',
   assert.equal(stripAnsi(field(tui).value()), 'arranged');
 
   await field(tui).right();
+  await field(tui).right();
   assert.equal(config.accountSort, 'weekly-reset');
   assert.equal(stripAnsi(field(tui).value()), 'weekly reset');
   assert.deepEqual(shown(tui), ['charlie', 'bravo', 'alpha']);
   assert.equal(saved.at(-1)?.accountSort, 'weekly-reset');
 
   await field(tui).left();
+  await field(tui).left();
   assert.equal(config.accountSort, 'arranged');
   assert.deepEqual(shown(tui), ['alpha', 'bravo', 'charlie']);
   assert.equal(saved.at(-1)?.accountSort, 'arranged');
+});
+
+test('the row cycles through every sort, and wraps both ways', async () => {
+  const { tui, config } = makeTUI();
+  /** @type {string[]} */
+  const seen = [];
+  for (let i = 0; i < 5; i++) { await field(tui).right(); seen.push(config.accountSort); }
+  assert.deepEqual(seen, ['session-reset', 'weekly-reset', 'sonnet-reset', 'fable-reset', 'arranged']);
+  await field(tui).left();
+  assert.equal(config.accountSort, 'fable-reset');
+  assert.equal(stripAnsi(field(tui).value()), 'F7 reset');
 });
 
 test('a save that fails puts the old sort back', async () => {

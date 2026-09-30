@@ -37,7 +37,7 @@ import { ResetCreditRedeemer } from './codex-reset-credits.js';
 import { Warmer } from './warmer.js';
 import { formatWarmupScheduleConfirmation, resolveWarmupConfig } from './warmup-schedule.js';
 import { Sidecar, SIDECAR_DRAIN_GRACE_MS, SIDECAR_SHUTDOWN_GRACE_MS } from './sidecar.js';
-import { TUI } from './tui.js';
+import { TUI, ACCOUNT_SORTS } from './tui.js';
 import { SessionTitles } from './session-titles.js';
 import { captureEarlyConsole } from './early-log.js';
 import { RemoteControl, createAttachSession } from './tui-remote.js';
@@ -535,7 +535,7 @@ async function serverCommand() {
     // Read by the server per request and by the TUI per frame, so the reload
     // is the whole application: the next request is timed, or is not.
     config.throughputMeter = diskConfig.throughputMeter === true;
-    config.accountSort = diskConfig.accountSort === 'weekly-reset' ? 'weekly-reset' : 'arranged';
+    config.accountSort = ACCOUNT_SORTS.includes(diskConfig.accountSort) ? diskConfig.accountSort : 'arranged';
     // Read by `run`/`env` from disk, but the TUI settings screen shows it live.
     config.defaultClientMode = diskConfig.defaultClientMode === 'base-url' ? 'base-url' : 'mitm';
     // The fleet switch for spending Codex reset credits. The redeemer reads it

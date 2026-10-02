@@ -71,6 +71,7 @@ Already logged into Claude Code? `teamclaude import` takes its credentials inste
 - Sends one account's traffic through its own HTTP or SOCKS proxy (`login --routing "socks5h://user:pass@host:1080"`), sign-in and token refresh included, and leaves every other account alone. If that proxy goes down, the request fails over to the next account.
 - Serves OpenAI models next to Claude ones — a supervised local sidecar translates `gpt-*` requests onto a ChatGPT subscription, with real model names in `/model` and GPT subagents dispatchable from a Claude parent (`sidecars` + `customModels`, this fork).
 - Ships those subagents as a Claude Code plugin: one named agent per model **and effort level**, which the Agent tool's `model` parameter cannot express (`/plugin install rikclaude-agents@rikclaude`, this fork).
+- Shows the fleet's quota inside Claude Code: a readout in the prompt footer and per-seat bars in a pane, as a Claude Code mod ([`teamclaude-hud`](plugins/teamclaude-hud/README.md), `/plugin install teamclaude-hud@rikclaude`, this fork).
 - No dependencies. Node built-ins only.
 
 ## Everyday commands

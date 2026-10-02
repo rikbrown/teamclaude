@@ -38,6 +38,14 @@ const QUOTA = {
       },
     },
     {
+      // The same reset as spent@, and emptier: a tie keeps the proxy's order.
+      name: 'tie@example.com',
+      disabled: false,
+      status: 'active',
+      tier: TIER,
+      buckets: { fiveHour: { utilization: 0, resetAt: null }, weeklyShared: weekly(0.5, 17) },
+    },
+    {
       name: 'spent@example.com',
       disabled: false,
       status: 'active',
@@ -59,7 +67,28 @@ const QUOTA = {
       tier: TIER,
       buckets: { fiveHour: { utilization: 0, resetAt: null }, weeklyShared: weekly(0.5, -1) },
     },
-    // A local backend: no readings, so no row.
+    {
+      // A subscription that has not reported yet: kept, with empty bars.
+      name: 'new@example.com',
+      disabled: false,
+      status: 'active',
+      tier: TIER,
+      buckets: { fiveHour: null, weeklyShared: null, weeklySonnet: null, weeklyFable: null },
+    },
+    {
+      // An API key: no windows, token and request buckets as the server builds them.
+      name: 'api@example.com',
+      disabled: false,
+      status: 'active',
+      tier: NO_TIER,
+      buckets: {
+        fiveHour: null,
+        weeklyShared: null,
+        tokens: { utilization: 0.4, remaining: 0.6, resetAt: NOW + HOUR / 2, source: 'tokens' },
+        requests: { utilization: 0.1, remaining: 0.9, resetAt: NOW + HOUR / 2, source: 'requests' },
+      },
+    },
+    // A local backend: no tier and no readings, so no row.
     { name: 'codex', disabled: false, status: 'active', tier: NO_TIER, buckets: { fiveHour: null } },
   ],
   aggregate: {
@@ -229,6 +258,18 @@ test('an HTTPS_PROXY on another machine is never asked', async ($, on) => {
   expect(await shown(ui)).toEqual(['focus'])
 })
 
+test("the footer colours the fleet by fill, not by the soonest seat's pace", async ($, on) => {
+  const { clock } = world(on, { status: 200, text: JSON.stringify(QUOTA) })
+  await started($, clock)
+
+  const ui = await $.ui.mount(footer(140))
+  const colourOf = async (text: string) =>
+    (await ui.findAll({ type: 'Text', in: 'readout' })).find(found => found.text === text)?.props.color
+  // 74% with the soonest reset 30 h off would read calm by pace; by fill it is yellow.
+  expect(await colourOf('74%')).toBe('yellow')
+  expect(await colourOf('13%')).toBe('green')
+})
+
 test('a narrow footer drops the bars and keeps the figures', async ($, on) => {
   const { clock } = world(on, { status: 200, text: JSON.stringify(QUOTA) })
   await started($, clock)
@@ -349,11 +390,14 @@ test('the pane sorts the seats as TeamClaude does by weekly reset, Codex after',
   const ui = await $.ui.mount(pane(120))
   const names = (await shown(ui)).map(row => row.split(' ')[0] ?? '').filter(name => name.includes('@'))
   expect(names).toEqual([
+    'tie@example.com',
     'spent@example.com',
     'claude@example.com',
     'fresh@example.com',
     'lapsed@example.com',
+    'new@example.com',
     'codex:rik@example.com',
+    'api@example.com',
   ])
 })
 
@@ -368,6 +412,11 @@ test('the pane draws a row a seat, padded, and leaves out a backend with no read
     expect(await ui.find({ type: 'Text', text: /throttled/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /^codex$/ })).toBeUndefined()
     expect(await ui.find({ type: 'Text', text: /Updated 0s ago/ })).toBeDefined()
+    const rows = await shown(ui)
+    // A narrow bar keeps the countdown and drops the percentage, as the TUI's does.
+    const tokens = bodyColumns > 100 ? /Tok .*40% · 30m.*Req .*10% · 30m/ : /Tok .*30m.*Req .*30m/
+    expect(rows.find(row => row.includes('Tok'))).toMatch(tokens)
+    expect(rows.some(row => row.startsWith('new@example.com'))).toBe(true)
     await ui.unmount()
   }
 })

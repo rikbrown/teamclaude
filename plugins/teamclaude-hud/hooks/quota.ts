@@ -15,18 +15,21 @@ export const BAR_RED: BarColour = { bg: 'red', fg: 'whiteBright' }
 export const BAR_EMPTY: BarColour = { bg: 'blackBright', fg: 'white' }
 
 // Above the pace of the window, the bar warms up. With no window to pace
-// against (no reset, or one already past), it goes by raw fill.
+// against it goes by raw fill: an API-key seat's token and request buckets,
+// whose cadence is unknown; a reset already past; and the fleet's figures,
+// whose reset is the soonest of several staggered ones and so always looks
+// like a window about to end (`windowMs` null, as the TUI's fleet lines do).
 export function barColour(
   ratio: number,
   resetAt: number | null,
-  windowMs: number,
+  windowMs: number | null,
   now: number,
 ): BarColour {
   if (ratio >= 1) {
     return BAR_RED
   }
   const remaining = resetAt ? resetAt - now : 0
-  if (remaining > 0) {
+  if (windowMs && remaining > 0) {
     const elapsed = Math.max(0, windowMs - remaining)
     const diff = ratio * 100 - (elapsed / windowMs) * 100
     if (diff <= 0) {
@@ -75,7 +78,7 @@ export type BarCells = { filled: string; empty: string; colour: BarColour }
 export function barCells(
   bucket: Bucket | null,
   width: number,
-  windowMs: number,
+  windowMs: number | null,
   now: number,
 ): BarCells {
   const centre = (label: string) => {
@@ -109,7 +112,7 @@ export type MiniBar = { filled: string; empty: string; pct: string; colour: stri
 export function miniBar(
   bucket: Bucket | null,
   width: number,
-  windowMs: number,
+  windowMs: number | null,
   now: number,
 ): MiniBar {
   if (bucket?.utilization == null || Number.isNaN(bucket.utilization)) {
@@ -185,12 +188,15 @@ export function parseQuota(body: string, at: number): Reading | null {
       fiveHour: bucket(buckets.fiveHour),
       weekly: bucket(buckets.weeklyShared),
       fable: fableBucket(buckets.weeklyFable),
+      tokens: bucket(buckets.tokens),
+      requests: bucket(buckets.requests),
     }
-    // A local backend (a translating proxy, not a subscription) has no
-    // buckets at all; the dashboard leaves it out of its rows too.
-    const hasReading = seat.fiveHour || seat.weekly || seat.fable
+    // A local backend (a translating proxy, not a subscription) has no tier
+    // and no readings; the dashboard leaves it out of its rows too. A seat
+    // with a tier stays while it waits for its first reading.
+    const hasReading = seat.fiveHour || seat.weekly || seat.fable || seat.tokens || seat.requests
 
-    return hasReading ? [seat] : []
+    return hasReading || seat.isFleet ? [seat] : []
   })
 
   return { fleet, seats: sortSeats(seats, at), at }
@@ -199,8 +205,9 @@ export function parseQuota(body: string, at: number): Reading | null {
 // TeamClaude's `weekly-reset` sort (tui.js _displayOrder): the seat whose week
 // ends soonest first, so quota about to lapse unspent is at the top; no
 // reading, or a reset already past, last. Fleet seats go above the rest (the
-// Codex seats, which have no tier), as the dashboard groups by provider. Ties
-// go to the fuller week, then to the proxy's own order.
+// Codex and API-key seats, which have no tier), as the dashboard groups by
+// provider. Ties keep the proxy's own order, the nearest this reply has to the
+// arrangement the dashboard breaks them by.
 export function sortSeats(seats: Seat[], now: number): Seat[] {
   const resetRank = (seat: Seat) => {
     const resetAt = seat.weekly?.resetAt
@@ -219,10 +226,8 @@ export function sortSeats(seats: Seat[], now: number): Seat[] {
       if (tx !== ty) {
         return tx < ty ? -1 : 1
       }
-      const ux = x.seat.weekly?.utilization ?? -1
-      const uy = y.seat.weekly?.utilization ?? -1
 
-      return ux !== uy ? uy - ux : x.index - y.index
+      return x.index - y.index
     })
     .map(({ seat }) => seat)
 }

@@ -12,6 +12,13 @@
       "description": "Effort-pinned subagents for a TeamClaude fleet: one named agent per model and effort level, plus the routing policy that goes with them.",
       "category": "workflow",
       "keywords": ["teamclaude", "subagents", "effort", "routing"]
+    },
+    {
+      "name": "teamclaude-hud",
+      "source": "./plugins/teamclaude-hud",
+      "description": "TeamClaude fleet usage at the right of the prompt footer, and per-seat bars in a /teamclaude pane.",
+      "category": "productivity",
+      "keywords": ["teamclaude", "quota", "usage", "statusline", "mod"]
     }
   ]
 }

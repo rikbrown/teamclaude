@@ -1,0 +1,15 @@
+{
+  "name": "teamclaude-hud",
+  "displayName": "TeamClaude HUD",
+  "version": "0.1.0",
+  "description": "TeamClaude fleet usage at the right of the prompt footer, and per-seat bars in a /teamclaude pane",
+  "author": {
+    "name": "Rik Brown",
+    "url": "https://github.com/rikbrown"
+  },
+  "homepage": "https://github.com/rikbrown/teamclaude/blob/rik/main/plugins/teamclaude-hud/README.md",
+  "repository": "https://github.com/rikbrown/teamclaude",
+  "license": "MIT",
+  "keywords": ["teamclaude", "quota", "usage", "statusline", "mod"],
+  "types": "./types/index.d.ts"
+}

@@ -19,6 +19,9 @@ export type Seat = {
   fiveHour: Bucket | null
   weekly: Bucket | null
   fable: Bucket | null
+  // An API-key seat's buckets, drawn where it has no subscription windows.
+  tokens: Bucket | null
+  requests: Bucket | null
 }
 
 export type Reading = { fleet: Fleet | null; seats: Seat[]; at: number }

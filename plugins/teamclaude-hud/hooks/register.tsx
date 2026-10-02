@@ -104,7 +104,7 @@ function bar(
   Text: TextElement,
   bucket: Bucket | null,
   width: number,
-  windowMs: number,
+  windowMs: number | null,
   now: number,
 ): RenderElement[] {
   const cells = barCells(bucket, width, windowMs, now)
@@ -127,21 +127,37 @@ function bar(
   return parts
 }
 
-function bars(
-  Text: TextElement,
-  buckets: Pick<Seat, 'fiveHour' | 'weekly' | 'fable'>,
-  width: number,
-  now: number,
-): RenderElement[] {
+type BarSpec = { label: string; bucket: Bucket | null; windowMs: number | null }
+
+// A label's width in the pane: `5h`, `7d`, `F7`, `Tok` and `Req` line up.
+const LABEL_WIDTH = 3
+
+// A seat's bars: its subscription windows, or for an API-key seat (no window
+// at all, but token or request buckets) those, as the dashboard draws it.
+function seatBars(seat: Seat): BarSpec[] {
+  const isApiKey = !seat.fiveHour && !seat.weekly && !seat.fable && Boolean(seat.tokens || seat.requests)
+  if (isApiKey) {
+    return [
+      { label: 'Tok', bucket: seat.tokens, windowMs: null },
+      { label: 'Req', bucket: seat.requests, windowMs: null },
+    ]
+  }
+
   return [
-    <Text dimColor>5h </Text>,
-    ...bar(Text, buckets.fiveHour, width, FIVE_HOUR_MS, now),
-    <Text dimColor>  7d </Text>,
-    ...bar(Text, buckets.weekly, width, SEVEN_DAY_MS, now),
-    ...(buckets.fable
-      ? [<Text dimColor>  F7 </Text>, ...bar(Text, buckets.fable, width, SEVEN_DAY_MS, now)]
-      : []),
+    { label: '5h', bucket: seat.fiveHour, windowMs: FIVE_HOUR_MS },
+    { label: '7d', bucket: seat.weekly, windowMs: SEVEN_DAY_MS },
+    ...(seat.fable ? [{ label: 'F7', bucket: seat.fable, windowMs: SEVEN_DAY_MS }] : []),
   ]
+}
+
+function bars(Text: TextElement, specs: BarSpec[], width: number, now: number): RenderElement[] {
+  return specs.flatMap((spec, index) => [
+    <Text dimColor>
+      {index > 0 ? '  ' : ''}
+      {spec.label.padEnd(LABEL_WIDTH)}{' '}
+    </Text>,
+    ...bar(Text, spec.bucket, width, spec.windowMs, now),
+  ])
 }
 
 function statusTag(Text: TextElement, seat: Seat): RenderElement | null {
@@ -162,11 +178,12 @@ function statusTag(Text: TextElement, seat: Seat): RenderElement | null {
 function footerReading(
   label: string,
   bucket: Bucket | null,
-  windowMs: number,
   hasBar: boolean,
   now: number,
 ): Segment[] {
-  const bar = miniBar(bucket, FOOTER_BAR_WIDTH, windowMs, now)
+  // No window: the fleet's reset is the soonest of several staggered ones, so
+  // its pace would read calm however spent the fleet is. Raw fill instead.
+  const bar = miniBar(bucket, FOOTER_BAR_WIDTH, null, now)
   const paint = { color: bar.colour, isDim: bar.colour === null }
 
   return [
@@ -188,11 +205,11 @@ function footerSegments(
   }
 
   return [
-    ...footerReading('5h', fleet.fiveHour, FIVE_HOUR_MS, hasBars, now),
+    ...footerReading('5h', fleet.fiveHour, hasBars, now),
     { text: ' ', color: null, isDim: true },
-    ...footerReading('7d', fleet.weekly, SEVEN_DAY_MS, hasBars, now),
+    ...footerReading('7d', fleet.weekly, hasBars, now),
     ...(fleet.fable
-      ? [{ text: ' ', color: null, isDim: true }, ...footerReading('F7', fleet.fable, SEVEN_DAY_MS, hasBars, now)]
+      ? [{ text: ' ', color: null, isDim: true }, ...footerReading('F7', fleet.fable, hasBars, now)]
       : []),
     ...(problem ? [{ text: ' · offline', color: null, isDim: true }] : []),
   ]
@@ -202,9 +219,11 @@ function footerSegments(
 // docked sidebar) puts the name on a line of its own above them.
 function seatRows(Text: TextElement, value: Reading, columns: number, now: number) {
   const nameWidth = clamp(Math.max(...value.seats.map(seat => seat.name.length)), 8, 28)
-  const lineWidth = (columns - nameWidth - 2 - 15) / 3
+  // Three bars, each after its label and a space, two gaps between them.
+  const labels = 3 * (LABEL_WIDTH + 1) + 2 * 2
+  const lineWidth = (columns - nameWidth - 2 - labels) / 3
   const isWide = lineWidth >= 11
-  const width = Math.floor(clamp(isWide ? lineWidth : (columns - 16) / 3, 5, 16))
+  const width = Math.floor(clamp(isWide ? lineWidth : (columns - labels) / 3, 5, 16))
 
   return value.seats.flatMap(seat => {
     const name = seat.name.length > nameWidth ? `${seat.name.slice(0, nameWidth - 1)}…` : seat.name
@@ -216,7 +235,7 @@ function seatRows(Text: TextElement, value: Reading, columns: number, now: numbe
             {name.padEnd(nameWidth)}
           </Text>
           {'  '}
-          {bars(Text, seat, width, now)}
+          {bars(Text, seatBars(seat), width, now)}
           {tag}
         </Text>,
       ]
@@ -229,7 +248,7 @@ function seatRows(Text: TextElement, value: Reading, columns: number, now: numbe
         </Text>
         {tag}
       </Text>,
-      <Text wrap="truncate">{bars(Text, seat, width, now)}</Text>,
+      <Text wrap="truncate">{bars(Text, seatBars(seat), width, now)}</Text>,
     ]
   })
 }

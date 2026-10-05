@@ -19,6 +19,13 @@
       "description": "TeamClaude fleet usage at the right of the prompt footer, and per-seat bars in a /teamclaude pane.",
       "category": "productivity",
       "keywords": ["teamclaude", "quota", "usage", "statusline", "mod"]
+    },
+    {
+      "name": "jump-to-last-prompt",
+      "source": "./plugins/jump-to-last-prompt",
+      "description": "Scroll the fullscreen transcript to your last prompt with /last or a key chord.",
+      "category": "productivity",
+      "keywords": ["transcript", "scroll", "navigation", "mod"]
     }
   ]
 }

@@ -1,0 +1,14 @@
+{
+  "name": "jump-to-last-prompt",
+  "displayName": "Jump to Last Prompt",
+  "version": "0.1.0",
+  "description": "Scroll the fullscreen transcript to your last prompt with /last or a key chord",
+  "author": {
+    "name": "Rik Brown",
+    "url": "https://github.com/rikbrown"
+  },
+  "homepage": "https://github.com/rikbrown/teamclaude/blob/rik/main/plugins/jump-to-last-prompt/README.md",
+  "repository": "https://github.com/rikbrown/teamclaude",
+  "license": "MIT",
+  "keywords": ["transcript", "scroll", "navigation", "mod"]
+}

@@ -1,7 +1,7 @@
 import { refreshAccessToken, isTokenExpiringSoon, isTokenExpired, formatMoney } from './oauth.js';
 import { providerOf, DEFAULT_PROVIDER, isSubscriptionAccount, canServeProvider, isLocalUpstream } from './provider.js';
 import { refreshCodexToken } from './codex-auth.js';
-import { parseCodexQuota, parseCodexPlanType, parseCodexActiveLimit } from './codex-quota.js';
+import { parseCodexQuota, parseCodexPlanType, parseCodexActiveLimit, windowBucket } from './codex-quota.js';
 import { sameIdentity } from './identity.js';
 import { weeklyBucketForModel, modelGlobMatches, modelFamily, gatingUtilization, resolveMaxUsage, spendCapReached, resolveSwitchThreshold, sanitizeSwitchThreshold, WEEKLY_BUCKET_KEYS } from './model.js';
 import { SessionTracker } from './session-tracker.js';
@@ -179,11 +179,6 @@ const FAMILY_WEEKLY_BUCKETS = [
  * @property {Record<string, string>} [codexModelLimits]  which limit each model was last metered on, from `x-codex-active-limit`: a `codexModelBuckets` slug, or the name upstream gives the account-wide limit
  * @property {boolean} [sessionWindowStated]  whether the last reading that stated a window stated a 5-hour one; `false` says the subscription meters no session window
  */
-// Longest Codex window still treated as a session bucket. The two lengths seen
-// in practice are 300 minutes (5h) and 10080 (weekly), so a day sits safely
-// between them.
-const CODEX_WEEKLY_MIN_MINUTES = 1440;
-
 // A Codex `*-reset-at` header as a ms timestamp. The wire format isn't pinned
 // down (the sidecar forwards it opaquely), so accept epoch seconds, epoch ms,
 // or an ISO-8601 date; anything else is null.
@@ -4459,7 +4454,11 @@ export class AccountManager {
     // which lands it in the same 5h/weekly slots the rest of the code reads —
     // display, projection and switch-threshold logic apply unchanged. A window
     // with no length is a bucket the plan does not have, not one at 0% used.
-    // used-percent is 0-100 (not the 0-1 fraction Anthropic reports).
+    // The length rule is the direct Codex path's own (windowBucket), so a
+    // window that is neither five hours nor seven days, a monthly one say, is
+    // dropped on both paths instead of filed here as the weekly one that
+    // selection gates on. used-percent is 0-100 (not the 0-1 fraction Anthropic
+    // reports).
     //
     // Unless this account is a CONDUIT: a local proxy whose own back leg draws
     // on the Codex accounts in this same fleet. Then the numbers it forwards
@@ -4477,8 +4476,10 @@ export class AccountManager {
         const used = parseFloat(headers[`x-codex-${window}-used-percent`]);
         const minutes = parseInt(headers[`x-codex-${window}-window-minutes`], 10);
         if (isNaN(used) || !(minutes > 0)) continue;
+        const bucket = windowBucket(minutes);
+        if (!bucket) continue;
         const reset = parseResetAt(headers[`x-codex-${window}-reset-at`]);
-        const weekly = minutes > CODEX_WEEKLY_MIN_MINUTES;
+        const weekly = bucket === 'weekly';
         account.quota[weekly ? 'unified7d' : 'unified5h'] = used / 100;
         if (reset != null) account.quota[weekly ? 'unified7dReset' : 'unified5hReset'] = reset;
       }

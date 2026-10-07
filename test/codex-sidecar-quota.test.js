@@ -61,6 +61,26 @@ test('updateQuota ignores a codex window the plan does not meter', () => {
   assert.equal(q.unified7d, null);
 });
 
+test('updateQuota drops a forwarded codex window that is neither 5h nor weekly', () => {
+  // The direct Codex path's rule (windowBucket): a monthly window is not the
+  // weekly one, so it must not land in the slot selection gates on, nor
+  // overwrite the real weekly reading beside it.
+  const am = new AccountManager([oauth('codex')], 0.98);
+  const reset = Math.floor((Date.now() + 600_000_000) / 1000);
+  am.updateQuota(0, {
+    'x-codex-primary-used-percent': '12',
+    'x-codex-primary-window-minutes': '10080',
+    'x-codex-primary-reset-at': String(reset),
+    'x-codex-secondary-used-percent': '97',
+    'x-codex-secondary-window-minutes': '43200',
+    'x-codex-secondary-reset-at': String(reset + 1_000_000),
+  });
+  const q = am.accounts[0].quota;
+  assert.equal(q.unified7d, 0.12);
+  assert.equal(q.unified7dReset, reset * 1000);
+  assert.equal(q.unified5h, null);
+});
+
 test('updateQuota accepts an ISO-8601 codex reset-at', () => {
   const am = new AccountManager([oauth('codex')], 0.98);
   const iso = new Date(Date.now() + 3600_000).toISOString();

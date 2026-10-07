@@ -14,7 +14,7 @@ function listen(server) {
   return new Promise(resolve => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
 }
 
-function makeTUI() {
+function makeTUI(extra = {}) {
   const am = {
     accounts: [{ name: 'a', index: 0, type: 'oauth', quota: {}, status: 'active' }],
     currentIndex: 0, switchThreshold: 0.98,
@@ -24,7 +24,7 @@ function makeTUI() {
     thresholdFor() { return 0.98; },
   };
   return new TUI({
-    accountManager: am, config: { proxy: { port: 1 }, accounts: [], routes: [] }, sx: null,
+    accountManager: am, config: { proxy: { port: 1 }, accounts: [], routes: [], ...extra }, sx: null,
     saveConfig: async () => {}, syncAccounts: async () => 0, onQuit: () => {}, probeQuota: () => {},
   });
 }
@@ -113,6 +113,29 @@ test('the effort suffix is grey on both rows', () => {
   assert.ok(renderRaw(tui).includes(`claude-opus-5-5\x1b[0m${GREY}\x1b[2m)`), 'live row: dim model, grey suffix, dim close');
   tui.onRequestEnd('r1', { method: 'POST', path: '/v1/messages', account: 'a', status: 200, model: 'claude-opus-5-5', effort: 'xhigh' });
   assert.ok(tui.log[0].msg.includes(`(claude-opus-5-5${GREY})`), 'finished line: plain model, grey suffix');
+});
+
+// With the throughput meter on, both rows are drawn through its own fitting
+// path (requestMiddle), so the effort and its grey suffix must reach that path
+// too.
+test('with the throughput meter on, both rows still show the effort', () => {
+  const tui = makeTUI({ throughputMeter: true });
+  tui.onRequestStart('r1', { method: 'POST', path: '/v1/messages', sessionId: null });
+  tui.onRequestModel('r1', { model: 'claude-opus-5-5' });
+  tui.onRequestModel('r1', { effort: 'xhigh' });
+  assert.match(renderPlain(tui), /POST \/v1\/messages \(claude-opus-5-5·xhigh\) .*s\.\.\./);
+  tui.onRequestEnd('r1', { method: 'POST', path: '/v1/messages', account: 'a', status: 200, model: 'claude-opus-5-5', effort: 'xhigh' });
+  assert.match(renderPlain(tui), /POST \/v1\/messages \(claude-opus-5-5·xhigh\) → a \(200, /);
+});
+
+test('with the throughput meter on, the effort suffix is grey on both rows', () => {
+  const GREY = '\x1b[38;5;244m·xhigh\x1b[0m';
+  const tui = makeTUI({ throughputMeter: true });
+  tui.onRequestStart('r1', { method: 'POST', path: '/v1/messages', sessionId: null });
+  tui.onRequestModel('r1', { model: 'claude-opus-5-5', effort: 'xhigh' });
+  assert.ok(renderRaw(tui).includes(`claude-opus-5-5\x1b[0m${GREY}\x1b[2m)`), 'live row: dim model, grey suffix, dim close');
+  tui.onRequestEnd('r1', { method: 'POST', path: '/v1/messages', account: 'a', status: 200, model: 'claude-opus-5-5', effort: 'xhigh' });
+  assert.ok(renderRaw(tui).includes(`(claude-opus-5-5${GREY})`), 'finished line: plain model, grey suffix');
 });
 
 test('a hostile effort is drawn without its escapes and cut to length', () => {

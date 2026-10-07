@@ -230,6 +230,21 @@ test('no composed line runs past the terminal in the split view', () => {
   }
 });
 
+test('on an ultrawide terminal the panel stays beside the panes, not at the far edge', () => {
+  // The panes once shared out every spare column, so the rows' block ran to the
+  // reservation and the panel landed 600 columns from the rows it sums up.
+  const tui = tuiFor(withQuota(new AccountManager(fleetAccounts(), 0.98)));
+  const panelAt = (/** @type {number} */ w) => {
+    const { fleet, frame } = renderFleet(tui, w);
+    const titles = frame.findIndex(l => /Anthropic ─+ │ +Codex/.test(l));
+    assert.ok(titles > 0, `W=${w}: the rows are two panes`);
+    const at = frame[titles + 1].indexOf(fleet[0]);
+    assert.equal(at, frame[titles].trimEnd().length + 2, `W=${w}: the panel is not one gutter past the panes`);
+    return at;
+  };
+  assert.equal(panelAt(660), panelAt(320));
+});
+
 test('the left column cannot bleed its colour under the panel', () => {
   // A row ends inside a coloured bar. truncate closes it with a RESET on the
   // way into the merge, so the panel beside it is drawn in its own colours.

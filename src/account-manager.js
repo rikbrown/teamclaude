@@ -2167,23 +2167,38 @@ export class AccountManager {
   }
 
   /**
-   * Client requests running right now, fleet-wide. What a drain waits on.
+   * Client requests running right now, fleet-wide. What a drain waits on, and
+   * half of what the update watcher calls a quiet fleet.
    *
-   * Two counters, because neither one spans a whole request. A session's hold
+   * Two counters, because neither one spans every request. A session's hold
    * is taken across the ENTIRE client request, a multi-minute stream included
    * (see beginSession), which is precisely what a restart must not cut — but it
    * is only taken for a request that carries a session id. An account's
-   * `inFlight` covers the rest, though only as far as the response headers:
-   * storm control releases that slot there so streaming bodies do not tie up
-   * concurrency. Summing them double-counts a session's request while it is
-   * upstream-bound, which can only make a drain wait longer than it strictly
-   * must — and the drain deadline bounds that.
+   * `activityOpen` covers the rest from dispatch until the response has fully
+   * ended (see beginActivity), however long its body streams.
+   *
+   * Not the account's `inFlight`, which this read before. Storm control hands
+   * that slot back when the response headers arrive, so a request with no
+   * session id counted as nothing for the whole of its body, and a drain could
+   * restart the proxy partway through the stream. Every slot is taken inside
+   * an open activity, so nothing that counter saw is lost.
+   *
+   * What neither sees is a request before any of it has gone upstream: one
+   * whose body is still arriving, or one with no session id waiting on a hold,
+   * the admission queue or a token refresh. A restart there costs its client a
+   * retry, not an answer cut off partway.
+   *
+   * The larger of the two rather than the sum: a session's request is in both
+   * from dispatch to its last byte, and the sum would show one stream as two
+   * on the drain's footer. Either one above zero keeps a drain waiting, and
+   * that is all a drain reads.
    */
   inFlightRequests() {
     // The tracker is a plain object to the checker here (see the constructor),
     // so the cast is how its counter is reached — not a claim about the value.
     const sessions = /** @type {any} */ (this.sessionTracker).inFlightCount();
-    return sessions + this.accounts.reduce((n, a) => n + (a.inFlight || 0), 0);
+    const dispatched = this.accounts.reduce((n, a) => n + (a.activityOpen || 0), 0);
+    return Math.max(sessions, dispatched);
   }
 
   /**
@@ -4527,7 +4542,8 @@ export class AccountManager {
    * A request was dispatched to this account. Pair every call with
    * endActivity() once the response has fully ended (or failed): outside-spend
    * attribution reads "the proxy served nothing between two readings" from
-   * these two counters, so an open stream must keep the account busy.
+   * these two counters, so an open stream must keep the account busy. A drain
+   * waits on the same count, for the same reason (see inFlightRequests).
    * @param {number} index
    */
   beginActivity(index) {

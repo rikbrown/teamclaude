@@ -575,16 +575,19 @@ export function parseRequestEffort(body, provider = 'anthropic') {
   } catch { return null; }
 }
 
-// How the activity view names what a request runs on: `model|effort`, or just
+// How the activity view names what a request runs on: `model·effort`, or just
 // the model when the request set no effort. Empty when there is no model, as
-// before: an effort on its own says too little to be worth a column.
+// before: an effort on its own says too little to be worth a column. A middle
+// dot, unspaced, so the effort reads as a quiet suffix rather than a column.
+export const EFFORT_SEP = '·';
+
 /**
  * @param {string|null|undefined} model
  * @param {string|null|undefined} [effort]
  */
 export function modelLabel(model, effort) {
   if (!model) return '';
-  return effort ? `${model}|${effort}` : model;
+  return effort ? `${model}${EFFORT_SEP}${effort}` : model;
 }
 
 // Byte-exact locator for the SECOND model an advisor request carries: Claude

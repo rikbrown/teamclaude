@@ -6,7 +6,7 @@ import { createProxyServer } from '../src/server.js';
 import { TUI } from '../src/tui.js';
 
 // The activity view names each request's model, and with it the reasoning
-// effort the request asked for: `(claude-opus-5-5|xhigh)`. The effort is read
+// effort the request asked for: `(claude-opus-5-5·xhigh)`. The effort is read
 // once the body is in and reported before the forward, so the live row shows it
 // for as long as the request waits on upstream, not only in the log line after.
 
@@ -30,7 +30,7 @@ function makeTUI(extra = {}) {
 }
 
 // One full frame, colour removed, at a fixed size.
-function renderPlain(tui) {
+function renderRaw(tui) {
   const cols = Object.getOwnPropertyDescriptor(process.stdout, 'columns');
   const rows = Object.getOwnPropertyDescriptor(process.stdout, 'rows');
   Object.defineProperty(process.stdout, 'columns', { value: 160, configurable: true });
@@ -45,8 +45,9 @@ function renderPlain(tui) {
     if (rows) Object.defineProperty(process.stdout, 'rows', rows);
     tui.running = false;
   }
-  return frame.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
+  return frame;
 }
+const renderPlain = tui => renderRaw(tui).replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
 
 const plain = s => s.replace(/\x1b\[[0-9;]*m/g, '');
 
@@ -88,9 +89,9 @@ test('the live row and the log line show the effort the request asked for', asyn
   }
 
   assert.ok(liveFrame, 'upstream never saw the request, so the live row was never drawn');
-  assert.match(liveFrame, /POST \/v1\/messages \(claude-opus-5-5\|xhigh\)/);
+  assert.match(liveFrame, /POST \/v1\/messages \(claude-opus-5-5·xhigh\)/);
   assert.equal(tui.active.size, 0);
-  assert.match(plain(tui.log[0].msg), /POST \/v1\/messages \(claude-opus-5-5\|xhigh\) → alice@example\.com/);
+  assert.match(plain(tui.log[0].msg), /POST \/v1\/messages \(claude-opus-5-5·xhigh\) → alice@example\.com/);
 });
 
 test('a request that sets no effort shows the model alone', () => {
@@ -109,10 +110,27 @@ test('with the throughput meter on, both rows still show the effort', () => {
   tui.onRequestStart('r1', { method: 'POST', path: '/v1/messages', sessionId: null });
   tui.onRequestModel('r1', { model: 'claude-opus-5-5' });
   tui.onRequestModel('r1', { model: 'claude-opus-5-5', effort: 'xhigh' });
-  assert.match(renderPlain(tui), /POST \/v1\/messages \(claude-opus-5-5\|xhigh\) .*s\.\.\./);
+  assert.match(renderPlain(tui), /POST \/v1\/messages \(claude-opus-5-5·xhigh\) .*s\.\.\./);
   tui.onRequestEnd('r1', { method: 'POST', path: '/v1/messages', account: 'a', status: 200, model: 'claude-opus-5-5', effort: 'xhigh' });
-  assert.match(renderPlain(tui), /POST \/v1\/messages \(claude-opus-5-5\|xhigh\) → a \(200, /);
+  assert.match(renderPlain(tui), /POST \/v1\/messages \(claude-opus-5-5·xhigh\) → a \(200, /);
 });
+
+// The `·effort` suffix is drawn in a fixed grey a step under the model, on the
+// live row (where the model is dim) and the finished line (where it is not),
+// with and without the meter. A label cut to fit loses its suffix and is drawn
+// in one piece, so no grey is ever opened on half an effort.
+const GREY = '\x1b[38;5;244m·xhigh\x1b[0m';
+for (const throughputMeter of [false, true]) {
+  test(`the effort suffix is grey on both rows (meter ${throughputMeter ? 'on' : 'off'})`, () => {
+    const tui = makeTUI({ throughputMeter });
+    tui.onRequestStart('r1', { method: 'POST', path: '/v1/messages', sessionId: null });
+    tui.onRequestModel('r1', { model: 'claude-opus-5-5', effort: 'xhigh' });
+    const live = renderRaw(tui);
+    assert.ok(live.includes(`claude-opus-5-5\x1b[0m${GREY}\x1b[2m)`), 'live row: dim model, grey suffix, dim close');
+    tui.onRequestEnd('r1', { method: 'POST', path: '/v1/messages', account: 'a', status: 200, model: 'claude-opus-5-5', effort: 'xhigh' });
+    assert.ok(renderRaw(tui).includes(`(claude-opus-5-5${GREY})`), 'finished line: plain model, grey suffix');
+  });
+}
 
 test('a hostile effort is drawn without its escapes and cut to length', () => {
   const tui = makeTUI();

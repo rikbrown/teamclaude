@@ -12,7 +12,7 @@ import { configIndexFor, managerAccountFor, markAccountRemoved, markAccountAdded
 import { PROVIDERS, providerOf, isSubscriptionAccount, upstreamFor } from './provider.js';
 import { mintAccountId } from './account-id.js';
 import { formatPercent, heldResetCredits } from './status-renderer.js';
-import { resolveMaxUsage, resolveMaxSpendMinor, switchThresholdDiffs, modelLabel } from './model.js';
+import { resolveMaxUsage, resolveMaxSpendMinor, switchThresholdDiffs, modelLabel, EFFORT_SEP } from './model.js';
 import { formatProjection, formatEstimate, estimateBurn } from './quota-projection.js';
 import { fleetAggregate, routeHeadroom, routeFamily } from './quota-summary.js';
 /** @typedef {import('./quota-summary.js').FleetBucket} FleetBucket */
@@ -737,6 +737,24 @@ const REQ_PATH_FLOOR = 8;
 const REQ_MODEL_FLOOR = 8;
 const REQ_ACCOUNT_FLOOR = 8;
 
+// ` (model·effort)`, with the `·effort` suffix in a fixed grey a step under
+// the model. Fixed rather than dim because the live row already dims the
+// model, and dim on dim is no step at all. A label that was cut to fit no
+// longer ends in the suffix, and is drawn in one piece.
+const effortGrey = (/** @type {string} */ s) => fg('38;5;244', s);
+/**
+ * @param {string|null} label  modelLabel's text, possibly ellipsized
+ * @param {string|null|undefined} effort
+ * @param {boolean} dimModel
+ */
+function modelParen(label, effort, dimModel) {
+  if (!label) return '';
+  const paint = dimModel ? dim : (/** @type {string} */ s) => s;
+  const suffix = effort ? `${EFFORT_SEP}${effort}` : '';
+  if (!suffix || !label.endsWith(suffix)) return paint(` (${label})`);
+  return `${paint(` (${label.slice(0, -suffix.length)}`)}${effortGrey(suffix)}${paint(')')}`;
+}
+
 /**
  * An activity line's descriptive middle — the path, the model and the account —
  * in at most `budget` columns. Used only while the throughput meter is on, whose
@@ -749,14 +767,12 @@ const REQ_ACCOUNT_FLOOR = 8;
  * in-flight line and plain on a finished one, as before; `account` null draws
  * no arrow, as for a request not yet routed.
  *
- * @param {{ path: string, model: string|null, account: string|null, pin: string, dimModel: boolean }} p
+ * @param {{ path: string, model: string|null, effort?: string|null, account: string|null, pin: string, dimModel: boolean }} p
  * @param {number} budget
  */
-function requestMiddle({ path, model, account, pin, dimModel }, budget) {
-  const compose = (/** @type {string} */ pa, /** @type {string|null} */ mo, /** @type {string|null} */ ac) => {
-    const m = mo ? ` (${mo})` : '';
-    return `${pa}${dimModel && m ? dim(m) : m}${ac != null ? ` → ${ac}${pin}` : ''}`;
-  };
+function requestMiddle({ path, model, effort = null, account, pin, dimModel }, budget) {
+  const compose = (/** @type {string} */ pa, /** @type {string|null} */ mo, /** @type {string|null} */ ac) =>
+    `${pa}${modelParen(mo, effort, dimModel)}${ac != null ? ` → ${ac}${pin}` : ''}`;
   let [pa, mo, ac] = [path, model, account];
   const over = () => vw(compose(pa, mo, ac)) - budget;
   if (over() > 0) pa = ellipsize(pa, Math.max(REQ_PATH_FLOOR, vw(pa) - over()));
@@ -1202,7 +1218,7 @@ export class TUI {
     const dur = r ? ((now - r.started) / 1000).toFixed(1) : '?';
     const acct = info.account || r?.account || '?';
     const label = modelLabel(info.model, info.effort);
-    const model = label ? ` (${label})` : ''; // shown when the request named a model
+    const model = modelParen(label, info.effort, false); // shown when the request named a model
     const sid = info.sessionId || r?.sessionId || null;
     const pin = (info.pinned || r?.pinned) ? dim(' [pin]') : '';
     // The server times output only while the meter is on, and says so by
@@ -1221,7 +1237,7 @@ export class TUI {
     // the meter off gives back the old line for every entry, however it was
     // logged; and the pieces are kept so the line can be fitted around it.
     this._addLog(`${tag} ${info.method} ${info.path}${model} → ${acct}${pin} (${info.status}, ${dur}s)`, {
-      head: `${tag} ${info.method} `, path: info.path, model: label || null, account: acct, pin,
+      head: `${tag} ${info.method} `, path: info.path, model: label || null, effort: info.effort || null, account: acct, pin,
       status: info.status, dur, tps,
     });
     if (this.active.size === 0) this._retick();   // animating → idle
@@ -1229,7 +1245,7 @@ export class TUI {
 
   /**
    * @param {string} msg
-   * @param {{ head: string, path: string, model: string|null, account: string, pin: string, status: any, dur: string, tps: number|null }|null} [req]
+   * @param {{ head: string, path: string, model: string|null, effort?: string|null, account: string, pin: string, status: any, dur: string, tps: number|null }|null} [req]
    *   a request's line in pieces, for the throughput meter's rendering of it
    */
   _addLog(msg, req = null) {
@@ -1238,7 +1254,7 @@ export class TUI {
     // long as the entry lives, so an escape stored here would fire 200 times.
     msg = scrubLine(msg).replace(/^\[TeamClaude\]\s*/, '');
     // The pieces are scrubbed by the same rule, since they are drawn in its place.
-    if (req) req = { ...req, head: scrubLine(req.head), path: scrubLine(req.path), model: req.model && scrubLine(req.model), account: scrubLine(req.account) };
+    if (req) req = { ...req, head: scrubLine(req.head), path: scrubLine(req.path), model: req.model && scrubLine(req.model), effort: req.effort && scrubLine(req.effort), account: scrubLine(req.account) };
     const t = timestamp();
     this.log.unshift(req ? { t, msg, req } : { t, msg });
     if (this.log.length > 200) this.log.length = 200;
@@ -2629,7 +2645,7 @@ export class TUI {
       const el = ((now - r.started) / 1000).toFixed(1);
       const sp = cyan(SPINNER[this.frame]);
       const label = modelLabel(r.model, r.effort);
-      const m = label ? dim(` (${label})`) : ''; // filled in as soon as the model is peeked from the stream
+      const m = modelParen(label, r.effort, true); // filled in as soon as the model is peeked from the stream
       const pin = r.pinned ? dim(' [pin]') : '';
       const a = r.account ? ` → ${r.account}${pin}` : '';
       if (!meter) {
@@ -2643,7 +2659,7 @@ export class TUI {
       const est = tps != null ? ` ~${formatRate(tps)} tok/s` : '';
       const lead = ` ${sp} ${gray(r.t)}  ${this._sessionTag(r.sessionId)} ${r.method} `;
       const tail = ` ${dim(`(${el}s...${est})`)}`;
-      const middle = requestMiddle({ path: r.path, model: label || null, account: r.account || null, pin, dimModel: true }, W - vw(lead) - vw(tail));
+      const middle = requestMiddle({ path: r.path, model: label || null, effort: r.effort, account: r.account || null, pin, dimModel: true }, W - vw(lead) - vw(tail));
       lines.push(lead + middle + tail);
     }
 
@@ -2979,14 +2995,14 @@ export class TUI {
    * line it has always been, with its rate inside the parentheses, and the
    * middle shortened when the whole would pass W so the rate is not the part
    * fitLine cuts.
-   * @param {{ t: string, msg: string, req: { head: string, path: string, model: string|null, account: string, pin: string, status: any, dur: string, tps: number|null } }} e
+   * @param {{ t: string, msg: string, req: { head: string, path: string, model: string|null, effort?: string|null, account: string, pin: string, status: any, dur: string, tps: number|null } }} e
    * @param {number} W
    */
   _requestLine(e, W) {
-    const { head, path, model, account, pin, status, dur, tps } = e.req;
+    const { head, path, model, effort, account, pin, status, dur, tps } = e.req;
     const lead = `   ${gray(e.t)}  ${head}`;
     const tail = ` (${status}, ${dur}s${tps != null ? `, ${formatRate(tps)} tok/s` : ''})`;
-    return lead + requestMiddle({ path, model, account, pin, dimModel: false }, W - vw(lead) - vw(tail)) + tail;
+    return lead + requestMiddle({ path, model, effort, account, pin, dimModel: false }, W - vw(lead) - vw(tail)) + tail;
   }
 
   /**

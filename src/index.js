@@ -1165,6 +1165,7 @@ async function serverCommand() {
     console.log(`\n[TeamClaude] ${why} — draining, up to ${Math.round(DRAIN_DEADLINE_MS / 1000)}s for requests in flight.`);
     prober?.stop();
     warmer?.stop();
+    credentialSync.stop();
     eventLoopMonitor.stop();
     /** @type {string|null} */
     let failure = null;

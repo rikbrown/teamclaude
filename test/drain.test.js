@@ -138,6 +138,209 @@ test('a response already streaming is delivered in full after the drain begins',
   assert.equal((await draining).drained, true);
 });
 
+// ── what the drain counts ────────────────────────────────────────────────────
+//
+// The drain is only as good as its count. A request with no session id takes
+// no session hold, and storm control hands the account's slot back when the
+// response headers arrive. So once those headers were in, an answer to a client
+// that sends no session id counted as nothing in flight for the rest of its
+// body, and a drain could restart the proxy partway through it. An SDK script
+// or a curl sends no session id, and neither does a sidecar back leg given none.
+
+/** Answers the proxy sends back, each one past its headers and with its body
+ *  still open when the drain takes its first reading. */
+const ANSWERS = [
+  {
+    name: 'an Anthropic stream',
+    path: '/v1/messages',
+    account: () => ({ name: 'k', type: 'apikey', apiKey: 'k1' }),
+    body: { model: 'claude-opus-5', messages: [], stream: true },
+    type: 'text/event-stream',
+    head: 'event: ping\ndata: {"type":"ping"}\n\n',
+    tail: 'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+  },
+  {
+    // Read whole before it is relayed, so the client sees nothing until the
+    // end. The proxy still has it open.
+    name: 'an Anthropic answer read whole',
+    path: '/v1/messages',
+    account: () => ({ name: 'k', type: 'apikey', apiKey: 'k1' }),
+    body: { model: 'claude-opus-5', messages: [] },
+    type: 'application/json',
+    head: '{"type":"message",',
+    tail: '"content":[]}',
+  },
+  {
+    name: 'a Codex stream',
+    path: '/backend-api/codex/responses',
+    account: (/** @type {string} */ upstream) => ({
+      name: 'c', type: 'oauth', provider: 'codex', accessToken: 't', refreshToken: 'r',
+      expiresAt: Date.now() + 3600_000, upstream,
+    }),
+    body: { model: 'gpt-6-astra', input: [], stream: true },
+    type: 'text/event-stream',
+    head: 'data: {"type":"response.created"}\n\n',
+    tail: 'data: {"type":"response.in_progress"}\n\n',
+  },
+];
+
+/**
+ * A proxy over one account, and an upstream that answers with `answer.head`,
+ * then holds the rest of the body until `finish()` sends `answer.tail` or
+ * `cut()` drops the connection partway through it.
+ *
+ * @param {typeof ANSWERS[number]} answer
+ * @param {Record<string, any>} [config]
+ */
+async function openAnswer(answer, config = {}) {
+  /** @type {(how: 'end'|'cut') => void} */
+  let settle = () => {};
+  /** @type {Promise<'end'|'cut'>} */
+  const settled = new Promise(resolve => { settle = resolve; });
+  const upstream = http.createServer((req, res) => {
+    req.resume();
+    req.once('end', async () => {
+      res.writeHead(200, { 'content-type': answer.type });
+      res.write(answer.head);
+      if (await settled === 'cut') res.socket?.destroy();
+      else res.end(answer.tail);
+    });
+  });
+  upstream.listen(0, '127.0.0.1');
+  await once(upstream, 'listening');
+  const upstreamUrl = `http://127.0.0.1:${/** @type {any} */ (upstream.address()).port}`;
+
+  const am = new AccountManager([answer.account(upstreamUrl)], 0.98);
+  const proxy = createProxyServer(am, { proxy: {}, upstream: upstreamUrl, ...config }, {});
+  proxy.listen(0, '127.0.0.1');
+  await once(proxy, 'listening');
+  const { port } = /** @type {any} */ (proxy.address());
+
+  return {
+    am,
+    proxy,
+    /** @param {Record<string, string>} [headers] @param {AbortSignal} [signal] */
+    ask: (headers = {}, signal = undefined) => fetch(`http://127.0.0.1:${port}${answer.path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...headers },
+      body: JSON.stringify(answer.body),
+      signal,
+    }),
+    finish: () => settle('end'),
+    cut: () => settle('cut'),
+    close() {
+      settle('end');
+      proxy.closeAllConnections();
+      proxy.close();
+      upstream.closeAllConnections();
+      upstream.close();
+    },
+  };
+}
+
+/** Yield to I/O until `condition` holds. No deadline of its own: the runner's
+ *  timeout is the bound (see test/README.md). */
+async function until(/** @type {() => boolean} */ condition) {
+  while (!condition()) await new Promise(resolve => setImmediate(resolve));
+}
+
+for (const answer of ANSWERS) {
+  test(`${answer.name} with no session id holds the drain until its body has ended`, async () => {
+    const f = await openAnswer(answer);
+    try {
+      const answered = f.ask().then(res => res.text());
+      answered.catch(() => {}); // awaited below; a failed assertion must not leave it unhandled
+      // The window this is about: the upstream's headers are in, so admit()'s
+      // slot has been handed back, and the body is still open. Waited for as a
+      // state, not a delay: the upstream holds the body until finish(), so the
+      // state lasts until it is read.
+      const account = f.am.accounts[0];
+      await until(() => account.activityOpen === 1 && account.inFlight === 0);
+
+      let waited = false;
+      const result = await drainServer({
+        server: f.proxy,
+        inFlight: () => f.am.inFlightRequests(),
+        now: () => 0, // a clock that never moves: only the count can end this
+        // Reached only if the first reading found the answer open. It lets the
+        // upstream finish, then yields while the proxy relays the rest.
+        sleep: async () => {
+          waited = true;
+          f.finish();
+          await new Promise(resolve => setImmediate(resolve));
+        },
+      });
+
+      assert.equal(waited, true, 'the drain read nothing in flight while a body was still open');
+      assert.equal(result.drained, true);
+      assert.equal(await answered, answer.head + answer.tail, 'the client got the whole answer');
+    } finally {
+      f.close();
+    }
+  });
+}
+
+test('a request held before it is sent counts, when it carries a session', async () => {
+  // Nothing can serve, so with holdSeconds set the proxy holds the connection
+  // and waits for an account. Nothing has been dispatched, so no account is
+  // busy: only the session's hold knows this request is running.
+  const f = await openAnswer(ANSWERS[0], { holdSeconds: 120 });
+  /** @type {() => void} */
+  let selected = () => {};
+  const holding = new Promise(resolve => { selected = () => resolve(undefined); });
+  f.am.getActiveAccount = () => { selected(); return null; };
+  const client = new AbortController();
+  try {
+    const answered = f.ask({ 'x-claude-code-session-id': 'drain-held-session' }, client.signal);
+    answered.catch(() => {}); // aborted below, on purpose
+    await holding;
+    assert.equal(f.am.accounts[0].activityOpen, 0, 'nothing was dispatched');
+    assert.equal(f.am.inFlightRequests(), 1);
+
+    client.abort();
+    await until(() => f.am.inFlightRequests() === 0);
+  } finally {
+    f.close();
+  }
+});
+
+// A count that does not come back to zero is as bad as one that misses a
+// request: every later drain would wait out the whole deadline. The two exits
+// that end a stream early must both release it.
+
+test('a client that leaves partway through a stream takes its count with it', async () => {
+  const f = await openAnswer(ANSWERS[0]);
+  const client = new AbortController();
+  try {
+    const res = await f.ask({}, client.signal);
+    const reader = /** @type {ReadableStreamDefaultReader<Uint8Array>} */ (res.body?.getReader());
+    await reader.read(); // the first event is through: the response is mid-stream
+    assert.equal(f.am.inFlightRequests(), 1);
+
+    // The upstream never finishes. Only the proxy noticing the client left can
+    // end this request.
+    client.abort();
+    await until(() => f.am.inFlightRequests() === 0);
+  } finally {
+    f.close();
+  }
+});
+
+test('an upstream that dies partway through a stream takes its count with it', async () => {
+  const f = await openAnswer(ANSWERS[0]);
+  try {
+    const res = await f.ask();
+    const reader = /** @type {ReadableStreamDefaultReader<Uint8Array>} */ (res.body?.getReader());
+    await reader.read();
+    assert.equal(f.am.inFlightRequests(), 1);
+
+    f.cut();
+    await until(() => f.am.inFlightRequests() === 0);
+  } finally {
+    f.close();
+  }
+});
+
 // ── letting the pools go ─────────────────────────────────────────────────────
 
 test('while draining, an answer tells the client to retire the socket it came on', async () => {

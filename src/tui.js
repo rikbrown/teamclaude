@@ -12,7 +12,7 @@ import { configIndexFor, managerAccountFor, markAccountRemoved, markAccountAdded
 import { PROVIDERS, providerOf, isSubscriptionAccount, upstreamFor } from './provider.js';
 import { mintAccountId } from './account-id.js';
 import { formatPercent, heldResetCredits, showSessionRow } from './status-renderer.js';
-import { resolveMaxUsage, resolveMaxSpendMinor, switchThresholdDiffs } from './model.js';
+import { resolveMaxUsage, resolveMaxSpendMinor, switchThresholdDiffs, modelLabel } from './model.js';
 import { formatProjection, formatEstimate, estimateBurn } from './quota-projection.js';
 import { fleetAggregate, routeHeadroom, routeFamily } from './quota-summary.js';
 /** @typedef {import('./quota-summary.js').FleetBucket} FleetBucket */
@@ -711,10 +711,10 @@ export function bar(ratio, w = 10, resetTs, windowMs, threshold, showPct = true)
 }
 
 // The request fields the hooks hand us come from the client — the path and
-// method off the request line, the model peeked from the body, the session id
-// from a header — so they are cut down once here, before they are stored to be
-// drawn every frame and logged.
-const REQ_FIELD_MAX = { method: 16, path: 256, model: 64, account: 64, sessionId: 64 };
+// method off the request line, the model and effort read from the body, the
+// session id from a header — so they are cut down once here, before they are
+// stored to be drawn every frame and logged.
+const REQ_FIELD_MAX = { method: 16, path: 256, model: 64, effort: 16, account: 64, sessionId: 64 };
 function cleanRequestInfo(info) {
   const out = { ...info };
   for (const [k, max] of Object.entries(REQ_FIELD_MAX)) {
@@ -1124,10 +1124,15 @@ export class TUI {
     if (this.active.size === 1) this._retick();   // idle → animating
   }
 
+  // Called up to twice for one request: with the model as soon as it is peeked
+  // from the stream, then with the effort once the whole body is in.
   onRequestModel(id, info) {
     const r = this.active.get(id);
-    const model = info.model ? safeLine(info.model, 64) : '';
-    if (r && model) { r.model = model; this.render(); }
+    const { model, effort } = cleanRequestInfo(info);
+    if (!r || !(model || effort)) return;
+    if (model) r.model = model;
+    if (effort) r.effort = effort;
+    this.render();
   }
 
   onRequestRouted(id, info) {
@@ -1197,7 +1202,8 @@ export class TUI {
     const now = Date.now();
     const dur = r ? ((now - r.started) / 1000).toFixed(1) : '?';
     const acct = info.account || r?.account || '?';
-    const model = info.model ? ` (${info.model})` : ''; // shown when the request named a model
+    const label = modelLabel(info.model, info.effort);
+    const model = label ? ` (${label})` : ''; // shown when the request named a model
     const sid = info.sessionId || r?.sessionId || null;
     const pin = (info.pinned || r?.pinned) ? dim(' [pin]') : '';
     // The server times output only while the meter is on, and says so by
@@ -1216,7 +1222,7 @@ export class TUI {
     // the meter off gives back the old line for every entry, however it was
     // logged; and the pieces are kept so the line can be fitted around it.
     this._addLog(`${tag} ${info.method} ${info.path}${model} → ${acct}${pin} (${info.status}, ${dur}s)`, {
-      head: `${tag} ${info.method} `, path: info.path, model: info.model || null, account: acct, pin,
+      head: `${tag} ${info.method} `, path: info.path, model: label || null, account: acct, pin,
       status: info.status, dur, tps,
     });
     if (this.active.size === 0) this._retick();   // animating → idle
@@ -2624,7 +2630,8 @@ export class TUI {
     for (const [id, r] of this.active) {
       const el = ((now - r.started) / 1000).toFixed(1);
       const sp = cyan(SPINNER[this.frame]);
-      const m = r.model ? dim(` (${r.model})`) : ''; // filled in as soon as the model is peeked from the stream
+      const label = modelLabel(r.model, r.effort);
+      const m = label ? dim(` (${label})`) : ''; // filled in as soon as the model is peeked from the stream
       const pin = r.pinned ? dim(' [pin]') : '';
       const a = r.account ? ` → ${r.account}${pin}` : '';
       if (!meter) {
@@ -2638,7 +2645,7 @@ export class TUI {
       const est = tps != null ? ` ~${formatRate(tps)} tok/s` : '';
       const lead = ` ${sp} ${gray(r.t)}  ${this._sessionTag(r.sessionId)} ${r.method} `;
       const tail = ` ${dim(`(${el}s...${est})`)}`;
-      const middle = requestMiddle({ path: r.path, model: r.model || null, account: r.account || null, pin, dimModel: true }, W - vw(lead) - vw(tail));
+      const middle = requestMiddle({ path: r.path, model: label || null, account: r.account || null, pin, dimModel: true }, W - vw(lead) - vw(tail));
       lines.push(lead + middle + tail);
     }
 

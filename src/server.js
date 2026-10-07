@@ -10,7 +10,7 @@ import { sanitizeToolPairs } from './tool-pair-sanitize.js';
 import { sanitizeCacheControl, cacheControlSubfieldsToStrip } from './cache-control-sanitize.js';
 import { sanitizeContentBlocks, contentBlockTypesToStrip } from './content-block-sanitize.js';
 import { parseRequestModel, parseAdvisorModel } from './account-manager.js';
-import { TopLevelFieldFinder, modelGlobMatches, parseRequestStream } from './model.js';
+import { TopLevelFieldFinder, modelGlobMatches, parseRequestEffort, parseRequestStream } from './model.js';
 import { conversationDigest, pinKeyFor } from './conversation.js';
 import { BodyWriter, truncationNote } from './request-log.js';
 import { upstreamFetch, upstreamPoolStatus } from './upstream-fetch.js';
@@ -1387,11 +1387,31 @@ export function clientSessionId(headers) {
  * and the proxy-API-key gate live in the base server's wrapper, not here.
  */
 /**
+ * The activity callbacks this listener reports through, all optional. The rest
+ * of the hooks object (reload, probeQuota, ...) passes through untyped. The
+ * text in each `info` comes from the client, so a consumer sanitises what it
+ * draws.
+ *
+ * onRequestModel runs up to twice for one request: with the model as soon as it
+ * is peeked from the stream, then with the model and effort once the whole body
+ * is in, when the request set an effort. onRequestEnd's info carries the same
+ * `model` and `effort`, null or absent where the request ended before either
+ * was read.
+ *
+ * @typedef {{
+ *   onRequestStart?: (id: number, info: Record<string, any>) => void,
+ *   onRequestModel?: (id: number, info: { model: string|null, effort?: string|null }) => void,
+ *   onRequestRouted?: (id: number, info: Record<string, any>) => void,
+ *   onRequestProgress?: (id: number, info: { chars: number, at: number }) => void,
+ *   onRequestEnd?: (id: number, info: Record<string, any>) => void,
+ * } & Record<string, any>} ActivityHooks
+ */
+/**
  * @param {Object} opts
  * @param {Object} opts.accountManager
  * @param {string} opts.upstream
  * @param {string|null} [opts.logDir]
- * @param {Object} [opts.hooks]  activity callbacks (onRequestStart, onRequestEnd, ...), all optional.
+ * @param {ActivityHooks} [opts.hooks]  activity callbacks, all optional.
  *   onRequestProgress(reqId, { chars, at }) is called once per output event of
  *   a streamed response, and only while `config.throughputMeter` is on: it runs
  *   inside the stream reader, so it must stay O(1) and never render.
@@ -1626,6 +1646,14 @@ export function createProxyRequestListener({ accountManager, upstream, logDir = 
       const conversation = sessionId && provider === DEFAULT_PROVIDER ? conversationDigest(body) : null;
       const pinKey = pinKeyFor(sessionId, conversation);
 
+      // The reasoning effort the client asked for, for the activity view only:
+      // nothing routes on it. Read from the whole body rather than peeked from
+      // the stream like the model, since nothing needs it before the forward.
+      // Reported here, ahead of the forward, so the live row shows it for the
+      // whole wait.
+      const effort = parseRequestEffort(body, provider);
+      if (effort && !hideActivity) hooks.onRequestModel?.(reqId, { model, effort });
+
       // Model blocklist (issue #116): reject a request for a blocked model right
       // here instead of forwarding it. A model no account can serve (e.g. Fable
       // once it left base plans) otherwise gets rate-limited upstream and hangs
@@ -1639,7 +1667,7 @@ export function createProxyRequestListener({ accountManager, upstream, logDir = 
         }
         recordEarlyOutcome(accountManager, { pinKey }, req.url, true);
         openEntry = null;   // this path owns the close below; the outer catch must not repeat it
-        hooks.onRequestEnd?.(reqId, { method: req.method, path: req.url, account: '(blocked)', status: 400, model, sessionId });
+        hooks.onRequestEnd?.(reqId, { method: req.method, path: req.url, account: '(blocked)', status: 400, model, effort, sessionId });
         return;
       }
 
@@ -1726,7 +1754,7 @@ export function createProxyRequestListener({ accountManager, upstream, logDir = 
         openEntry = null;
         // With the meter on, the end also carries the settled output count and
         // when the output started and stopped; off, the entry is what it was.
-        if (!hideActivity) hooks.onRequestEnd?.(reqId, { method: req.method, path: req.url, account: ctx.account, status: ctx.status, model: ctx.model, sessionId, pinned: ctx.pinnedIndex != null, client, ...output?.summary() });
+        if (!hideActivity) hooks.onRequestEnd?.(reqId, { method: req.method, path: req.url, account: ctx.account, status: ctx.status, model: ctx.model, effort, sessionId, pinned: ctx.pinnedIndex != null, client, ...output?.summary() });
       }
     } catch (err) {
       reportFailure('[TeamClaude] Unhandled error:', err);

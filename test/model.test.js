@@ -176,7 +176,7 @@ test('NestedFieldFinder stops once the parent object closes without the field', 
 });
 
 test('modelLabel joins model and effort, and never shows an effort on its own', () => {
-  assert.equal(modelLabel('claude-opus-5-5', 'xhigh'), 'claude-opus-5-5|xhigh');
+  assert.equal(modelLabel('claude-opus-5-5', 'xhigh'), 'claude-opus-5-5·xhigh');
   assert.equal(modelLabel('claude-opus-5-5', null), 'claude-opus-5-5');
   assert.equal(modelLabel('claude-opus-5-5'), 'claude-opus-5-5');
   assert.equal(modelLabel(null, 'xhigh'), '');

@@ -12,7 +12,7 @@ import { configIndexFor, managerAccountFor, markAccountRemoved, markAccountAdded
 import { PROVIDERS, providerOf, isSubscriptionAccount, upstreamFor } from './provider.js';
 import { mintAccountId } from './account-id.js';
 import { formatPercent, heldResetCredits, showSessionRow } from './status-renderer.js';
-import { resolveMaxUsage, resolveMaxSpendMinor, switchThresholdDiffs, modelLabel } from './model.js';
+import { resolveMaxUsage, resolveMaxSpendMinor, switchThresholdDiffs, modelLabel, EFFORT_SEP } from './model.js';
 import { parseProxyUrl, proxyToUrl, describeProxy, describeSelfProxy, resolveUpstreamProxy, setUpstreamProxy, getUpstreamProxy, localListener, isSelfProxy } from './upstream-proxy.js';
 import { describeRouting, parseRoutingUrl, routingToUrl, checkRouting } from './account-routing.js';
 import { sanitizeText, safeLine } from './safe-text.js';
@@ -583,6 +583,23 @@ function cleanRequestInfo(info) {
   return out;
 }
 
+// ` (model·effort)`, with the `·effort` suffix in a fixed grey a step under
+// the model. Fixed rather than dim because the live row already dims the
+// model, and dim on dim is no step at all.
+const effortGrey = (/** @type {string} */ s) => fg('38;5;244', s);
+/**
+ * @param {string} label  modelLabel's text
+ * @param {string|null|undefined} effort
+ * @param {boolean} dimModel
+ */
+function modelParen(label, effort, dimModel) {
+  if (!label) return '';
+  const paint = dimModel ? dim : (/** @type {string} */ s) => s;
+  const suffix = effort ? `${EFFORT_SEP}${effort}` : '';
+  if (!suffix || !label.endsWith(suffix)) return paint(` (${label})`);
+  return `${paint(` (${label.slice(0, -suffix.length)}`)}${effortGrey(suffix)}${paint(')')}`;
+}
+
 // A stored key, shown enough to recognise and no more. First-4/last-4 on a key
 // of eight characters or fewer is the whole key; a short one shows its tail only.
 export function maskKey(key) {
@@ -893,8 +910,7 @@ export class TUI {
     this.active.delete(id);
     const dur = r ? ((Date.now() - r.started) / 1000).toFixed(1) : '?';
     const acct = info.account || r?.account || '?';
-    const label = modelLabel(info.model, info.effort);
-    const model = label ? ` (${label})` : ''; // shown when the request named a model
+    const model = modelParen(modelLabel(info.model, info.effort), info.effort, false); // shown when the request named a model
     const sid = info.sessionId || r?.sessionId || null;
     const pin = (info.pinned || r?.pinned) ? dim(' [pin]') : '';
     this._addLog(`${this._sessionTag(sid)} ${info.method} ${info.path}${model} → ${acct}${pin} (${info.status}, ${dur}s)`);
@@ -2217,8 +2233,7 @@ export class TUI {
     for (const [, r] of this.active) {
       const el = ((now - r.started) / 1000).toFixed(1);
       const sp = cyan(SPINNER[this.frame]);
-      const label = modelLabel(r.model, r.effort);
-      const m = label ? dim(` (${label})`) : ''; // filled in as soon as the model is peeked from the stream
+      const m = modelParen(modelLabel(r.model, r.effort), r.effort, true); // filled in as soon as the model is peeked from the stream
       const pin = r.pinned ? dim(' [pin]') : '';
       const a = r.account ? ` → ${r.account}${pin}` : '';
       lines.push(` ${sp} ${gray(r.t)}  ${this._sessionTag(r.sessionId)} ${r.method} ${r.path}${m}${a} ${dim(`(${el}s...)`)}`);

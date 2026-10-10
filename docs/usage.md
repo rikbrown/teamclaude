@@ -117,7 +117,7 @@ curl -X POST http://localhost:3456/teamclaude/priority \
 | --- | --- |
 | `s` | Switch active account (`←`/`→` picks the default account or a specific [route](routing.md#model-routes)) |
 | `d` | Enable/disable an account |
-| `l` | Sign an account in again via the browser (opens on the first account in `error`; not in attach mode) |
+| `l` | Sign an account in again (opens on the first account in `error`; not in attach mode). A panel shows the sign-in link, clickable and copied to the clipboard, and takes the pasted answer back, so it works over SSH — see [Signing in again from the TUI](accounts.md#signing-in-again-from-the-tui) |
 | `p` | Refresh quota on all accounts (one-shot probe of the zero-spend usage endpoint) |
 | `R` | Reload accounts from config |
 | `f` | Fleet view — cycles the pooled aggregate between **split** (beside the rows, the default), **full** (instead of the rows) and **off** |

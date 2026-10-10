@@ -10,6 +10,8 @@ teamclaude login
 
 Opens your browser and uses the same OAuth flow as Claude Code. Auto-detects the account email and subscription tier. Logging in with the same account again updates its credentials.
 
+The browser is sent back to a listener on this machine, so it has to run here. On a terminal the command also prints a second link, which works from any device: open it there, sign in, and paste the code the page shows at the prompt. Whichever arrives first is used. Over SSH, or on Linux with no display (`DISPLAY`/`WAYLAND_DISPLAY` unset), no browser is opened and the paste is the whole flow, the same as `teamclaude login --token`.
+
 Run it once per account. You can add accounts while the server is running — press **R** in the TUI to reload.
 
 If the profile cannot be identified, login stops without adding a placeholder
@@ -202,11 +204,24 @@ Accounts can also be added, removed and reordered from the TUI settings screen: 
 
 ### Signing in again from the TUI
 
-An OAuth account whose refresh token upstream has rejected — typically because the same account was signed in somewhere else, which rotates the token and kills the copy TeamClaude holds — shows as `error` and stays that way until someone signs in again. Press **`l`** on the dashboard: the picker opens on the first account in `error`, and **Enter** opens the provider's sign-in page in your browser (Claude or Codex, by the account's provider). The dashboard stays live while it waits, up to two minutes.
+An OAuth account whose refresh token upstream has rejected — typically because the same account was signed in somewhere else, which rotates the token and kills the copy TeamClaude holds — shows as `error` and stays that way until someone signs in again. Press **`l`** on the dashboard: the picker opens on the first account in `error`, and **Enter** opens the login panel for the account's provider (Claude or Codex). The panel works when the server is on another machine, reached over SSH:
+
+- **The link.** The sign-in page is drawn as a short label, so its URL of several hundred characters does not break the layout. The label is an OSC 8 hyperlink: click it in a terminal that supports them. **`u`** shows the full URL.
+- **The clipboard.** The panel sends the link to your clipboard with OSC 52 when it opens, and again on **`c`**. Your terminal must allow OSC 52 (some, iTerm2 among them, have it off by default). `c` and `u` are keys only while the paste field is empty.
+- **The paste field.** After you sign in, paste what the sign-in left you and press **Enter**:
+  - Claude: the code the page shows.
+  - Codex: OpenAI sends the browser to `http://localhost:1455/auth/callback`, which does not load on another machine. Copy that whole address from the browser's address bar and paste it.
+
+  A paste that cannot be used (one from another attempt, or the link itself) is refused with the reason, and you can paste again.
+- **Esc** cancels the sign-in and closes the listener.
+
+On a local terminal a browser also opens on this machine, and the sign-in finishes by itself when you approve it there. Over SSH, or on Linux with no display, no browser is opened. For Codex, connect with `ssh -L 1455:localhost:1455 <host>` and the laptop's browser reaches the server's listener, so the sign-in finishes without the paste. The panel waits up to five minutes, and the proxy keeps serving meanwhile.
+
+The server decides whether its terminal is remote from its own environment (`SSH_CONNECTION` or `SSH_TTY`; on Linux, no `DISPLAY` or `WAYLAND_DISPLAY`). A server that a service started inside tmux, and that you attach to over SSH later, still has the service's environment. It then opens a browser on the host as well, which nobody sees; the link and the paste work as usual. Start such a server with `TEAMCLAUDE_REMOTE=1` to say it is remote (`0` says local). Inside tmux, the clipboard and the link only reach your terminal with the tmux options in [Signing accounts in over SSH](remote.md#signing-accounts-in-over-ssh).
 
 The tokens go to the account the browser actually signed in as, matched by identity exactly as `teamclaude login` does — not to whichever row was highlighted. Sign in as a different account and that account is updated (or added) instead, the activity pane says so, and the row you picked still needs its login.
 
-The key needs a browser on the machine running the server, so it is not offered in `teamclaude attach`, and on a headless host `teamclaude login --token` remains the way.
+The sign-in runs in the server's process, so the key is not offered in `teamclaude attach`. You can also sign in on a machine that has a browser: if that install and the server are both signed in to [callback.net](#syncing-accounts-across-machines-callbacknet), run `teamclaude login` there, and the server takes the new token at its next pass (press **R** in its TUI, or run `teamclaude callback sync` on it, to start one now).
 
 **Reorder accounts** sets the order the account list is drawn in — `↑`/`↓` pick an account, `←`/`→` move it up and down, each move saved as you make it. It writes a `displayOrder` on the entry and touches nothing else: an account keeps its place in the `accounts` array, so route pins, session pins and `TC_ACCT` all go on naming the same accounts, and rotation order stays `priority`'s business alone. An account with no `displayOrder` — every account, until the first time you arrange them, and every one added afterwards — lists after the ones that have one, which is where a newly added account appeared anyway. A [third-party backend](#third-party-backend-accounts) served by a local process is infrastructure rather than a seat to rotate between: the TUI keeps those at the end of the list, and the screen leaves them there.
 
@@ -225,7 +240,17 @@ teamclaude login --codex     # browser sign-in, repeat per account
 ```
 
 Add `--no-browser` to print the URL instead of opening one, and `--name` to
-label the account yourself (it defaults to the email on the login).
+label the account yourself (it defaults to the email on the login). Over SSH,
+or on Linux with no display, no browser is opened.
+
+On a terminal you can finish the sign-in from another device. Open the URL
+there and sign in. The browser is then sent to
+`http://localhost:1455/auth/callback`, which does not load on that device:
+copy the whole address from its address bar and paste it at the prompt. With
+`ssh -L 1455:localhost:1455 <host>` the browser reaches the listener instead,
+and the sign-in finishes by itself. If port 1455 is in use (a running
+`codex login` holds it), the paste still works; without a terminal to paste
+into, the login fails, because nothing else can finish it.
 
 To pool a login you already have, or to add one without a browser, point an
 account at the Codex CLI's own credentials file instead — it defaults to

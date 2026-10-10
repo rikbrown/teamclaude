@@ -186,7 +186,9 @@ SESSION=teamclaude
 
 if ! "$TMUX_BIN" has-session -t "$SESSION" 2>/dev/null; then
   # Size matters while detached: tmux assumes 80x24 and the TUI renders truncated.
-  "$TMUX_BIN" new-session -d -s "$SESSION" -x 220 -y 60 "$(command -v teamclaude) server"
+  # TEAMCLAUDE_REMOTE=1: the server never sees your SSH session (see "Signing
+  # accounts in over SSH"), so say it is remote, and sign-in opens no browser here.
+  "$TMUX_BIN" new-session -d -s "$SESSION" -x 220 -y 60 -e TEAMCLAUDE_REMOTE=1 "$(command -v teamclaude) server"
 fi
 
 while "$TMUX_BIN" has-session -t "$SESSION" 2>/dev/null; do
@@ -226,6 +228,58 @@ ssh <host> 'tail -f ~/.config/teamclaude-activity.log'
 ```
 
 Each line includes the client name, outcome and duration. The TUI feed shows none of these fields.
+
+## Signing accounts in over SSH
+
+A login normally ends with the browser sent back to a listener on the machine that started it,
+and the browser on your laptop cannot reach the server's loopback. So over SSH TeamClaude opens
+no browser on the host. It gives you a link to open on the laptop, and you paste the answer back:
+
+- `teamclaude login` prints the link. Paste back the code the page shows after you sign in.
+- `teamclaude login --codex` prints the link. After you sign in, the browser is sent to
+  `http://localhost:1455/auth/callback`, which does not load. Paste that whole address at the
+  prompt.
+- **`l`** in the attached TUI opens a panel with the link (clickable, and sent to your clipboard)
+  and a paste field. See [Signing in again from the TUI](accounts.md#signing-in-again-from-the-tui).
+
+TeamClaude tells an SSH session from its environment (`SSH_CONNECTION`, `SSH_TTY`), and on Linux
+also treats a missing display (`DISPLAY`, `WAYLAND_DISPLAY`) as remote. A server that a service
+started inside tmux never sees your SSH session: it runs with the service's environment, however
+you attach to it later. It would then open a browser on the host, where nobody sees it. Start it
+with `TEAMCLAUDE_REMOTE=1` to say it is remote, as the keeper script above does; `0` says local
+whatever the environment shows. `TEAMROUTER_REMOTE` is the same setting.
+
+For Codex, forward the callback port and the sign-in finishes without the paste:
+
+```sh
+ssh -t -L 1455:localhost:1455 <host> 'tmux attach -t teamclaude'
+```
+
+The TUI sends the link to the clipboard (OSC 52) and draws it as a hyperlink (OSC 8). Inside tmux
+neither reaches your terminal by default. Add these lines to `~/.tmux.conf` on the host:
+
+```
+# Accept OSC 52 from applications and pass it on. The default, external,
+# drops an application's clipboard write.
+set -g set-clipboard on
+# Pass OSC 8 hyperlinks on (tmux 3.4 or later). The pattern is matched against
+# your terminal's TERM: xterm* covers xterm-256color and xterm-ghostty, and *
+# covers every terminal.
+set -as terminal-features ',xterm*:hyperlinks'
+```
+
+Then run `tmux source-file ~/.tmux.conf`, and detach and attach again: tmux reads
+`terminal-features` when a client attaches. OSC 52 also needs the `clipboard` feature for your
+terminal; tmux's default `terminal-features` already gives it to `xterm*`. `allow-passthrough on`
+carries the clipboard write too, because the TUI sends it in both forms. Your terminal must allow
+OSC 52 as well; some have it off by default.
+
+You can also sign in on the laptop. If the laptop and the server are both signed in to
+callback.net (`teamclaude callback login` on each), run `teamclaude login` on the laptop. The
+server takes the new token at its next pass, and **R** in its TUI starts one. The laptop's config
+then holds the account too. Unlike the copied config in [One server, never two](#one-server-never-two),
+that is safe: callback.net makes the installs take turns to refresh a token. See
+[Syncing accounts across machines](accounts.md#syncing-accounts-across-machines-callbacknet).
 
 ## Pointing clients at it
 

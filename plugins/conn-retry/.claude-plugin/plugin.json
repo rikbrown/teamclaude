@@ -1,7 +1,7 @@
 {
   "name": "conn-retry",
   "displayName": "Connection Retry",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "When a response dies on \"Connection lost mid-response\", wait with exponential backoff and tell Claude to continue",
   "author": {
     "name": "Rik Brown",

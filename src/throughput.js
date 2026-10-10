@@ -18,8 +18,16 @@
 // model has been measured at, with the text it has shown as a floor (see
 // ThroughputMeter). Only exact counts are ever booked.
 //
+// SPEND. Beside the tokens, the meter keeps what they would cost at API list
+// prices (src/pricing.js), as dollars per second over the same window. The
+// input side of a response, cache reads and writes included, is exact as soon
+// as upstream states it, so it is booked at that moment. The output side
+// follows the tokens: estimated while a stream runs, booked when it settles.
+//
 // Pure: no I/O, and every function that needs the time takes it, or takes a
 // clock, so the tests drive time by hand.
+
+import { inputCost, outputPrice } from './pricing.js';
 
 /** Characters per output token, for the floor under a live estimate. English
  *  prose and code both sit near four. It is only ever a floor: the tokens a
@@ -133,7 +141,9 @@ export function contentChars(event) {
   return BOUNDARY_EVENTS.has(type) ? 0 : -1;
 }
 
-/** @typedef {(reqId: number, progress: { chars: number, at: number }) => void} ProgressHook */
+/** A progress report: `chars` of output at `at`, or, when `usage` is set, the
+ *  input side of the response and the `model` that served it.
+ *  @typedef {(reqId: number, progress: { chars: number, at: number, usage?: Record<string, any>, model?: string|null }) => void} ProgressHook */
 
 /**
  * One response's output, as the proxy relays it. Created per request only while
@@ -184,6 +194,15 @@ export class OutputTracker {
     this.lastTokenAt = at;
     this.chars += chars;
     this.onProgress(this.reqId, { chars, at });
+  }
+
+  /** The input side of the response is known: Anthropic's `message_start`, or
+   *  the one usage report a buffered or Responses body makes. Passed on as it
+   *  is, with the model upstream says served it, for the meter's spend reading.
+   *  @param {unknown} usage @param {unknown} [model] */
+  input(usage, model = null) {
+    if (!usage || typeof usage !== 'object') return;
+    this.onProgress(this.reqId, { chars: 0, at: this.now(), usage: /** @type {Record<string, any>} */ (usage), model: typeof model === 'string' ? model : null });
   }
 
   /** The settled output count. The last report wins, because both dialects
@@ -260,6 +279,7 @@ export function niceCeil(v) {
 const mod = (/** @type {number} */ x, /** @type {number} */ n) => ((x % n) + n) % n;
 
 /** @typedef {{ chars: number, firstAt: number, lastAt: number, model: string|null, counted: boolean }} Stream */
+/** @typedef {{ model: string|null, usage: Record<string, any>|null }} Billing */
 
 /**
  * The fleet's output rate: tokens generated across every request in the last
@@ -294,10 +314,14 @@ export class ThroughputMeter {
     this.now = now;
     this.windowSec = windowSec;
     this.ring = new Float64Array(Math.max(ringSec, windowSec + 1));
+    /** Dollars at API prices, bucketed as `ring` is and moved with it. */
+    this.spent = new Float64Array(this.ring.length);
     /** @type {number|null} the second the newest bucket holds */
     this.headSec = null;
     /** @type {Map<unknown, Stream>} streams in flight, by request id */
     this.streams = new Map();
+    /** @type {Map<unknown, Billing>} each request's input side, once known, for pricing its output */
+    this.billing = new Map();
     /** @type {Map<string, number>} each model's measured pace, tok/s, least recently heard first */
     this.paces = new Map();
     /** Recent peak rate, decayed (PEAK_HALF_LIFE_MS). */
@@ -348,7 +372,9 @@ export class ThroughputMeter {
    */
   finish(id, { outputTokens = null, firstAt = null, lastAt = null, dispatchedAt = null, endedAt = null, model = null, counted = true } = {}) {
     const s = this.streams.get(id);
+    const price = this._outPrice(id, model || s?.model);
     this.streams.delete(id);
+    this.billing.delete(id);
     if (counted === false || s?.counted === false) return;
     const end = time(endedAt);
     if (end !== null) this._observe(end);
@@ -356,18 +382,44 @@ export class ThroughputMeter {
     const first = time(firstAt) ?? s?.firstAt ?? null;
     const last = time(lastAt) ?? s?.lastAt ?? first;
     if (n === null) {
-      if (s && first !== null && last !== null) this._spread(s.chars / CHARS_PER_TOKEN, first, last);
+      if (s && first !== null && last !== null) this._spread(s.chars / CHARS_PER_TOKEN, first, last, price);
       return;
     }
     if (first !== null && last !== null) {
-      this._spread(n, first, last);
+      this._spread(n, first, last, price);
       const pace = requestRate({ outputTokens: n, firstAt: first, lastAt: last });
       const name = model || s?.model;
       if (pace !== null && name) this._learn(name, Math.min(pace, MAX_STREAM_RATE));
       return;
     }
     const from = time(dispatchedAt);
-    if (end !== null) this._spread(n, from ?? end, end);
+    if (end !== null) this._spread(n, from ?? end, end, price);
+  }
+
+  /**
+   * The input side of request `id` is known, as upstream stated it. Its cost is
+   * exact, so it is booked at `at` in full; and the model and prompt size it
+   * names price the request's output from here on. A request that is not
+   * counted books nothing, as in finish.
+   *
+   * @param {unknown} id
+   * @param {{ model?: string|null, usage?: Record<string, any>|null, at: number, counted?: boolean }} r
+   */
+  input(id, { model = null, usage = null, at, counted = true }) {
+    const t = time(at);
+    if (t === null) return;
+    if (!this.billing.has(id) && this.billing.size >= MAX_STREAMS) this.billing.delete(this.billing.keys().next().value);
+    this.billing.set(id, { model, usage });
+    if (counted === false) return;
+    const dollars = inputCost(model, usage);
+    if (dollars > 0) this._bump(Math.floor(t / 1000), 0, dollars);
+  }
+
+  /** Dollars per output token of request `id`: by the model upstream named for
+   *  it when there is one, else by `model`. @param {unknown} id @param {string|null|undefined} model */
+  _outPrice(id, model) {
+    const b = this.billing.get(id);
+    return outputPrice(b?.model || model, b?.usage ?? null);
   }
 
   /** The measured pace of `model`, tok/s, or null before any of its turns has
@@ -400,6 +452,20 @@ export class ThroughputMeter {
   /** Fleet tok/s over the window ending at `at`.
    *  @param {number} [at] */
   rate(at = this.now()) {
+    return this._reading(at, this.ring, () => 1);
+  }
+
+  /** Fleet spend at API prices, $/s, over the window ending at `at`: the input
+   *  sides booked, and the output as `rate` counts it, each at its price.
+   *  @param {number} [at] */
+  costRate(at = this.now()) {
+    return this._reading(at, this.spent, (id, s) => this._outPrice(id, s.model));
+  }
+
+  /** The window's sum of `ring`, plus each counted stream's share of its
+   *  estimate weighed by `per(id, stream)`, over the window.
+   *  @param {number} at @param {Float64Array} ring @param {(id: unknown, s: Stream) => number} per */
+  _reading(at, ring, per) {
     const t = this._observe(at);
     const sec = Math.floor(t / 1000);
     const n = this.ring.length;
@@ -409,14 +475,14 @@ export class ThroughputMeter {
     // either way, and the needle slides between buckets instead of stepping.
     const into = Math.min(1, Math.max(0, (t - sec * 1000) / 1000));
     let sum = 0;
-    for (let k = 0; k < w; k++) sum += this.ring[mod(sec - k, n)];
-    sum += this.ring[mod(sec - w, n)] * (1 - into);
+    for (let k = 0; k < w; k++) sum += ring[mod(sec - k, n)];
+    sum += ring[mod(sec - w, n)] * (1 - into);
     const from = t - w * 1000;
-    for (const s of this.streams.values()) {
+    for (const [id, s] of this.streams) {
       if (!s.counted) continue;
       const { est, genMs } = this._estimate(s, t);
       if (!est) continue;
-      sum += genMs > 0 ? est * (Math.min(genMs, t - from) / genMs) : est;
+      sum += (genMs > 0 ? est * (Math.min(genMs, t - from) / genMs) : est) * per(id, s);
     }
     const r = sum / w;
     return Number.isFinite(r) && r > 0 ? r : 0;
@@ -428,7 +494,7 @@ export class ThroughputMeter {
    *  @param {number} [at] */
   recent(at = this.now()) {
     for (const s of this.streams.values()) if (s.counted) return true;
-    return this.rate(at) > 0;
+    return this.rate(at) > 0 || this.costRate(at) > 0;
   }
 
   /**
@@ -437,10 +503,11 @@ export class ThroughputMeter {
    * matter, but the scale only learns of a rate it is shown.
    *
    * @param {number} [at]
-   * @returns {{ rate: number, peak: number, scale: number }}
+   * @returns {{ rate: number, peak: number, scale: number, cost: number }}
    */
   sample(at = this.now()) {
     const rate = this.rate(at);
+    const cost = this.costRate(at);
     const t = time(at) ?? 0;
     const dt = this.sampledAt === null ? 0 : Math.max(0, t - this.sampledAt);
     this.sampledAt = t;
@@ -452,7 +519,7 @@ export class ThroughputMeter {
       const fit = niceCeil(this.peak * SHRINK_HEADROOM);
       if (fit < this.scale) this.scale = fit;
     }
-    return { rate, peak: this.peak, scale: this.scale };
+    return { rate, peak: this.peak, scale: this.scale, cost };
   }
 
   /** Fold one finished turn's pace into its model's.
@@ -481,6 +548,7 @@ export class ThroughputMeter {
     if (this.headSec === null) { this.headSec = sec; return t; }
     if (sec < this.headSec - 1) {
       this.ring.fill(0);
+      this.spent.fill(0);
       this.headSec = sec;
       return t;
     }
@@ -496,25 +564,29 @@ export class ThroughputMeter {
     if (sec <= this.headSec) return;
     const n = this.ring.length;
     const steps = Math.min(sec - this.headSec, n);
-    for (let k = 1; k <= steps; k++) this.ring[mod(this.headSec + k, n)] = 0;
+    for (let k = 1; k <= steps; k++) {
+      this.ring[mod(this.headSec + k, n)] = 0;
+      this.spent[mod(this.headSec + k, n)] = 0;
+    }
     this.headSec = sec;
   }
 
-  /** Add `amount` to second `sec`, if it is still in the ring.
-   *  @param {number} sec @param {number} amount */
-  _bump(sec, amount) {
+  /** Add `amount` tokens and `dollars` to second `sec`, if it is still in the
+   *  ring. @param {number} sec @param {number} amount @param {number} dollars */
+  _bump(sec, amount, dollars) {
     this._advance(sec);
     const head = /** @type {number} */ (this.headSec);
     if (sec <= head - this.ring.length || sec > head) return;
     this.ring[mod(sec, this.ring.length)] += amount;
+    this.spent[mod(sec, this.ring.length)] += dollars;
   }
 
-  /** `amount` spread evenly over [from, to], the part inside the ring only.
-   *  Never negative: the ring holds only what was generated.
-   *  @param {number} amount @param {number} from @param {number} to */
-  _spread(amount, from, to) {
+  /** `amount` tokens spread evenly over [from, to], each costing `price`, the
+   *  part inside the ring only. Never negative: the ring holds only what was
+   *  generated. @param {number} amount @param {number} from @param {number} to @param {number} price */
+  _spread(amount, from, to, price) {
     if (!Number.isFinite(amount) || !(amount > 0)) return;
-    if (!(to > from)) { this._bump(Math.floor(to / 1000), amount); return; }
+    if (!(to > from)) { this._bump(Math.floor(to / 1000), amount, amount * price); return; }
     const last = Math.floor(to / 1000);
     this._advance(last);
     const head = /** @type {number} */ (this.headSec);
@@ -523,7 +595,7 @@ export class ThroughputMeter {
     for (let s = first; s <= last; s++) {
       const lo = Math.max(from, s * 1000);
       const hi = Math.min(to, (s + 1) * 1000);
-      if (hi > lo) this._bump(s, perMs * (hi - lo));
+      if (hi > lo) this._bump(s, perMs * (hi - lo), perMs * (hi - lo) * price);
     }
   }
 }

@@ -1,0 +1,14 @@
+{
+  "name": "conn-retry",
+  "displayName": "Connection Retry",
+  "version": "0.1.0",
+  "description": "When a response dies on \"Connection lost mid-response\", wait with exponential backoff and tell Claude to continue",
+  "author": {
+    "name": "Rik Brown",
+    "url": "https://github.com/rikbrown"
+  },
+  "homepage": "https://github.com/rikbrown/teamclaude/blob/rik/main/plugins/conn-retry/README.md",
+  "repository": "https://github.com/rikbrown/teamclaude",
+  "license": "MIT",
+  "keywords": ["retry", "backoff", "api-error", "mod"]
+}

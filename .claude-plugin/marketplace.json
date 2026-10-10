@@ -26,6 +26,13 @@
       "description": "Scroll the fullscreen transcript to your last prompt with /last or a key chord.",
       "category": "productivity",
       "keywords": ["transcript", "scroll", "navigation", "mod"]
+    },
+    {
+      "name": "conn-retry",
+      "source": "./plugins/conn-retry",
+      "description": "Retry with exponential backoff when a response dies on \"Connection lost mid-response\".",
+      "category": "productivity",
+      "keywords": ["retry", "backoff", "api-error", "mod"]
     }
   ]
 }

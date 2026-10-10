@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { PRICES, LONG_PROMPT, priceFor, inputCost, outputPrice, formatCost } from '../src/pricing.js';
+import { PRICES, LONG_PROMPT, priceFor, inputCost, outputPrice, formatSpend } from '../src/pricing.js';
 
 // What the throughput meter's spend reading prices a response at: API list
 // prices, per million tokens.
@@ -48,25 +48,16 @@ test('Haiku 5.5 moves to its long-prompt rate card past LONG_PROMPT tokens of pr
   close(outputPrice('claude-opus-5-5', long), 20 / 1e6);
 });
 
-test('a spend rate prints to the cent, or to a tenth of one below a cent', () => {
-  assert.equal(formatCost(0), '$0.00/s');
-  assert.equal(formatCost(-1), '$0.00/s');
-  assert.equal(formatCost(NaN), '$0.00/s');
-  assert.equal(formatCost(0.0004), '$0.000/s');
-  assert.equal(formatCost(0.004), '$0.004/s');
-  assert.equal(formatCost(0.0099), '$0.010/s');
-  assert.equal(formatCost(0.27), '$0.27/s');
-  assert.equal(formatCost(12.345), '$12.35/s');
-  assert.equal(formatCost(99.999), '$100/s');
-  assert.equal(formatCost(1234.5), '$1235/s');
-});
-
-test('per hour is the same reading times 3600, with thousands as k', () => {
-  assert.equal(formatCost(0, 'h'), '$0.00/h');
-  assert.equal(formatCost(0.000001, 'h'), '$0.004/h');
-  assert.equal(formatCost(0.01, 'h'), '$36.00/h');
-  assert.equal(formatCost(0.27, 'h'), '$972/h');
-  assert.equal(formatCost(2.7, 'h'), '$9720/h');
-  assert.equal(formatCost(3.425, 'h'), '$12.3k/h');
-  assert.equal(formatCost(30, 'h'), '$108k/h');
+test('an hour\'s spend prints to the cent, a tenth of one below a cent, and thousands as k', () => {
+  assert.equal(formatSpend(0), '$0.00/h');
+  assert.equal(formatSpend(-1), '$0.00/h');
+  assert.equal(formatSpend(NaN), '$0.00/h');
+  assert.equal(formatSpend(0.004), '$0.004/h');
+  assert.equal(formatSpend(0.0099), '$0.010/h');
+  assert.equal(formatSpend(36), '$36.00/h');
+  assert.equal(formatSpend(99.999), '$100/h');
+  assert.equal(formatSpend(972.4), '$972/h');
+  assert.equal(formatSpend(9_720), '$9720/h');
+  assert.equal(formatSpend(12_330), '$12.3k/h');
+  assert.equal(formatSpend(108_000), '$108k/h');
 });

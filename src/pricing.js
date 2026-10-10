@@ -1,6 +1,6 @@
 // What a request would have cost at Anthropic's pay-as-you-go API prices: the
-// throughput meter's second reading, dollars per second next to tokens per
-// second. The fleet runs on subscriptions, so nobody is billed this; it is
+// throughput meter's second reading, the fleet's spend over the last hour next
+// to its tokens per second. The fleet runs on subscriptions, so nobody is billed this; it is
 // the answer to "what would this be costing me on the API".
 //
 // List prices only, first-party Claude API, per million tokens. Not modelled:
@@ -97,18 +97,17 @@ export function outputPrice(model, usage = null) {
 }
 
 /**
- * A spend rate as the TUI prints it, per second or per hour: `$0.00/s`,
- * `$0.004/s`, `$1.27/s`, `$972/h`, `$12.3k/h`. Three places below a cent, so a
- * trickle does not read as nothing.
- * @param {number} n dollars per second
- * @param {'s'|'h'} [per] the unit to state it in
+ * An hour's spend as the TUI prints it: `$0.00/h`, `$0.004/h`, `$36.00/h`,
+ * `$972/h`, `$12.3k/h`. Three places below a cent, so a trickle does not read
+ * as nothing.
+ * @param {number} dollars spent over the last hour
  */
-export function formatCost(n, per = 's') {
-  const v = (Number.isFinite(n) && n > 0 ? n : 0) * (per === 'h' ? 3600 : 1);
-  if (v === 0) return `$0.00/${per}`;
-  if (v < 0.00995) return `$${v.toFixed(3)}/${per}`;
-  if (v < 99.995) return `$${v.toFixed(2)}/${per}`;
-  if (v < 9_999.5) return `$${Math.round(v)}/${per}`;
-  if (v < 99_950) return `$${(v / 1_000).toFixed(1)}k/${per}`;
-  return `$${Math.round(v / 1_000)}k/${per}`;
+export function formatSpend(dollars) {
+  const v = Number.isFinite(dollars) && dollars > 0 ? dollars : 0;
+  if (v === 0) return '$0.00/h';
+  if (v < 0.00995) return `$${v.toFixed(3)}/h`;
+  if (v < 99.995) return `$${v.toFixed(2)}/h`;
+  if (v < 9_999.5) return `$${Math.round(v)}/h`;
+  if (v < 99_950) return `$${(v / 1_000).toFixed(1)}k/h`;
+  return `$${Math.round(v / 1_000)}k/h`;
 }

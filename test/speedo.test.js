@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { renderSpeedo, speedoCells, speedoWidth, speedoShowsCost, formatScale, SPEEDO_MIN_H, SPEEDO_MAX_H } from '../src/speedo.js';
+import { renderSpeedo, speedoCells, speedoWidth, speedoCostRows, formatScale, SPEEDO_MIN_H, SPEEDO_MAX_H } from '../src/speedo.js';
 import { displayWidth } from '../src/tui.js';
 
 // The dial is set beside the dashboard's top block, and that merge trusts it to
@@ -155,25 +155,25 @@ test('the painter the caller hands over is the one used', () => {
   assert.doesNotMatch(all, /\x1b/, 'a raw escape bypassed the painter');
 });
 
-test('the spend sits under the unit, centred, on every dial with a row for it', () => {
+test('the spend sits under the unit, $/s then $/h, centred, as far as the dial has rows', () => {
   const text = (row, kind) => row.filter(c => c.kind === kind).map(c => c.ch).join('');
   for (const [width, height] of SIZES) {
     const cells = speedoCells({ rate: 640, max: 1_000, width, height, cost: 0.27 });
     const unit = cells.findIndex(r => r.some(c => c.kind === 'unit'));
-    const row = cells.findIndex(r => r.some(c => c.kind === 'cost'));
-    if (!speedoShowsCost(height)) {
-      assert.equal(row, -1, `${height}: a spend with no row for it`);
-      continue;
-    }
-    assert.equal(row, unit + 1, `${height}: the spend is not under the unit`);
-    assert.equal(text(cells[row], 'cost'), '$0.27/s');
-    const cols = cells[row].map((c, i) => (c.kind === 'cost' ? i : -1)).filter(i => i >= 0);
-    assert.ok(Math.abs(cols[0] - (width - 1 - cols[cols.length - 1])) <= 1, `${height}: off centre`);
-    assert.ok(!cells[row].some(c => c.kind === 'needle'), `${height}: the needle crossed the spend`);
+    const rows = cells.flatMap((r, i) => (r.some(c => c.kind === 'cost') ? [i] : []));
+    assert.equal(rows.length, speedoCostRows(height), `height ${height}`);
+    rows.forEach((row, i) => {
+      assert.equal(row, unit + 1 + i, `${height}: the spend is not under the unit`);
+      assert.equal(text(cells[row], 'cost'), ['$0.27/s', '$972/h'][i]);
+      const cols = cells[row].map((c, j) => (c.kind === 'cost' ? j : -1)).filter(j => j >= 0);
+      assert.ok(Math.abs(cols[0] - (width - 1 - cols[cols.length - 1])) <= 1, `${height}: off centre`);
+      assert.ok(!cells[row].some(c => c.kind === 'needle'), `${height}: the needle crossed the spend`);
+    });
   }
-  // Only the smallest dial goes without.
-  assert.ok(!speedoShowsCost(SPEEDO_MIN_H));
-  for (let h = SPEEDO_MIN_H + 1; h <= SPEEDO_MAX_H; h++) assert.ok(speedoShowsCost(h), `height ${h}`);
+  // The smallest dial has room for neither, the largest for both.
+  assert.equal(speedoCostRows(SPEEDO_MIN_H), 0);
+  assert.equal(speedoCostRows(SPEEDO_MAX_H), 2);
+  for (let h = SPEEDO_MIN_H + 1; h < SPEEDO_MAX_H; h++) assert.ok(speedoCostRows(h) >= 1, `height ${h}`);
 });
 
 test('the scale ends give way to a spend that would crowd them, and no spend means none drawn', () => {

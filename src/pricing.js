@@ -97,14 +97,18 @@ export function outputPrice(model, usage = null) {
 }
 
 /**
- * A spend rate as the TUI prints it: `$0.00/s`, `$0.004/s`, `$1.27/s`, `$140/s`.
- * Three places below a cent, so a trickle does not read as nothing.
+ * A spend rate as the TUI prints it, per second or per hour: `$0.00/s`,
+ * `$0.004/s`, `$1.27/s`, `$972/h`, `$12.3k/h`. Three places below a cent, so a
+ * trickle does not read as nothing.
  * @param {number} n dollars per second
+ * @param {'s'|'h'} [per] the unit to state it in
  */
-export function formatCost(n) {
-  const v = Number.isFinite(n) && n > 0 ? n : 0;
-  if (v === 0) return '$0.00/s';
-  if (v < 0.00995) return `$${v.toFixed(3)}/s`;
-  if (v < 99.995) return `$${v.toFixed(2)}/s`;
-  return `$${Math.round(v)}/s`;
+export function formatCost(n, per = 's') {
+  const v = (Number.isFinite(n) && n > 0 ? n : 0) * (per === 'h' ? 3600 : 1);
+  if (v === 0) return `$0.00/${per}`;
+  if (v < 0.00995) return `$${v.toFixed(3)}/${per}`;
+  if (v < 99.995) return `$${v.toFixed(2)}/${per}`;
+  if (v < 9_999.5) return `$${Math.round(v)}/${per}`;
+  if (v < 99_950) return `$${(v / 1_000).toFixed(1)}k/${per}`;
+  return `$${Math.round(v / 1_000)}k/${per}`;
 }

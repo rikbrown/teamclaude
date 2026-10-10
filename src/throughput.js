@@ -19,10 +19,13 @@
 // ThroughputMeter). Only exact counts are ever booked.
 //
 // SPEND. Beside the tokens, the meter keeps what they would cost at API list
-// prices (src/pricing.js), as dollars per second over the same window. The
-// input side of a response, cache reads and writes included, is exact as soon
-// as upstream states it, so it is booked at that moment. The output side
-// follows the tokens: estimated while a stream runs, booked when it settles.
+// prices (src/pricing.js), over the trailing hour: what the last hour actually
+// cost, not the last ten seconds times 3600, which a fleet as spiky as this
+// one would overstate several times over. The input side of a response, cache
+// reads and writes included, is exact as soon as upstream states it, so it is
+// booked at that moment. The output side is booked when it settles, and a
+// stream in flight adds its estimate so far. The hour starts empty with the
+// process: for the first hour after a restart it reads since the restart.
 //
 // Pure: no I/O, and every function that needs the time takes it, or takes a
 // clock, so the tests drive time by hand.
@@ -77,6 +80,9 @@ export const MODEL_RATE_KEYS = 32;
 /** In-flight streams the meter follows at once. Every stream is settled when
  *  its request ends, so this is a bound against a leak, not a working limit. */
 export const MAX_STREAMS = 512;
+
+/** Minutes the spend is summed over. */
+export const SPEND_MINUTES = 60;
 
 /** Floor of the dial's scale, in tok/s: an idle fleet's needle rests on a scale
  *  that means something rather than one that stretches a trickle to full. */
@@ -314,8 +320,11 @@ export class ThroughputMeter {
     this.now = now;
     this.windowSec = windowSec;
     this.ring = new Float64Array(Math.max(ringSec, windowSec + 1));
-    /** Dollars at API prices, bucketed as `ring` is and moved with it. */
-    this.spent = new Float64Array(this.ring.length);
+    /** Dollars at API prices, one bucket a minute: the trailing hour and the
+     *  minute it reaches back into. */
+    this.spent = new Float64Array(SPEND_MINUTES + 1);
+    /** @type {number|null} the minute the newest spend bucket holds */
+    this.spentHead = null;
     /** @type {number|null} the second the newest bucket holds */
     this.headSec = null;
     /** @type {Map<unknown, Stream>} streams in flight, by request id */
@@ -382,18 +391,25 @@ export class ThroughputMeter {
     const first = time(firstAt) ?? s?.firstAt ?? null;
     const last = time(lastAt) ?? s?.lastAt ?? first;
     if (n === null) {
-      if (s && first !== null && last !== null) this._spread(s.chars / CHARS_PER_TOKEN, first, last, price);
+      if (s && first !== null && last !== null) {
+        this._spread(s.chars / CHARS_PER_TOKEN, first, last);
+        this._spend(last, (s.chars / CHARS_PER_TOKEN) * price);
+      }
       return;
     }
     if (first !== null && last !== null) {
-      this._spread(n, first, last, price);
+      this._spread(n, first, last);
+      this._spend(last, n * price);
       const pace = requestRate({ outputTokens: n, firstAt: first, lastAt: last });
       const name = model || s?.model;
       if (pace !== null && name) this._learn(name, Math.min(pace, MAX_STREAM_RATE));
       return;
     }
     const from = time(dispatchedAt);
-    if (end !== null) this._spread(n, from ?? end, end, price);
+    if (end !== null) {
+      this._spread(n, from ?? end, end);
+      this._spend(end, n * price);
+    }
   }
 
   /**
@@ -411,8 +427,7 @@ export class ThroughputMeter {
     if (!this.billing.has(id) && this.billing.size >= MAX_STREAMS) this.billing.delete(this.billing.keys().next().value);
     this.billing.set(id, { model, usage });
     if (counted === false) return;
-    const dollars = inputCost(model, usage);
-    if (dollars > 0) this._bump(Math.floor(t / 1000), 0, dollars);
+    this._spend(t, inputCost(model, usage));
   }
 
   /** Dollars per output token of request `id`: by the model upstream named for
@@ -452,20 +467,6 @@ export class ThroughputMeter {
   /** Fleet tok/s over the window ending at `at`.
    *  @param {number} [at] */
   rate(at = this.now()) {
-    return this._reading(at, this.ring, () => 1);
-  }
-
-  /** Fleet spend at API prices, $/s, over the window ending at `at`: the input
-   *  sides booked, and the output as `rate` counts it, each at its price.
-   *  @param {number} [at] */
-  costRate(at = this.now()) {
-    return this._reading(at, this.spent, (id, s) => this._outPrice(id, s.model));
-  }
-
-  /** The window's sum of `ring`, plus each counted stream's share of its
-   *  estimate weighed by `per(id, stream)`, over the window.
-   *  @param {number} at @param {Float64Array} ring @param {(id: unknown, s: Stream) => number} per */
-  _reading(at, ring, per) {
     const t = this._observe(at);
     const sec = Math.floor(t / 1000);
     const n = this.ring.length;
@@ -475,14 +476,14 @@ export class ThroughputMeter {
     // either way, and the needle slides between buckets instead of stepping.
     const into = Math.min(1, Math.max(0, (t - sec * 1000) / 1000));
     let sum = 0;
-    for (let k = 0; k < w; k++) sum += ring[mod(sec - k, n)];
-    sum += ring[mod(sec - w, n)] * (1 - into);
+    for (let k = 0; k < w; k++) sum += this.ring[mod(sec - k, n)];
+    sum += this.ring[mod(sec - w, n)] * (1 - into);
     const from = t - w * 1000;
-    for (const [id, s] of this.streams) {
+    for (const s of this.streams.values()) {
       if (!s.counted) continue;
       const { est, genMs } = this._estimate(s, t);
       if (!est) continue;
-      sum += (genMs > 0 ? est * (Math.min(genMs, t - from) / genMs) : est) * per(id, s);
+      sum += genMs > 0 ? est * (Math.min(genMs, t - from) / genMs) : est;
     }
     const r = sum / w;
     return Number.isFinite(r) && r > 0 ? r : 0;
@@ -494,7 +495,7 @@ export class ThroughputMeter {
    *  @param {number} [at] */
   recent(at = this.now()) {
     for (const s of this.streams.values()) if (s.counted) return true;
-    return this.rate(at) > 0 || this.costRate(at) > 0;
+    return this.rate(at) > 0;
   }
 
   /**
@@ -503,11 +504,11 @@ export class ThroughputMeter {
    * matter, but the scale only learns of a rate it is shown.
    *
    * @param {number} [at]
-   * @returns {{ rate: number, peak: number, scale: number, cost: number }}
+   * @returns {{ rate: number, peak: number, scale: number, spend: number }}
    */
   sample(at = this.now()) {
     const rate = this.rate(at);
-    const cost = this.costRate(at);
+    const spend = this.hourSpend(at);
     const t = time(at) ?? 0;
     const dt = this.sampledAt === null ? 0 : Math.max(0, t - this.sampledAt);
     this.sampledAt = t;
@@ -519,7 +520,7 @@ export class ThroughputMeter {
       const fit = niceCeil(this.peak * SHRINK_HEADROOM);
       if (fit < this.scale) this.scale = fit;
     }
-    return { rate, peak: this.peak, scale: this.scale, cost };
+    return { rate, peak: this.peak, scale: this.scale, spend };
   }
 
   /** Fold one finished turn's pace into its model's.
@@ -548,7 +549,6 @@ export class ThroughputMeter {
     if (this.headSec === null) { this.headSec = sec; return t; }
     if (sec < this.headSec - 1) {
       this.ring.fill(0);
-      this.spent.fill(0);
       this.headSec = sec;
       return t;
     }
@@ -564,29 +564,25 @@ export class ThroughputMeter {
     if (sec <= this.headSec) return;
     const n = this.ring.length;
     const steps = Math.min(sec - this.headSec, n);
-    for (let k = 1; k <= steps; k++) {
-      this.ring[mod(this.headSec + k, n)] = 0;
-      this.spent[mod(this.headSec + k, n)] = 0;
-    }
+    for (let k = 1; k <= steps; k++) this.ring[mod(this.headSec + k, n)] = 0;
     this.headSec = sec;
   }
 
-  /** Add `amount` tokens and `dollars` to second `sec`, if it is still in the
-   *  ring. @param {number} sec @param {number} amount @param {number} dollars */
-  _bump(sec, amount, dollars) {
+  /** Add `amount` to second `sec`, if it is still in the ring.
+   *  @param {number} sec @param {number} amount */
+  _bump(sec, amount) {
     this._advance(sec);
     const head = /** @type {number} */ (this.headSec);
     if (sec <= head - this.ring.length || sec > head) return;
     this.ring[mod(sec, this.ring.length)] += amount;
-    this.spent[mod(sec, this.ring.length)] += dollars;
   }
 
-  /** `amount` tokens spread evenly over [from, to], each costing `price`, the
-   *  part inside the ring only. Never negative: the ring holds only what was
-   *  generated. @param {number} amount @param {number} from @param {number} to @param {number} price */
-  _spread(amount, from, to, price) {
+  /** `amount` spread evenly over [from, to], the part inside the ring only.
+   *  Never negative: the ring holds only what was generated.
+   *  @param {number} amount @param {number} from @param {number} to */
+  _spread(amount, from, to) {
     if (!Number.isFinite(amount) || !(amount > 0)) return;
-    if (!(to > from)) { this._bump(Math.floor(to / 1000), amount, amount * price); return; }
+    if (!(to > from)) { this._bump(Math.floor(to / 1000), amount); return; }
     const last = Math.floor(to / 1000);
     this._advance(last);
     const head = /** @type {number} */ (this.headSec);
@@ -595,7 +591,51 @@ export class ThroughputMeter {
     for (let s = first; s <= last; s++) {
       const lo = Math.max(from, s * 1000);
       const hi = Math.min(to, (s + 1) * 1000);
-      if (hi > lo) this._bump(s, perMs * (hi - lo), perMs * (hi - lo) * price);
+      if (hi > lo) this._bump(s, perMs * (hi - lo));
     }
+  }
+
+  /**
+   * Dollars at API prices over the hour ending at `at`: what was booked, the
+   * oldest minute only for the part of it the hour still covers, plus each
+   * counted stream's estimate so far at its price.
+   * @param {number} [at]
+   */
+  hourSpend(at = this.now()) {
+    const t = time(at) ?? 0;
+    const min = Math.floor(t / 60_000);
+    this._spendAdvance(min);
+    const head = /** @type {number} */ (this.spentHead);
+    const n = this.spent.length;
+    // A clock that stepped back reads at the head, as _observe does.
+    const into = min < head ? 1 : Math.min(1, Math.max(0, (t - min * 60_000) / 60_000));
+    let sum = this.spent[mod(head - SPEND_MINUTES, n)] * (1 - into);
+    for (let k = 0; k < SPEND_MINUTES; k++) sum += this.spent[mod(head - k, n)];
+    for (const [id, s] of this.streams) {
+      if (s.counted) sum += this._estimate(s, Math.max(t, s.firstAt)).est * this._outPrice(id, s.model);
+    }
+    return Number.isFinite(sum) && sum > 0 ? sum : 0;
+  }
+
+  /** Book `dollars` in the minute of `at`, if that minute is still in the hour.
+   *  @param {number} at @param {number} dollars */
+  _spend(at, dollars) {
+    if (!Number.isFinite(dollars) || !(dollars > 0)) return;
+    const min = Math.floor(at / 60_000);
+    this._spendAdvance(min);
+    const head = /** @type {number} */ (this.spentHead);
+    if (min <= head - this.spent.length || min > head) return;
+    this.spent[mod(min, this.spent.length)] += dollars;
+  }
+
+  /** Move the spend ring's head forward to `min`, emptying the minutes it
+   *  passes. @param {number} min */
+  _spendAdvance(min) {
+    if (this.spentHead === null) { this.spentHead = min; return; }
+    if (min <= this.spentHead) return;
+    const n = this.spent.length;
+    const steps = Math.min(min - this.spentHead, n);
+    for (let k = 1; k <= steps; k++) this.spent[mod(this.spentHead + k, n)] = 0;
+    this.spentHead = min;
   }
 }

@@ -24,8 +24,8 @@ import { sanitizeText, safeLine } from './safe-text.js';
 import { MAX_PROBE_SECONDS, ROUTE_COLORS } from './config-ops.js';
 import { isLocalUpstream, providerForPath } from './provider.js';
 import { ThroughputMeter, requestRate, formatRate } from './throughput.js';
-import { formatCost } from './pricing.js';
-import { renderSpeedo, speedoWidth, speedoCostRows, SPEEDO_MIN_H, SPEEDO_MAX_H } from './speedo.js';
+import { formatSpend } from './pricing.js';
+import { renderSpeedo, speedoWidth, speedoShowsSpend, SPEEDO_MIN_H, SPEEDO_MAX_H } from './speedo.js';
 import { hyperlink, clipboardSequence } from './osc.js';
 /** @typedef {import('./login-flow.js').LoginPrompt} LoginPrompt */
 
@@ -3033,16 +3033,12 @@ export class TUI {
 
     // No dial on this screen, or no room for one: the readings go in the
     // header's right block instead, and only if the line still holds the rest
-    // of that block whole. So does each spend reading a dial is too short to
-    // carry. Never both, so a reading is never shown twice.
-    if (meter) {
-      const onDial = dialH ? speedoCostRows(dialH) : -1;
-      const readings = [];
-      if (onDial < 0) readings.push(`${formatRate(meter.rate)} ${dim('tok/s')}`);
-      if (onDial < 1) readings.push(formatCost(meter.cost, 's'));
-      if (onDial < 2) readings.push(formatCost(meter.cost, 'h'));
-      const withRate = readings.length ? header(`${readings.join('  ')}  `) : null;
-      if (withRate && vw(withRate) <= W) lines[0] = withRate;
+    // of that block whole. So does the spend alone when the dial is too short
+    // to carry it. Never both, so a reading is never shown twice.
+    if (meter && !(dialH && speedoShowsSpend(dialH))) {
+      const rate = dialH ? '' : `${formatRate(meter.rate)} ${dim('tok/s')}  `;
+      const withRate = header(`${rate}${formatSpend(meter.spend)}  `);
+      if (vw(withRate) <= W) lines[0] = withRate;
     }
 
     // A body taller than the terminal used to push the footer off the bottom,
@@ -3484,7 +3480,7 @@ export class TUI {
    * @param {string[]} block the top block's lines, changed in place
    * @param {number} W terminal columns
    * @param {number} H terminal rows
-   * @param {{ rate: number, scale: number, cost?: number }} meter
+   * @param {{ rate: number, scale: number, spend?: number }} meter
    * @returns {number}
    */
   _placeSpeedo(block, W, H, meter) {
@@ -3502,7 +3498,7 @@ export class TUI {
       if (logRows < Math.ceil((H * 2) / 3)) return 0;
       for (let i = 0; i < grow; i++) block.push('');
     }
-    const dial = renderSpeedo({ rate: meter.rate, max: meter.scale, cost: meter.cost, width: w, height: h, paint: { cyan, dim, bold } });
+    const dial = renderSpeedo({ rate: meter.rate, max: meter.scale, spend: meter.spend, width: w, height: h, paint: { cyan, dim, bold } });
     // truncate closes any colour the block's line left open, as sideBySide
     // does, so a row that ends mid-bar cannot bleed into the gutter.
     for (let i = 0; i < h; i++) block[1 + i] = rpad(truncate(block[1 + i], used), used) + FLEET_GUTTER_PAD + dial[i];
@@ -4165,7 +4161,7 @@ export class TUI {
     lines.push(row(byId('quotaBarPercent')));
     lines.push('');
     // ── Throughput
-    lines.push(bold('  Throughput') + dim('  — output tokens per second, per request and for the whole fleet, and its $/s at API prices'));
+    lines.push(bold('  Throughput') + dim('  — output tokens per second, per request and for the whole fleet, and its last hour at API prices'));
     lines.push(row(byId('throughputMeter')));
     lines.push('');
     // ── Activity log

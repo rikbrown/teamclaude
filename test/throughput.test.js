@@ -435,15 +435,25 @@ test('rates print compactly', () => {
 // ------------------------------------------------------------ spend
 
 const OPUS_55_OUT = 20 / 1e6;   // $ per output token
+const MIN = 60_000;
 
-test('an input side is booked in full the moment it is known', () => {
+test('an input side is booked in full the moment it is known, and stays for an hour', () => {
   const m = new ThroughputMeter({ now: () => 0 });
-  // A million cached tokens on Opus 5.5: $0.20, which over the window is 2¢/s.
-  m.input(1, { model: 'claude-opus-5-5', usage: { cache_read_input_tokens: 1e6 }, at: 100_000 });
-  close(m.costRate(100_000), 0.2 / WINDOW_SEC);
-  close(m.rate(100_000), 0, 1e-12);
-  assert.ok(m.recent(100_000), 'a fleet that only read its cache is not idle');
-  close(m.costRate(111_000), 0);
+  // A million cached tokens on Opus 5.5: $0.20.
+  m.input(1, { model: 'claude-opus-5-5', usage: { cache_read_input_tokens: 1e6 }, at: 100 * MIN });
+  close(m.hourSpend(100 * MIN), 0.2);
+  close(m.rate(100 * MIN), 0, 1e-12);
+  close(m.hourSpend(159 * MIN), 0.2);
+  close(m.hourSpend(161 * MIN), 0);
+});
+
+test('the hour slides: its oldest minute counts for the part the hour still covers', () => {
+  const m = new ThroughputMeter({ now: () => 0 });
+  m.input(1, { model: 'claude-opus-5-5', usage: { input_tokens: 250_000 }, at: 100 * MIN });   // $1
+  close(m.hourSpend(160 * MIN), 1);
+  close(m.hourSpend(160.5 * MIN), 0.5);
+  close(m.hourSpend(161 * MIN), 0);
+  assert.equal(m.spent.reduce((a, v) => a + v, 0), 0, 'the minute it was booked in was emptied');
 });
 
 test('output costs what its tokens count for, at the price of the model upstream named', () => {
@@ -451,32 +461,32 @@ test('output costs what its tokens count for, at the price of the model upstream
   // The client asked for an alias; upstream said Opus 5.5 served it.
   m.input(1, { model: 'claude-opus-5-5', usage: {}, at: 95_000 });
   settle(m, 1, 1_000, 95_000, 100_000, 'opus');
-  close(m.costRate(100_000), 1_000 * OPUS_55_OUT / WINDOW_SEC);
+  close(m.hourSpend(100_000), 1_000 * OPUS_55_OUT);
   assert.equal(m.billing.size, 0, 'the request is forgotten once it ends');
 });
 
 test('with no upstream model, the request\'s own prices its output', () => {
   const m = new ThroughputMeter({ now: () => 0 });
   settle(m, 1, 1_000, 95_000, 100_000, 'claude-opus-5-5');
-  close(m.costRate(100_000), 1_000 * OPUS_55_OUT / WINDOW_SEC);
+  close(m.hourSpend(100_000), 1_000 * OPUS_55_OUT);
 });
 
-test('a stream in flight costs its estimate at its price, and settles to its count', () => {
+test('a stream in flight adds its estimate so far, and settles to its count', () => {
   const m = new ThroughputMeter({ now: () => 0 });
   m.input('now', { model: 'claude-opus-5-5', usage: {}, at: 100_000 });
   m.progress('now', 4_000, 100_000, 'claude-opus-5-5');     // 1,000 tokens of text
-  close(m.costRate(105_000), 1_000 * OPUS_55_OUT / WINDOW_SEC);
-  m.finish('now', { outputTokens: 1_000, firstAt: 100_000, lastAt: 105_000, endedAt: 105_000 });
-  close(m.costRate(105_000), 1_000 * OPUS_55_OUT / WINDOW_SEC);
+  close(m.hourSpend(105_000), 1_000 * OPUS_55_OUT);
+  m.finish('now', { outputTokens: 3_000, firstAt: 100_000, lastAt: 105_000, endedAt: 105_000 });
+  close(m.hourSpend(105_000), 3_000 * OPUS_55_OUT);
 });
 
 test('a request that is not counted costs nothing, input or output', () => {
   const m = new ThroughputMeter({ now: () => 0 });
   m.input(1, { model: 'claude-opus-5-5', usage: { input_tokens: 1e6 }, at: 100_000, counted: false });
   m.progress(1, 4_000, 100_000, 'claude-opus-5-5', false);
-  close(m.costRate(101_000), 0);
+  close(m.hourSpend(101_000), 0);
   m.finish(1, { outputTokens: 1_000, firstAt: 100_000, lastAt: 101_000, endedAt: 101_000 });
-  close(m.costRate(101_000), 0);
+  close(m.hourSpend(101_000), 0);
   assert.equal(m.billing.size, 0);
 });
 
@@ -485,15 +495,21 @@ test('an unpriced model counts its tokens and costs nothing', () => {
   m.input(1, { model: 'gpt-6-astra', usage: { input_tokens: 1e6 }, at: 95_000 });
   settle(m, 1, 1_000, 95_000, 100_000, 'gpt-6-astra');
   close(m.rate(100_000), 1_000 / WINDOW_SEC);
-  close(m.costRate(100_000), 0);
+  close(m.hourSpend(100_000), 0);
 });
 
-test('a sample carries the spend beside the rate, and the ring moves both together', () => {
+test('a sample carries the hour\'s spend beside the rate', () => {
   const m = new ThroughputMeter({ now: () => 0 });
-  m.input(1, { model: 'claude-opus-5-5', usage: { input_tokens: 1e6 }, at: 100_000 });
-  close(m.sample(100_000).cost, 4 / WINDOW_SEC);
-  close(m.sample(170_000).cost, 0);
-  assert.equal(m.spent.reduce((s, v) => s + v, 0), 0, 'the bucket it was booked in was emptied');
+  m.input(1, { model: 'claude-opus-5-5', usage: { input_tokens: 1e6 }, at: 100 * MIN });
+  close(m.sample(100 * MIN).spend, 4);
+  close(m.sample(170 * MIN).spend, 0);
+});
+
+test('a clock that steps back reads the hour at its head, and books nothing outside it', () => {
+  const m = new ThroughputMeter({ now: () => 0 });
+  m.input(1, { model: 'claude-opus-5-5', usage: { input_tokens: 250_000 }, at: 200 * MIN });
+  m.input(2, { model: 'claude-opus-5-5', usage: { input_tokens: 250_000 }, at: 100 * MIN });   // an hour and more before the head
+  close(m.hourSpend(199 * MIN), 1);
 });
 
 test('the requests whose input side is kept are bounded', () => {

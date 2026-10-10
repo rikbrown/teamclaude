@@ -186,7 +186,9 @@ SESSION=teamclaude
 
 if ! "$TMUX_BIN" has-session -t "$SESSION" 2>/dev/null; then
   # Size matters while detached: tmux assumes 80x24 and the TUI renders truncated.
-  "$TMUX_BIN" new-session -d -s "$SESSION" -x 220 -y 60 "$(command -v teamclaude) server"
+  # TEAMCLAUDE_REMOTE=1: the server never sees your SSH session (see "Signing
+  # accounts in over SSH"), so say it is remote, and sign-in opens no browser here.
+  "$TMUX_BIN" new-session -d -s "$SESSION" -x 220 -y 60 -e TEAMCLAUDE_REMOTE=1 "$(command -v teamclaude) server"
 fi
 
 while "$TMUX_BIN" has-session -t "$SESSION" 2>/dev/null; do
@@ -226,6 +228,26 @@ ssh <host> 'tail -f ~/.config/teamclaude-activity.log'
 ```
 
 Each line includes the client name, outcome and duration. The TUI feed shows none of these fields.
+
+## Signing accounts in over SSH
+
+Over SSH, sign-in opens no browser on the host. You open its link on the laptop and paste the
+answer back. [Signing accounts in over SSH](accounts.md#signing-accounts-in-over-ssh) gives the
+whole flow, the tmux options that the clipboard and the link need, and how to sign in on the
+laptop through callback.net instead. Three things apply to this setup in particular:
+
+- The keeper script above starts the server with `TEAMCLAUDE_REMOTE=1`. A server that a service
+  started never sees your SSH session. Without the variable it would open a browser on the host,
+  where nobody sees it.
+- For Codex, attach with the callback port forwarded, and the sign-in finishes without the paste:
+
+  ```sh
+  ssh -t -L 1455:localhost:1455 <host> 'tmux attach -t teamclaude'
+  ```
+
+- A laptop that signs in through callback.net then holds the account too. Unlike the copied
+  config in [One server, never two](#one-server-never-two), that is safe: callback.net makes the
+  installs take turns to refresh a token.
 
 ## Pointing clients at it
 

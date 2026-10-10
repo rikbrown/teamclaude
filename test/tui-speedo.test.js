@@ -363,7 +363,7 @@ test('a terminal with no room for the dial puts the reading in the header instea
     traffic(tui);
     const { frame } = render(tui, width, height);
     assert.equal(dialLines(frame).length, 0, `W=${width}: a dial with no room for one`);
-    assert.match(frame[0], /\s\d+(\.\d)?k? tok\/s {2}(\d+ sess.* {2})?Port 3456 ▲ $/, `W=${width}: ${frame[0]}`);
+    assert.match(frame[0], /\s\d+(\.\d)?k? tok\/s {2}\$\d+\.\d+\/s {2}(\d+ sess.* {2})?Port 3456 ▲ $/, `W=${width}: ${frame[0]}`);
     assert.equal(frame[0].length, width);
   }
 });
@@ -395,7 +395,7 @@ test('other screens carry the reading in the header, since they have no dial', (
   const tui = tuiFor(wideFleet(), { throughputMeter: true });
   tui.mode = 'settings';
   const { frame } = render(tui, 660);
-  assert.match(frame[0], /0 tok\/s {2}Port 3456/);
+  assert.match(frame[0], /0 tok\/s {2}\$0\.00\/s {2}Port 3456/);
 });
 
 test('a short block grows to hold the dial only on a terminal with rows to spare', () => {
@@ -591,4 +591,30 @@ test('with the meter off no leg is marked', () => {
   open(tui, 1, OUTER);
   open(tui, 2, INNER);
   assert.equal(tui.active.get(2).nested, undefined);
+});
+
+test('the dial carries the fleet\'s spend at API prices, and the header does not repeat it', () => {
+  const tui = tuiFor(wideFleet(), { throughputMeter: true });
+  const now = Date.now();
+  tui.onRequestStart(9, { method: 'POST', path: '/v1/messages', model: 'claude-opus-5' });
+  // Upstream says Opus 5.5 served it: a million cached tokens at $0.20, which
+  // over the ten-second window reads 2¢/s.
+  tui.onRequestProgress(9, { chars: 0, at: now, usage: { cache_read_input_tokens: 1e6 }, model: 'claude-opus-5-5' });
+  const { frame } = render(tui, 660);
+  const dial = dialLines(frame);
+  assert.ok(dial.some(l => l.includes('$0.02/s')), dial.join('\n'));
+  assert.doesNotMatch(frame[0], /\$\d/, 'the spend is on the dial and in the header both');
+  // A usage report is not output: nothing streams for it.
+  assert.equal(tui.throughput.streams.size, 0);
+});
+
+test('a dial too short for the spend leaves it to the header, alone', () => {
+  const am = new AccountManager([claude('one@example.com'), claude('two@example.com')], 0.98, {});
+  for (const a of am.accounts) Object.assign(a.quota, { unified5h: 0.2, unified5hReset: Date.now() + H, unified7d: 0.3, unified7dReset: Date.now() + 24 * H });
+  const tui = tuiFor(am, { throughputMeter: true });
+  tui.fleetMode = 'off';
+  const { frame } = render(tui, 200, 60);
+  assert.equal(dialLines(frame).length, 6);
+  assert.match(frame[0], /\$0\.00\/s {2}Port 3456/);
+  assert.doesNotMatch(frame[0], /tok\/s/, 'the rate is on the dial');
 });

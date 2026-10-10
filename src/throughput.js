@@ -628,6 +628,25 @@ export class ThroughputMeter {
     this.spent[mod(min, this.spent.length)] += dollars;
   }
 
+  /** The spend ring, for the state file, so a restart resumes the hour rather
+   *  than starting it empty. Null before anything was booked.
+   *  @returns {{ head: number, minutes: number[] }|null} */
+  exportSpend() {
+    return this.spentHead === null ? null : { head: this.spentHead, minutes: Array.from(this.spent) };
+  }
+
+  /** Take back a ring exportSpend wrote. The minutes the process was down for
+   *  are emptied by the next reading, as any idle stretch is. Anything not of
+   *  that shape is ignored, and the hour starts empty.
+   *  @param {unknown} saved */
+  restoreSpend(saved) {
+    const { head, minutes } = /** @type {any} */ (saved ?? {});
+    if (!Number.isSafeInteger(head) || !Array.isArray(minutes) || minutes.length !== this.spent.length) return;
+    if (!minutes.every(v => typeof v === 'number' && Number.isFinite(v) && v >= 0)) return;
+    this.spent.set(minutes);
+    this.spentHead = head;
+  }
+
   /** Move the spend ring's head forward to `min`, emptying the minutes it
    *  passes. @param {number} min */
   _spendAdvance(min) {

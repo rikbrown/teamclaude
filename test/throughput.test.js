@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
   contentChars, OutputTracker, ThroughputMeter, requestRate, formatRate, niceCeil,
   CHARS_PER_TOKEN, WINDOW_SEC, MIN_INTERVAL_MS, LIVE_AFTER_MS, MIN_SCALE,
-  MAX_REQUEST_TOKENS, MODEL_RATE_WEIGHT, MODEL_RATE_KEYS, MAX_STREAMS,
+  MAX_REQUEST_TOKENS, MODEL_RATE_WEIGHT, MODEL_RATE_KEYS, MAX_STREAMS, SPEND_MINUTES,
 } from '../src/throughput.js';
 
 // The throughput meter's arithmetic, on a clock the tests move by hand. The
@@ -510,6 +510,26 @@ test('a clock that steps back reads the hour at its head, and books nothing outs
   m.input(1, { model: 'claude-opus-5-5', usage: { input_tokens: 250_000 }, at: 200 * MIN });
   m.input(2, { model: 'claude-opus-5-5', usage: { input_tokens: 250_000 }, at: 100 * MIN });   // an hour and more before the head
   close(m.hourSpend(199 * MIN), 1);
+});
+
+test('the hour of spend survives an export and restore, and the downtime empties as idle time does', () => {
+  const a = new ThroughputMeter({ now: () => 0 });
+  a.input(1, { model: 'claude-opus-5-5', usage: { input_tokens: 250_000 }, at: 100 * MIN });   // $1
+  a.input(2, { model: 'claude-opus-5-5', usage: { input_tokens: 500_000 }, at: 130 * MIN });   // $2
+  const saved = JSON.parse(JSON.stringify(a.exportSpend()));
+  const b = new ThroughputMeter({ now: () => 0 });
+  b.restoreSpend(saved);
+  close(b.hourSpend(135 * MIN), 3);
+  close(b.hourSpend(170 * MIN), 2, 1e-9);
+});
+
+test('a saved ring of the wrong shape is ignored', () => {
+  for (const saved of [null, undefined, 'x', {}, { head: 5, minutes: [1, 2] }, { head: 1.5, minutes: Array(SPEND_MINUTES + 1).fill(0) },
+    { head: 5, minutes: [...Array(SPEND_MINUTES).fill(0), -1] }, { head: 5, minutes: [...Array(SPEND_MINUTES).fill(0), 'x'] }]) {
+    const m = new ThroughputMeter({ now: () => 0 });
+    m.restoreSpend(saved);
+    assert.equal(m.exportSpend(), null, JSON.stringify(saved));
+  }
 });
 
 test('the requests whose input side is kept are bounded', () => {

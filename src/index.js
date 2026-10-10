@@ -428,9 +428,14 @@ async function serverCommand() {
   // soonest-resetting weekly window) instead of defaulting to the first one.
   accountManager.selectActiveAccount();
 
+  // The throughput meter's hour of spend, once the TUI that keeps it exists.
+  // Until then, and in headless mode, the saved one is carried over untouched.
+  /** @type {(() => any)|null} */
+  let exportSpend = null;
+
   // Periodically persist quota (and once more on shutdown) to the state file.
   const persistQuotaState = () =>
-    saveState({ quota: accountManager.exportQuotaState(), clients: clientUsage.exportState(), usageDimensions: dimensionUsage.exportState(), sidecars: sidecar?.exportPids() || savedState?.sidecars || {} })
+    saveState({ quota: accountManager.exportQuotaState(), clients: clientUsage.exportState(), usageDimensions: dimensionUsage.exportState(), sidecars: sidecar?.exportPids() || savedState?.sidecars || {}, spend: exportSpend?.() ?? savedState?.spend ?? null })
       .catch(err => console.error(`[TeamClaude] Failed to save quota state: ${err.message}`));
   /** @type {ReturnType<typeof setInterval>|null} */
   let quotaSaveInterval = null;
@@ -813,6 +818,11 @@ async function serverCommand() {
       // opposite of what a key labelled "update" offers.
       onRestart: supervised ? () => { drainAndRestart('Restart requested'); } : null,
     });
+    // The meter's hour of spend resumes across a restart: it is saved with the
+    // quota state, so a restart costs at most the last minute of it.
+    tui.throughput.restoreSpend(savedState?.spend);
+    const meter = tui.throughput;
+    exportSpend = () => meter.exportSpend();
     hooks = {
       onRequestStart: (id, info) => tui.onRequestStart(id, info),
       onRequestModel: (id, info) => tui.onRequestModel(id, info),

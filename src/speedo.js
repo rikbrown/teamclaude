@@ -7,8 +7,8 @@
 //
 // The arc sweeps 240°: zero at the lower left, full scale at the lower right,
 // half scale straight up. The needle pivots at the hub, and the reading sits
-// under the hub with its unit below it, and below that, when there is a row
-// for it, the fleet's spend at API prices. The needle is never drawn over the
+// under the hub with its unit below it, and below that, as far as there are
+// rows for them, the fleet's spend at API prices per second and per hour. The needle is never drawn over the
 // readings: it stops at the text's edge and picks up past it.
 //
 // The arc is lit in one colour up to the reading and dim past it. No green,
@@ -79,11 +79,14 @@ function readingRows(height, R) {
   return { valueRow, unitRow: valueRow + 1 };
 }
 
-/** Whether a dial `height` rows tall has a row for the spend under its unit.
- *  The smallest does not, so the caller shows the spend elsewhere.
+/** The spend readings, in the order they go under the unit. */
+const COST_UNITS = /** @type {const} */ (['s', 'h']);
+
+/** How many of the spend readings, $/s then $/h, a dial `height` rows tall has
+ *  rows for under its unit. The caller shows the rest elsewhere.
  *  @param {number} height */
-export function speedoShowsCost(height) {
-  return readingRows(height, radiusFor(height)).unitRow + 1 < height;
+export function speedoCostRows(height) {
+  return Math.max(0, Math.min(COST_UNITS.length, height - 1 - readingRows(height, radiusFor(height)).unitRow));
 }
 
 /** Where `angle` falls along the sweep, 0 at zero and 1 at full scale, or null
@@ -110,8 +113,9 @@ export function formatScale(n) {
  * The dial as a grid of cells, before any colour: what each cell shows and what
  * it belongs to. Exposed so the tests can find the needle without parsing SGR.
  *
- * `cost`, $/s, goes on the row under the unit when the dial has one, and takes
- * precedence over the scale ends: they are left out if it would crowd them.
+ * `cost`, $/s, goes under the unit as $/s and then $/h, as far as the dial has
+ * rows for them, and takes precedence over the scale ends: they are left out
+ * if it would crowd them.
  *
  * @param {{ rate: number, max: number, width: number, height: number, cost?: number|null }} opts
  * @returns {Cell[][]} `height` rows of `width` cells
@@ -171,9 +175,13 @@ export function speedoCells({ rate, max, width, height, cost = null }) {
   const value = formatRate(rate);
   texts.push({ row: valueRow, col: colFor(value), text: value, kind: 'value' });
   if (unitRow < height) texts.push({ row: unitRow, col: colFor('tok/s'), text: 'tok/s', kind: 'unit' });
-  if (typeof cost === 'number' && unitRow + 1 < height) {
-    const spend = formatCost(cost);
-    texts.push({ row: unitRow + 1, col: colFor(spend), text: spend, kind: 'cost' });
+  if (typeof cost === 'number') {
+    COST_UNITS.forEach((per, i) => {
+      const row = unitRow + 1 + i;
+      if (row >= height) return;
+      const spend = formatCost(cost, per);
+      texts.push({ row, col: colFor(spend), text: spend, kind: 'cost' });
+    });
   }
 
   // Nothing but text in the box around the readings: the needle stops at its

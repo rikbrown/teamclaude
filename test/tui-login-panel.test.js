@@ -86,7 +86,7 @@ function frame(tui, { columns = 100, rows = 30 } = {}) {
 
 const logged = tui => tui.log.map(e => stripAnsi(e.msg));
 
-test('login panel: the link is a short OSC 8 label, and the frame keeps its width', () => {
+test('login panel: the full URL is drawn from the left edge, one link across its pieces, and the frame keeps its width', () => {
   const flow = fakeFlow();
   const tui = makeTUI({ loginAccount: flow.loginAccount });
   tui.running = true;
@@ -94,34 +94,23 @@ test('login panel: the link is a short OSC 8 label, and the frame keeps its widt
   assert.equal(tui.mode, 'login');
 
   const painted = frame(tui, { columns: 80, rows: 30 });
+  assert.match(stripAnsi(withoutLinks(painted)), /Open the OpenAI sign-in page:/);
   const links = [...painted.matchAll(OSC8)];
-  assert.equal(links.length, 1, 'one link: the label');
-  assert.equal(links[0][2], URL_, 'the link opens the whole URL');
-  assert.match(stripAnsi(links[0][3]), /^Open the OpenAI sign-in page$/);
-  // The URL itself is not drawn, so its length cannot push the layout apart.
-  assert.ok(!stripAnsi(withoutLinks(painted)).includes('authorize?'));
+  assert.ok(links.length > 1, 'the URL takes more than one row at 80 columns');
+  assert.equal(new Set(links.map(m => m[1])).size, 1, 'one id joins the pieces into one link');
+  assert.match(links[0][1], /^id=/);
+  assert.ok(links.every(m => m[2] === URL_), 'every piece opens the whole URL');
+  assert.equal(links.map(m => stripAnsi(m[3])).join(''), URL_, 'the pieces spell the URL');
+  // Selected by hand, the rows give the URL and nothing else: each piece
+  // starts at column 0, and every one but the last fills the row.
+  const rows = painted.replace(/^\x1b\[H/, '').replace(/\x1b\[\?25[hl]$/, '').split('\r\n').map(r => stripAnsi(withoutLinks(r)));
+  const first = rows.findIndex(r => r.startsWith(URL_.slice(0, 20)));
+  assert.ok(first > 0);
+  const n = Math.ceil(URL_.length / 80);
+  assert.equal(rows.slice(first, first + n).join('').trimEnd(), URL_);
   for (const row of painted.replace(/^\x1b\[H/, '').replace(/\x1b\[\?25[hl]$/, '').split('\r\n')) {
     assert.equal(displayWidth(withoutLinks(row)), 80);
   }
-});
-
-test('login panel: `u` draws the full URL, one piece per line, every piece the same link', () => {
-  const flow = fakeFlow();
-  const tui = makeTUI({ loginAccount: flow.loginAccount });
-  tui.running = true;
-  captureStdout(() => openPanel(tui));
-  tui._key('u');
-
-  const links = [...frame(tui, { columns: 60, rows: 40 }).matchAll(OSC8)];
-  assert.ok(links.length > 2, 'the label and the pieces');
-  const ids = new Set(links.map(m => m[1]));
-  assert.equal(ids.size, 1, 'one id joins them into one link');
-  assert.match([...ids][0], /^id=/);
-  assert.ok(links.every(m => m[2] === URL_));
-  assert.equal(links.slice(1).map(m => stripAnsi(m[3])).join(''), URL_, 'the pieces spell the URL');
-
-  tui._key('u');
-  assert.equal([...frame(tui).matchAll(OSC8)].length, 1);
 });
 
 test('login panel: the link goes to the clipboard when the panel opens, and again on `c`', () => {
@@ -146,7 +135,7 @@ test('login panel: inside tmux the clipboard write is wrapped for passthrough as
   assert.ok(writes.some(w => w.includes('\x1bPtmux;')));
 });
 
-test('login panel: `c` and `u` are text once the field has something in it', () => {
+test('login panel: `c` is text once the field has something in it', () => {
   const flow = fakeFlow();
   const tui = makeTUI({ loginAccount: flow.loginAccount });
   openPanel(tui);
@@ -154,7 +143,6 @@ test('login panel: `c` and `u` are text once the field has something in it', () 
   tui._key('c');
   tui._key('u');
   assert.equal(tui.login.buf, 'xcu');
-  assert.equal(tui.login.showUrl, false);
   tui._key('bs');
   assert.equal(tui.login.buf, 'xc');
 });

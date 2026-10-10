@@ -206,8 +206,8 @@ Accounts can also be added, removed and reordered from the TUI settings screen: 
 
 An OAuth account whose refresh token upstream has rejected — typically because the same account was signed in somewhere else, which rotates the token and kills the copy TeamClaude holds — shows as `error` and stays that way until someone signs in again. Press **`l`** on the dashboard: the picker opens on the first account in `error`, and **Enter** opens the login panel for the account's provider (Claude or Codex). The panel works when the server is on another machine, reached over SSH:
 
-- **The link.** The sign-in page is drawn as a short label, so its URL of several hundred characters does not break the layout. The label is an OSC 8 hyperlink: click it in a terminal that supports them. **`u`** shows the full URL.
-- **The clipboard.** The panel sends the link to your clipboard with OSC 52 when it opens, and again on **`c`**. Your terminal must allow OSC 52 (some, iTerm2 among them, have it off by default). `c` and `u` are keys only while the paste field is empty.
+- **The link.** The full sign-in URL is drawn under the label, wrapped across lines and starting at the left edge, so you can select it by hand in any terminal. It is also an OSC 8 hyperlink: click it in a terminal that supports them.
+- **The clipboard.** The panel sends the link to your clipboard with OSC 52 when it opens, and again on **`c`**. Your terminal must allow OSC 52 (some, iTerm2 among them, have it off by default). `c` is a key only while the paste field is empty.
 - **The paste field.** After you sign in, paste what the sign-in left you and press **Enter**:
   - Claude: the code the page shows.
   - Codex: OpenAI sends the browser to `http://localhost:1455/auth/callback`, which does not load on another machine. Copy that whole address from the browser's address bar and paste it.

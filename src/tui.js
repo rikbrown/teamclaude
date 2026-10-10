@@ -887,7 +887,6 @@ function tailText(s, w) {
  * @property {string} buf  the paste field
  * @property {string | null} error  why the last paste was refused
  * @property {string | null} notice  a one-off confirmation (the link copied again)
- * @property {boolean} showUrl  the full URL is drawn under the link
  * @property {boolean} pasting  inside a bracketed paste that has not ended yet
  * @property {string} held  the end of the last read, held back as a possible marker's start
  * @property {ReturnType<typeof setTimeout> | null} timer  the ESC wait or the paste watchdog
@@ -2093,9 +2092,9 @@ export class TUI {
   }
 
   // The login panel. Esc cancels the sign-in and Enter submits the field. `c`
-  // (copy the link again) and `u` (show the full URL) act only while the field
-  // is empty: typing must work in it, and nobody types a code that starts with
-  // either before pasting has been tried.
+  // (copy the link again) acts only while the field is empty: typing must work
+  // in it, and nobody types a code that starts with it before pasting has been
+  // tried.
   _keyLogin(/** @type {string} */ k) {
     const login = this.login;
     if (!login) { this.mode = 'normal'; return; }
@@ -2109,8 +2108,6 @@ export class TUI {
       login.error = null;
     } else if (!login.buf && k === 'c') {
       if (this._copyLoginUrl(login)) login.notice = 'Sent again.';
-    } else if (!login.buf && k === 'u') {
-      login.showUrl = !login.showUrl;
     } else if (k.length === 1 && fieldText(k)) {
       login.buf += k;
       login.error = null;
@@ -2216,7 +2213,7 @@ export class TUI {
   _openLogin(account, controller) {
     this.login = {
       account, controller, prompt: null, buf: '', error: null, notice: null,
-      showUrl: false, pasting: false, held: '', timer: null, timerGen: 0,
+      pasting: false, held: '', timer: null, timerGen: 0,
       linkId: `teamclaude-login-${++this._loginSeq}`,
     };
     this.mode = 'login';
@@ -3078,11 +3075,13 @@ export class TUI {
   /**
    * The login panel, drawn where the account rows go while a sign-in waits.
    *
-   * The link is a short label rather than the URL: a sign-in URL runs to
-   * several hundred characters, and drawn whole it would wrap the layout apart.
-   * The label is an OSC 8 hyperlink, so it can be clicked even over SSH, and
-   * the URL is on the clipboard already; `u` draws it in full for a terminal
-   * that does neither, one piece per line, every piece the same link.
+   * The URL is drawn in full under a bold label, one piece per line, every
+   * piece the same OSC 8 link. The link and the clipboard copy both depend on
+   * the terminal (and on tmux passing them through); the text does not, so a
+   * terminal that does neither still leaves the URL to select by hand. The
+   * pieces start at column 0 and fill the width, so a selection across them
+   * picks up nothing but the URL and the line breaks, which a browser's
+   * address bar drops on paste.
    *
    * The paste line carries the ▸ the body scroll follows, so on a terminal too
    * short for the whole panel the field is what stays in view.
@@ -3114,15 +3113,12 @@ export class TUI {
     };
     /** @param {string} text */
     const linkLine = text => {
-      const line = `   ${text}`;
-      lines.push(line);
-      links.set(line, { text, url: prompt.url, id: login.linkId });
+      lines.push(text);
+      links.set(text, { text, url: prompt.url, id: login.linkId });
     };
 
-    linkLine(linkText(`Open the ${brand} sign-in page`));
-    if (login.showUrl) {
-      for (let i = 0; i < prompt.url.length; i += textW) linkLine(linkText(prompt.url.slice(i, i + textW)));
-    }
+    lines.push(`   ${bold(`Open the ${brand} sign-in page:`)}`);
+    for (let i = 0; i < prompt.url.length; i += W) linkLine(linkText(prompt.url.slice(i, i + W)));
     prose(`Link sent to your clipboard (if your terminal allows OSC 52).${login.notice ? ` ${login.notice}` : ''}`, dim);
     lines.push('');
 
@@ -4585,12 +4581,10 @@ export class TUI {
       case 'input':
         return ` ${this.inputPrompt}: ${this.inputSecret ? '*'.repeat(this.inputBuf.length) : this.inputBuf}█`;
       case 'login': {
-        // `c` and `u` are only keys while the field is empty (see _keyLogin),
-        // so they are only offered then.
+        // `c` is only a key while the field is empty (see _keyLogin), so it
+        // is only offered then.
         const login = this.login;
-        const panelKeys = login?.prompt && !login.buf
-          ? `  ${bold('c')} copy link  ${bold('u')} ${login.showUrl ? 'hide' : 'show'} full link`
-          : '';
+        const panelKeys = login?.prompt && !login.buf ? `  ${bold('c')} copy link` : '';
         return ` ${bold('Enter')} submit  ${bold('Esc')} cancel${panelKeys}`;
       }
       default:

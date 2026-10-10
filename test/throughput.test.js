@@ -431,3 +431,87 @@ test('rates print compactly', () => {
   assert.equal(formatRate(12_345), '12k');
   assert.equal(formatRate(1_234_567), '1.2M');
 });
+
+// ------------------------------------------------------------ spend
+
+const OPUS_55_OUT = 20 / 1e6;   // $ per output token
+
+test('an input side is booked in full the moment it is known', () => {
+  const m = new ThroughputMeter({ now: () => 0 });
+  // A million cached tokens on Opus 5.5: $0.20, which over the window is 2¢/s.
+  m.input(1, { model: 'claude-opus-5-5', usage: { cache_read_input_tokens: 1e6 }, at: 100_000 });
+  close(m.costRate(100_000), 0.2 / WINDOW_SEC);
+  close(m.rate(100_000), 0, 1e-12);
+  assert.ok(m.recent(100_000), 'a fleet that only read its cache is not idle');
+  close(m.costRate(111_000), 0);
+});
+
+test('output costs what its tokens count for, at the price of the model upstream named', () => {
+  const m = new ThroughputMeter({ now: () => 0 });
+  // The client asked for an alias; upstream said Opus 5.5 served it.
+  m.input(1, { model: 'claude-opus-5-5', usage: {}, at: 95_000 });
+  settle(m, 1, 1_000, 95_000, 100_000, 'opus');
+  close(m.costRate(100_000), 1_000 * OPUS_55_OUT / WINDOW_SEC);
+  assert.equal(m.billing.size, 0, 'the request is forgotten once it ends');
+});
+
+test('with no upstream model, the request\'s own prices its output', () => {
+  const m = new ThroughputMeter({ now: () => 0 });
+  settle(m, 1, 1_000, 95_000, 100_000, 'claude-opus-5-5');
+  close(m.costRate(100_000), 1_000 * OPUS_55_OUT / WINDOW_SEC);
+});
+
+test('a stream in flight costs its estimate at its price, and settles to its count', () => {
+  const m = new ThroughputMeter({ now: () => 0 });
+  m.input('now', { model: 'claude-opus-5-5', usage: {}, at: 100_000 });
+  m.progress('now', 4_000, 100_000, 'claude-opus-5-5');     // 1,000 tokens of text
+  close(m.costRate(105_000), 1_000 * OPUS_55_OUT / WINDOW_SEC);
+  m.finish('now', { outputTokens: 1_000, firstAt: 100_000, lastAt: 105_000, endedAt: 105_000 });
+  close(m.costRate(105_000), 1_000 * OPUS_55_OUT / WINDOW_SEC);
+});
+
+test('a request that is not counted costs nothing, input or output', () => {
+  const m = new ThroughputMeter({ now: () => 0 });
+  m.input(1, { model: 'claude-opus-5-5', usage: { input_tokens: 1e6 }, at: 100_000, counted: false });
+  m.progress(1, 4_000, 100_000, 'claude-opus-5-5', false);
+  close(m.costRate(101_000), 0);
+  m.finish(1, { outputTokens: 1_000, firstAt: 100_000, lastAt: 101_000, endedAt: 101_000 });
+  close(m.costRate(101_000), 0);
+  assert.equal(m.billing.size, 0);
+});
+
+test('an unpriced model counts its tokens and costs nothing', () => {
+  const m = new ThroughputMeter({ now: () => 0 });
+  m.input(1, { model: 'gpt-6-astra', usage: { input_tokens: 1e6 }, at: 95_000 });
+  settle(m, 1, 1_000, 95_000, 100_000, 'gpt-6-astra');
+  close(m.rate(100_000), 1_000 / WINDOW_SEC);
+  close(m.costRate(100_000), 0);
+});
+
+test('a sample carries the spend beside the rate, and the ring moves both together', () => {
+  const m = new ThroughputMeter({ now: () => 0 });
+  m.input(1, { model: 'claude-opus-5-5', usage: { input_tokens: 1e6 }, at: 100_000 });
+  close(m.sample(100_000).cost, 4 / WINDOW_SEC);
+  close(m.sample(170_000).cost, 0);
+  assert.equal(m.spent.reduce((s, v) => s + v, 0), 0, 'the bucket it was booked in was emptied');
+});
+
+test('the requests whose input side is kept are bounded', () => {
+  const m = new ThroughputMeter({ now: () => 0 });
+  for (let i = 0; i < MAX_STREAMS + 10; i++) m.input(i, { model: 'claude-opus-5-5', usage: {}, at: 100_000 });
+  assert.equal(m.billing.size, MAX_STREAMS);
+  assert.ok(!m.billing.has(0) && m.billing.has(MAX_STREAMS + 9));
+});
+
+test('the tracker passes the input side on once per report, with its model', () => {
+  const seen = [];
+  const t = new OutputTracker(7, (id, p) => seen.push({ id, ...p }), () => 1_000);
+  t.input({ input_tokens: 3 }, 'claude-opus-5-5');
+  t.input(null, 'x');
+  t.input({ input_tokens: 4 }, 42);
+  assert.deepEqual(seen, [
+    { id: 7, chars: 0, at: 1_000, usage: { input_tokens: 3 }, model: 'claude-opus-5-5' },
+    { id: 7, chars: 0, at: 1_000, usage: { input_tokens: 4 }, model: null },
+  ]);
+  assert.equal(t.firstTokenAt, null, 'the input side is not output');
+});

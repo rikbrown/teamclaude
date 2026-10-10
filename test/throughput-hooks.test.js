@@ -6,7 +6,8 @@ import { createProxyServer } from '../src/server.js';
 
 // The throughput meter's half in the proxy: with `throughputMeter` on, each
 // output event of the response the client reads is reported to the progress
-// hook as it streams, and the end hook carries the settled output count and
+// hook as it streams, and so is the response's input side, once, for the spend
+// reading, and the end hook carries the settled output count and
 // when the output started and stopped. With it off, neither happens.
 //
 // Driven through real HTTP, because what these pin lives at the call sites:
@@ -33,7 +34,7 @@ const codex = (name, port) => ({
 // One Anthropic turn with every kind of output: thinking, text and a tool
 // call's arguments, then the cumulative count in message_delta.
 const ANTHROPIC = [
-  { type: 'message_start', message: { usage: { input_tokens: 12, output_tokens: 1 } } },
+  { type: 'message_start', message: { model: 'claude-opus-5-5', usage: { input_tokens: 12, cache_read_input_tokens: 3_000, output_tokens: 1 } } },
   { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '' } },
   { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'Let me see.' } },
   { type: 'content_block_delta', index: 0, delta: { type: 'signature_delta', signature: 'EqQBCgIYAhIM' } },
@@ -87,12 +88,13 @@ async function withProxy({ accounts, handler, config = {}, noProgressHook = fals
   });
   const upstreamPort = await listen(upstream);
   const am = new AccountManager(accounts(upstreamPort), 0.98, { refreshFn: async () => { throw new Error('no refresh'); } });
-  const calls = { progress: [], end: [] };
+  // Usage reports are kept apart from output events: they carry no output.
+  const calls = { progress: [], usage: [], end: [] };
   const hooks = {
     onRequestStart: () => {},
     onRequestEnd: (id, info) => calls.end.push({ id, info }),
   };
-  if (!noProgressHook) hooks.onRequestProgress = (id, p) => calls.progress.push({ id, ...p });
+  if (!noProgressHook) hooks.onRequestProgress = (id, p) => (p.usage ? calls.usage : calls.progress).push({ id, ...p });
   const cfg = { proxy: {}, ...config };
   const proxy = createProxyServer(am, cfg, hooks);
   const port = await listen(proxy);
@@ -132,6 +134,13 @@ test('an Anthropic stream reports each output event with its characters, and the
     assert.equal(info.lastTokenAt, calls.progress[calls.progress.length - 1].at);
     assert.ok(info.lastTokenAt > info.firstTokenAt);
     assert.ok(info.dispatchedAt <= info.firstTokenAt, 'the attempt was sent before it answered');
+    // message_start's input side, once, before any output, with the model
+    // upstream says served it rather than the one the client asked for.
+    assert.equal(calls.usage.length, 1);
+    assert.equal(calls.usage[0].id, id);
+    assert.equal(calls.usage[0].model, 'claude-opus-5-5');
+    assert.equal(calls.usage[0].usage.cache_read_input_tokens, 3_000);
+    assert.ok(calls.usage[0].at <= info.firstTokenAt);
   });
 });
 
@@ -146,6 +155,7 @@ test('a Responses stream reports its text, reasoning and tool deltas, and the se
     assert.equal(sum(calls.progress), RESPONSES_CHARS);
     assert.equal(calls.end[0].info.outputTokens, 132);
     assert.equal(calls.end[0].info.firstTokenAt, calls.progress[0].at);
+    assert.equal(calls.usage.length, 1, 'the terminal event\'s usage, once');
   });
 });
 
@@ -160,6 +170,7 @@ test('a buffered response carries its count and no generation interval', async (
   }, async ({ port, calls }) => {
     await post(port, '/v1/messages', { model: 'claude-opus-5', messages: [] });
     assert.equal(calls.progress.length, 0);
+    assert.deepEqual(calls.usage.map(u => u.usage.input_tokens), [5], 'the body\'s usage, once');
     const { info } = calls.end[0];
     assert.equal(info.outputTokens, 42);
     assert.equal(info.firstTokenAt, null);
@@ -177,7 +188,7 @@ test('with the meter off nothing fires, and the end entry is what it always was'
       config,
     }, async ({ port, calls }) => {
       await anthropicPost(port);
-      assert.equal(calls.progress.length, 0, JSON.stringify(config));
+      assert.equal(calls.progress.length + calls.usage.length, 0, JSON.stringify(config));
       assert.deepEqual(Object.keys(calls.end[0].info).sort(),
         ['account', 'client', 'effort', 'method', 'model', 'path', 'pinned', 'sessionId', 'status']);
     });
@@ -278,6 +289,7 @@ test('a peeked stream that is released is counted once', async () => {
     assert.equal(seen.length, 1, 'no hop: the stream was good');
     assert.equal(sum(calls.progress), RESPONSES_CHARS);
     assert.equal(calls.progress.length, 8);
+    assert.equal(calls.usage.length, 1);
   });
 });
 
@@ -294,6 +306,7 @@ test('a stream refused in-band hops, and only the sibling\'s output counts', asy
     await codexPost(port);
     assert.equal(seen.length, 2, 'the refusal hopped');
     assert.equal(sum(calls.progress), RESPONSES_CHARS);
+    assert.equal(calls.usage.length, 1, 'only the sibling\'s usage');
     assert.equal(calls.end[0].info.outputTokens, 132);
   });
 });

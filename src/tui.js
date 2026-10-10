@@ -24,7 +24,8 @@ import { sanitizeText, safeLine } from './safe-text.js';
 import { MAX_PROBE_SECONDS, ROUTE_COLORS } from './config-ops.js';
 import { isLocalUpstream, providerForPath } from './provider.js';
 import { ThroughputMeter, requestRate, formatRate } from './throughput.js';
-import { renderSpeedo, speedoWidth, SPEEDO_MIN_H, SPEEDO_MAX_H } from './speedo.js';
+import { formatCost } from './pricing.js';
+import { renderSpeedo, speedoWidth, speedoShowsCost, SPEEDO_MIN_H, SPEEDO_MAX_H } from './speedo.js';
 import { hyperlink, clipboardSequence } from './osc.js';
 /** @typedef {import('./login-flow.js').LoginPrompt} LoginPrompt */
 
@@ -1315,12 +1316,17 @@ export class TUI {
    * is on, so it adds to counters and nothing else. It never renders: the next
    * tick draws what it added, and a paint here would put the terminal on the
    * relay's path (#404).
+   *
+   * A report carrying `usage` is the response's input side instead, for the
+   * meter's spend reading, priced by the model upstream says served it.
    * @param {number} id
-   * @param {{ chars: number, at: number }} info
+   * @param {{ chars: number, at: number, usage?: Record<string, any>, model?: string|null }} info
    */
-  onRequestProgress(id, { chars, at }) {
+  onRequestProgress(id, { chars, at, usage, model }) {
     const r = this.active.get(id);
-    if (r) this.throughput.progress(id, chars, at, r.model || null, !r.nested);
+    if (!r) return;
+    if (usage) this.throughput.input(id, { model: model || r.model || null, usage, at, counted: !r.nested });
+    else this.throughput.progress(id, chars, at, r.model || null, !r.nested);
   }
 
   onRequestEnd(id, info) {
@@ -2893,7 +2899,7 @@ export class TUI {
     // The fleet's output rate, read once for the frame: as a dial beside the top
     // block when there is room for one, else as a number in the header.
     const meter = this._throughputOn() ? this.throughput.sample() : null;
-    let dialDrawn = false;
+    let dialH = 0;
 
     const footerH = 2;
     // While a prompt is open (mode 'input') keep showing the screen it was
@@ -2976,7 +2982,7 @@ export class TUI {
         left.push(...this._conduitLines());
         block = panel.length ? sideBySide(left, ['', ...panel], rowsW) : left;
       }
-      if (meter) dialDrawn = this._placeSpeedo(block, W, H, meter);
+      if (meter) dialH = this._placeSpeedo(block, W, H, meter);
       lines.push(...block);
     }
 
@@ -3025,11 +3031,13 @@ export class TUI {
     }
     } // end non-settings body
 
-    // No dial on this screen, or no room for one: the reading goes in the
+    // No dial on this screen, or no room for one: the readings go in the
     // header's right block instead, and only if the line still holds the rest
-    // of that block whole. Never both, so a reading is never shown twice.
-    if (meter && !dialDrawn) {
-      const withRate = header(`${formatRate(meter.rate)} ${dim('tok/s')}  `);
+    // of that block whole. So does the spend alone when the dial is too short
+    // to carry it. Never both, so a reading is never shown twice.
+    if (meter && !(dialH && speedoShowsCost(dialH))) {
+      const rate = dialH ? '' : `${formatRate(meter.rate)} ${dim('tok/s')}  `;
+      const withRate = header(`${rate}${formatCost(meter.cost)}  `);
       if (vw(withRate) <= W) lines[0] = withRate;
     }
 
@@ -3449,8 +3457,8 @@ export class TUI {
 
   /**
    * Set the throughput dial beside the dashboard's top block, past everything
-   * the block draws. Returns whether it was drawn; when it was not, the reading
-   * goes in the header instead.
+   * the block draws. Returns the height it was drawn at, or 0 when it was not;
+   * then the reading goes in the header instead.
    *
    * NOTHING IN THE BLOCK MOVES. Its lines are composed already, the rows and
    * the panel both, and the dial takes only the columns past the widest of
@@ -3472,29 +3480,29 @@ export class TUI {
    * @param {string[]} block the top block's lines, changed in place
    * @param {number} W terminal columns
    * @param {number} H terminal rows
-   * @param {{ rate: number, scale: number }} meter
-   * @returns {boolean}
+   * @param {{ rate: number, scale: number, cost?: number }} meter
+   * @returns {number}
    */
   _placeSpeedo(block, W, H, meter) {
     const used = block.reduce((w, l) => Math.max(w, vw(l)), 0);
     const beside = block.length - 1;
     const h = Math.min(SPEEDO_MAX_H, Math.max(SPEEDO_MIN_H, beside));
     const w = speedoWidth(h);
-    if (used + FLEET_GUTTER + w > W) return false;
+    if (used + FLEET_GUTTER + w > W) return 0;
     const grow = h - beside;
     if (grow > 0) {
       // What the activity pane keeps: the frame less the header and footer
       // (two lines each), the lengthened block, and the blank and the title
       // line above the log.
       const logRows = H - 4 - (block.length + grow) - 2;
-      if (logRows < Math.ceil((H * 2) / 3)) return false;
+      if (logRows < Math.ceil((H * 2) / 3)) return 0;
       for (let i = 0; i < grow; i++) block.push('');
     }
-    const dial = renderSpeedo({ rate: meter.rate, max: meter.scale, width: w, height: h, paint: { cyan, dim, bold } });
+    const dial = renderSpeedo({ rate: meter.rate, max: meter.scale, cost: meter.cost, width: w, height: h, paint: { cyan, dim, bold } });
     // truncate closes any colour the block's line left open, as sideBySide
     // does, so a row that ends mid-bar cannot bleed into the gutter.
     for (let i = 0; i < h; i++) block[1 + i] = rpad(truncate(block[1 + i], used), used) + FLEET_GUTTER_PAD + dial[i];
-    return true;
+    return h;
   }
 
   /** Manager indices of the accounts drawn as rows — the seats that rotate —
@@ -4153,7 +4161,7 @@ export class TUI {
     lines.push(row(byId('quotaBarPercent')));
     lines.push('');
     // ── Throughput
-    lines.push(bold('  Throughput') + dim('  — output tokens per second, per request and for the whole fleet'));
+    lines.push(bold('  Throughput') + dim('  — output tokens per second, per request and for the whole fleet, and its $/s at API prices'));
     lines.push(row(byId('throughputMeter')));
     lines.push('');
     // ── Activity log

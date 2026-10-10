@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { renderSpeedo, speedoCells, speedoWidth, formatScale, SPEEDO_MIN_H, SPEEDO_MAX_H } from '../src/speedo.js';
+import { renderSpeedo, speedoCells, speedoWidth, speedoShowsCost, formatScale, SPEEDO_MIN_H, SPEEDO_MAX_H } from '../src/speedo.js';
 import { displayWidth } from '../src/tui.js';
 
 // The dial is set beside the dashboard's top block, and that merge trusts it to
@@ -16,9 +16,11 @@ test('every line is exactly the width asked for, and there are exactly `height` 
   const odd = [[40, 10], [30, 6], [11, 6], [5, 3], [1, 1], [3, 12], [0, 4], [9, 0]];
   for (const [width, height] of [...SIZES, ...odd]) {
     for (const [rate, max] of [[0, 100], [55, 100], [1_400, 2_000], [9e9, 100]]) {
-      const lines = renderSpeedo({ rate, max, width, height });
-      assert.equal(lines.length, height, `${width}x${height}: ${lines.length} lines`);
-      for (const l of lines) assert.equal(displayWidth(l), width, `${width}x${height} @${rate}: |${strip(l)}|`);
+      for (const cost of [null, 0, 0.004, 12.34, 9e9]) {
+        const lines = renderSpeedo({ rate, max, width, height, cost });
+        assert.equal(lines.length, height, `${width}x${height}: ${lines.length} lines`);
+        for (const l of lines) assert.equal(displayWidth(l), width, `${width}x${height} @${rate} $${cost}: |${strip(l)}|`);
+      }
     }
   }
 });
@@ -151,4 +153,35 @@ test('the painter the caller hands over is the one used', () => {
   assert.match(all, /<d>[\u2801-\u28ff]+<\/d>/, 'the rest of the arc is dim');
   assert.match(all, /<d>tok\/s<\/d>/);
   assert.doesNotMatch(all, /\x1b/, 'a raw escape bypassed the painter');
+});
+
+test('the spend sits under the unit, centred, on every dial with a row for it', () => {
+  const text = (row, kind) => row.filter(c => c.kind === kind).map(c => c.ch).join('');
+  for (const [width, height] of SIZES) {
+    const cells = speedoCells({ rate: 640, max: 1_000, width, height, cost: 0.27 });
+    const unit = cells.findIndex(r => r.some(c => c.kind === 'unit'));
+    const row = cells.findIndex(r => r.some(c => c.kind === 'cost'));
+    if (!speedoShowsCost(height)) {
+      assert.equal(row, -1, `${height}: a spend with no row for it`);
+      continue;
+    }
+    assert.equal(row, unit + 1, `${height}: the spend is not under the unit`);
+    assert.equal(text(cells[row], 'cost'), '$0.27/s');
+    const cols = cells[row].map((c, i) => (c.kind === 'cost' ? i : -1)).filter(i => i >= 0);
+    assert.ok(Math.abs(cols[0] - (width - 1 - cols[cols.length - 1])) <= 1, `${height}: off centre`);
+    assert.ok(!cells[row].some(c => c.kind === 'needle'), `${height}: the needle crossed the spend`);
+  }
+  // Only the smallest dial goes without.
+  assert.ok(!speedoShowsCost(SPEEDO_MIN_H));
+  for (let h = SPEEDO_MIN_H + 1; h <= SPEEDO_MAX_H; h++) assert.ok(speedoShowsCost(h), `height ${h}`);
+});
+
+test('the scale ends give way to a spend that would crowd them, and no spend means none drawn', () => {
+  const h = SPEEDO_MIN_H + 1;
+  const w = speedoWidth(h);
+  const kinds = (cost) => new Set(speedoCells({ rate: 6_400, max: 20_000, width: w, height: h, cost }).flat().map(c => c.kind));
+  assert.ok(kinds(0.27).has('label'), 'a short spend leaves room for the ends');
+  assert.ok(!kinds(12.34).has('label'), 'a long one takes their row');
+  assert.ok(kinds(12.34).has('cost'));
+  assert.ok(!kinds(null).has('cost'));
 });

@@ -4273,6 +4273,7 @@ function parseSSEDataLine(line, accountIndex, accountManager, onUsage = null, me
       accountManager.updateUsage(accountIndex, data.message.usage.input_tokens, 0);
       onUsage?.(data.message.usage.input_tokens || 0, 0);
       if (merged) Object.assign(merged, data.message.usage);
+      output?.input(data.message.usage, data.message.model);
     } else if (data.type === 'message_delta' && data.usage) {
       accountManager.updateUsage(accountIndex, 0, data.usage.output_tokens);
       onUsage?.(0, data.usage.output_tokens || 0);
@@ -4291,6 +4292,7 @@ function parseSSEDataLine(line, accountIndex, accountManager, onUsage = null, me
         accountManager.updateUsage(accountIndex, usage.input_tokens, usage.output_tokens);
         onUsage?.(usage.input_tokens, usage.output_tokens);
         if (merged) Object.assign(merged, usage);
+        output?.input(usage, data.response?.model);
         output?.settle(usage.output_tokens);
       }
     }
@@ -4323,6 +4325,7 @@ function extractUsageFromBody(buffer, accountIndex, accountManager, onUsage = nu
       accountManager.recordTokenUsage(accountIndex, pinKey, model, usage);
       // Buffered, so there is no generation interval to time: the tracker's
       // first and last token stay null and the reader times the whole request.
+      output?.input(usage, json.model);
       output?.settle(usage.output_tokens);
     }
   } catch {

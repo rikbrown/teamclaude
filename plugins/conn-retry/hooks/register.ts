@@ -32,7 +32,7 @@ async function retryNow($: EngineInterface) {
 
 async function showCountdown($: EngineInterface, label: string, dueAt: number) {
   const left = Math.max(0, Math.ceil((dueAt - (await $.clock.now())) / 1000))
-  $.ui.status(`${label} in ${left}s (/conn-retry cancel)`)
+  $.ui.status(`${label} in ${left}s (type to cancel)`)
 }
 
 async function schedule($: EngineInterface) {
@@ -60,14 +60,6 @@ export const register: Register = on => {
   attempt = 0
   pending = undefined
 
-  on('session.start', async ($, e, next) => {
-    await $.command.register({
-      name: 'conn-retry',
-      description: 'Lost-connection auto-retry: `now`, `cancel`, or no args for status',
-    })
-    return next(e)
-  })
-
   on('classic.StopFailure', async ($, e, next) => {
     const result = await next(e)
     const said = `${e.error_details ?? ''}\n${e.last_assistant_message ?? ''}`
@@ -89,24 +81,5 @@ export const register: Register = on => {
       attempt = 0
     }
     return next(e)
-  })
-
-  on('command.run', { command: 'conn-retry' }, async ($, e) => {
-    const arg = e.args.trim()
-    if (arg === 'cancel') {
-      const had = pending !== undefined
-      cancel($)
-      attempt = 0
-      return { text: had ? 'Retry cancelled.' : 'No retry is waiting.' }
-    }
-    if (arg === 'now') {
-      await retryNow($)
-      return { text: 'Retrying now.' }
-    }
-    return {
-      text: pending
-        ? `Retry ${attempt}/${MAX_ATTEMPTS} is waiting.`
-        : `Watching for "Connection lost mid-response". ${attempt} retries used in this outage.`,
-    }
   })
 }

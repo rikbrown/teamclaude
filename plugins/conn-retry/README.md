@@ -19,13 +19,7 @@ Pick **user** scope.
 ## Use
 
 It runs by itself. While a retry waits, the status line shows a countdown:
-`conn-retry: retry 2/10 in 17s (/conn-retry cancel)`.
-
-| How | What |
-| --- | --- |
-| `/conn-retry` | Show the status |
-| `/conn-retry now` | Retry now, without the wait |
-| `/conn-retry cancel` | Drop the waiting retry |
+`conn-retry: retry 2/10 in 17s (type to cancel)`.
 
 If you type a prompt while a retry waits, the mod drops the retry: you have taken over. A turn that
 completes with an answer resets the count.

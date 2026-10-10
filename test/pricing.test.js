@@ -60,3 +60,13 @@ test('a spend rate prints to the cent, or to a tenth of one below a cent', () =>
   assert.equal(formatCost(99.999), '$100/s');
   assert.equal(formatCost(1234.5), '$1235/s');
 });
+
+test('per hour is the same reading times 3600, with thousands as k', () => {
+  assert.equal(formatCost(0, 'h'), '$0.00/h');
+  assert.equal(formatCost(0.000001, 'h'), '$0.004/h');
+  assert.equal(formatCost(0.01, 'h'), '$36.00/h');
+  assert.equal(formatCost(0.27, 'h'), '$972/h');
+  assert.equal(formatCost(2.7, 'h'), '$9720/h');
+  assert.equal(formatCost(3.425, 'h'), '$12.3k/h');
+  assert.equal(formatCost(30, 'h'), '$108k/h');
+});

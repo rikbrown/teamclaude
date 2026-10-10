@@ -25,7 +25,7 @@ import { MAX_PROBE_SECONDS, ROUTE_COLORS } from './config-ops.js';
 import { isLocalUpstream, providerForPath } from './provider.js';
 import { ThroughputMeter, requestRate, formatRate } from './throughput.js';
 import { formatCost } from './pricing.js';
-import { renderSpeedo, speedoWidth, speedoShowsCost, SPEEDO_MIN_H, SPEEDO_MAX_H } from './speedo.js';
+import { renderSpeedo, speedoWidth, speedoCostRows, SPEEDO_MIN_H, SPEEDO_MAX_H } from './speedo.js';
 import { hyperlink, clipboardSequence } from './osc.js';
 /** @typedef {import('./login-flow.js').LoginPrompt} LoginPrompt */
 
@@ -3033,12 +3033,16 @@ export class TUI {
 
     // No dial on this screen, or no room for one: the readings go in the
     // header's right block instead, and only if the line still holds the rest
-    // of that block whole. So does the spend alone when the dial is too short
-    // to carry it. Never both, so a reading is never shown twice.
-    if (meter && !(dialH && speedoShowsCost(dialH))) {
-      const rate = dialH ? '' : `${formatRate(meter.rate)} ${dim('tok/s')}  `;
-      const withRate = header(`${rate}${formatCost(meter.cost)}  `);
-      if (vw(withRate) <= W) lines[0] = withRate;
+    // of that block whole. So does each spend reading a dial is too short to
+    // carry. Never both, so a reading is never shown twice.
+    if (meter) {
+      const onDial = dialH ? speedoCostRows(dialH) : -1;
+      const readings = [];
+      if (onDial < 0) readings.push(`${formatRate(meter.rate)} ${dim('tok/s')}`);
+      if (onDial < 1) readings.push(formatCost(meter.cost, 's'));
+      if (onDial < 2) readings.push(formatCost(meter.cost, 'h'));
+      const withRate = readings.length ? header(`${readings.join('  ')}  `) : null;
+      if (withRate && vw(withRate) <= W) lines[0] = withRate;
     }
 
     // A body taller than the terminal used to push the footer off the bottom,

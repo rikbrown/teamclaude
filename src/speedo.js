@@ -7,8 +7,8 @@
 //
 // The arc sweeps 240°: zero at the lower left, full scale at the lower right,
 // half scale straight up. The needle pivots at the hub, and the reading sits
-// under the hub with its unit below it, and below that, as far as there are
-// rows for them, the fleet's spend at API prices per second and per hour. The needle is never drawn over the
+// under the hub with its unit below it, and below that, when there is a row
+// for it, what the fleet spent over the last hour at API prices. The needle is never drawn over the
 // readings: it stops at the text's edge and picks up past it.
 //
 // The arc is lit in one colour up to the reading and dim past it. No green,
@@ -21,7 +21,7 @@
 // of the frame.
 
 import { formatRate } from './throughput.js';
-import { formatCost } from './pricing.js';
+import { formatSpend } from './pricing.js';
 
 /** Rows the dial is drawn in at the least, and at the most. Six is the smallest
  *  that keeps an arc, a reading and its unit apart; past ten the dial only grows
@@ -47,7 +47,7 @@ const SGR = (/** @type {string} */ code) => (/** @type {string} */ s) => `\x1b[$
 /** @type {Painter} */
 const DEFAULT_PAINT = { cyan: SGR('36'), dim: SGR('2'), bold: SGR('1') };
 
-/** @typedef {'blank'|'arc'|'arc-dim'|'needle'|'value'|'unit'|'cost'|'label'} CellKind */
+/** @typedef {'blank'|'arc'|'arc-dim'|'needle'|'value'|'unit'|'spend'|'label'} CellKind */
 /** @typedef {{ ch: string, kind: CellKind }} Cell */
 
 /**
@@ -79,14 +79,11 @@ function readingRows(height, R) {
   return { valueRow, unitRow: valueRow + 1 };
 }
 
-/** The spend readings, in the order they go under the unit. */
-const COST_UNITS = /** @type {const} */ (['s', 'h']);
-
-/** How many of the spend readings, $/s then $/h, a dial `height` rows tall has
- *  rows for under its unit. The caller shows the rest elsewhere.
+/** Whether a dial `height` rows tall has a row for the spend under its unit.
+ *  The smallest does not, so the caller shows the spend elsewhere.
  *  @param {number} height */
-export function speedoCostRows(height) {
-  return Math.max(0, Math.min(COST_UNITS.length, height - 1 - readingRows(height, radiusFor(height)).unitRow));
+export function speedoShowsSpend(height) {
+  return readingRows(height, radiusFor(height)).unitRow + 1 < height;
 }
 
 /** Where `angle` falls along the sweep, 0 at zero and 1 at full scale, or null
@@ -113,14 +110,14 @@ export function formatScale(n) {
  * The dial as a grid of cells, before any colour: what each cell shows and what
  * it belongs to. Exposed so the tests can find the needle without parsing SGR.
  *
- * `cost`, $/s, goes under the unit as $/s and then $/h, as far as the dial has
- * rows for them, and takes precedence over the scale ends: they are left out
- * if it would crowd them.
+ * `spend`, dollars over the last hour, goes on the row under the unit when the
+ * dial has one, and takes precedence over the scale ends: they are left out if
+ * it would crowd them.
  *
- * @param {{ rate: number, max: number, width: number, height: number, cost?: number|null }} opts
+ * @param {{ rate: number, max: number, width: number, height: number, spend?: number|null }} opts
  * @returns {Cell[][]} `height` rows of `width` cells
  */
-export function speedoCells({ rate, max, width, height, cost = null }) {
+export function speedoCells({ rate, max, width, height, spend = null }) {
   width = Math.max(0, Math.floor(width));
   height = Math.max(0, Math.floor(height));
   /** @type {Cell[][]} */
@@ -175,13 +172,9 @@ export function speedoCells({ rate, max, width, height, cost = null }) {
   const value = formatRate(rate);
   texts.push({ row: valueRow, col: colFor(value), text: value, kind: 'value' });
   if (unitRow < height) texts.push({ row: unitRow, col: colFor('tok/s'), text: 'tok/s', kind: 'unit' });
-  if (typeof cost === 'number') {
-    COST_UNITS.forEach((per, i) => {
-      const row = unitRow + 1 + i;
-      if (row >= height) return;
-      const spend = formatCost(cost, per);
-      texts.push({ row, col: colFor(spend), text: spend, kind: 'cost' });
-    });
+  if (typeof spend === 'number' && unitRow + 1 < height) {
+    const text = formatSpend(spend);
+    texts.push({ row: unitRow + 1, col: colFor(text), text, kind: 'spend' });
   }
 
   // Nothing but text in the box around the readings: the needle stops at its
@@ -251,10 +244,10 @@ export function speedoCells({ rate, max, width, height, cost = null }) {
  * Colour runs are closed on every change of style, so no cell's colour can
  * bleed into the next, or past the dial into whatever follows it on the line.
  *
- * @param {{ rate: number, max: number, width: number, height: number, cost?: number|null, paint?: Painter }} opts
+ * @param {{ rate: number, max: number, width: number, height: number, spend?: number|null, paint?: Painter }} opts
  * @returns {string[]}
  */
-export function renderSpeedo({ rate, max, width, height, cost = null, paint = DEFAULT_PAINT }) {
+export function renderSpeedo({ rate, max, width, height, spend = null, paint = DEFAULT_PAINT }) {
   // Cyan is the dashboard's accent for what is live — the spinner, the active
   // count — and the lit arc is exactly that.
   /** @type {Record<CellKind, (s: string) => string>} */
@@ -265,10 +258,10 @@ export function renderSpeedo({ rate, max, width, height, cost = null, paint = DE
     needle: (s) => paint.bold(s),
     value: (s) => paint.bold(s),
     unit: (s) => paint.dim(s),
-    cost: (s) => paint.bold(s),
+    spend: (s) => paint.bold(s),
     label: (s) => paint.dim(s),
   };
-  return speedoCells({ rate, max, width, height, cost }).map(row => {
+  return speedoCells({ rate, max, width, height, spend }).map(row => {
     let out = '';
     let run = '';
     /** @type {Cell|null} */

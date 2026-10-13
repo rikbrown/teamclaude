@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { AccountManager } from '../src/account-manager.js';
-import { createProxyServer } from '../src/server.js';
+import { createProxyServer, resolveRateLimitFallbackRetryAfterSeconds } from '../src/server.js';
 
 function listen(server) {
   return new Promise(resolve => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
@@ -57,6 +57,67 @@ test('persistent upstream 429 terminates with a bounded number of retries', asyn
   assert.ok(upstreamHits >= 1 && upstreamHits <= 4, `expected bounded retries, got ${upstreamHits}`);
   assert.equal(accountStatus, 'active');                       // NOT throttled — no rotation on a rate-limit 429
   assert.ok(paused, 'account should be paused, so concurrent requests wait');
+});
+
+test('rate-limit 429 without retry-after uses the configured inline wait', async () => {
+  const key = 'TEAMROUTER_RATE_LIMIT_FALLBACK_RETRY_AFTER_SECONDS';
+  const previous = process.env[key];
+  const originalLog = console.log;
+  const lines = [];
+  let upstreamHits = 0;
+  const upstream = http.createServer((_req, res) => {
+    upstreamHits++;
+    if (upstreamHits === 1) {
+      res.writeHead(429, {
+        'anthropic-ratelimit-unified-5h-status': 'allowed',
+        'content-type': 'application/json',
+      });
+      res.end(JSON.stringify({ type: 'error', error: { type: 'rate_limit_error' } }));
+    } else {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ type: 'message', role: 'assistant', content: [] }));
+    }
+  });
+  let proxy;
+  process.env[key] = '2';
+  try {
+    const upstreamPort = await listen(upstream);
+    const am = new AccountManager(
+      [{ name: 'a', type: 'oauth', accessToken: 't', refreshToken: 'r', expiresAt: Date.now() + 3600_000 }],
+      0.98,
+    );
+    proxy = createProxyServer(am, { proxy: { apiKey: 'k' }, upstream: `http://127.0.0.1:${upstreamPort}` });
+    const proxyPort = await listen(proxy);
+    console.log = (...args) => { lines.push(args.join(' ')); };
+    const res = await fetch(`http://127.0.0.1:${proxyPort}/v1/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'x', messages: [] }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    await res.text();
+    assert.equal(res.status, 200, lines.join('\n'));
+    assert.equal(upstreamHits, 2, 'the 429 should be absorbed and retried once');
+    assert.ok(lines.some(line => line.includes('Rate-limit 429 on "a" — waiting 2s, retrying same account (no switch)')), lines.join('\n'));
+  } finally {
+    console.log = originalLog;
+    if (previous == null) delete process.env[key]; else process.env[key] = previous;
+    proxy?.close();
+    upstream.close();
+  }
+});
+
+test('invalid rate-limit fallback settings keep the 60-second default', () => {
+  const key = 'TEAMROUTER_RATE_LIMIT_FALLBACK_RETRY_AFTER_SECONDS';
+  const previous = process.env[key];
+  try {
+    for (const value of ['abc', '', '0', '-2']) {
+      process.env[key] = value;
+      assert.equal(resolveRateLimitFallbackRetryAfterSeconds(), 60, `value: ${JSON.stringify(value)}`);
+    }
+  } finally {
+    if (previous == null) delete process.env[key]; else process.env[key] = previous;
+  }
 });
 
 // A negative (or otherwise out-of-range) Retry-After must not bypass the cap:

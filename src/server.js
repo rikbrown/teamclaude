@@ -176,12 +176,13 @@ const RATE_LIMIT_DIAG_BODY_TIMEOUT_MS = 2_000;
  * @param {string|null|undefined} p.model  the request's model
  * @param {number} p.attempt  retryCount of the attempt that drew the 429
  * @param {boolean} p.requestScoped  no retry-after and no rate-limit headers
+ * @param {boolean} [p.noRetry]  upstream explicitly declined a retry
  * @param {number} [p.retryAfterSeconds]  parsed delay from the retry branch
  * @param {{ get(name: string): string|null, entries(): Iterable<[string, string]> }} p.headers  upstream response headers
  * @param {Buffer|null} p.body  the error body, or null when it was not read
  * @returns {string}
  */
-export function formatRateLimitDiagnostic({ reqId, sessionId, account, model, attempt, requestScoped, retryAfterSeconds, headers, body }) {
+export function formatRateLimitDiagnostic({ reqId, sessionId, account, model, attempt, requestScoped, noRetry = false, retryAfterSeconds, headers, body }) {
   const header = (/** @type {string} */ name, max = 80) => {
     const v = headers.get(name);
     return v == null ? 'none' : safeLine(v, max);
@@ -189,7 +190,7 @@ export function formatRateLimitDiagnostic({ reqId, sessionId, account, model, at
   const retryAfterRaw = headers.get('retry-after');
   const rawSeconds = parseInt(retryAfterRaw ?? '', 10);
   const fallback = Number.isNaN(rawSeconds);
-  const parsed = retryAfterSeconds ?? (fallback ? resolveRateLimitFallbackRetryAfterSeconds() : rawSeconds);
+  const parsed = noRetry ? null : (retryAfterSeconds ?? (fallback ? resolveRateLimitFallbackRetryAfterSeconds() : rawSeconds));
   /** @type {Record<string, string>} */
   const limits = {};
   for (const [key, value] of headers.entries()) {
@@ -219,7 +220,8 @@ export function formatRateLimitDiagnostic({ reqId, sessionId, account, model, at
     + ` session=${safeLine(sessionId ?? 'none', 128)} on "${safeLine(account, 64)}"`
     + ` (model ${safeLine(model ?? 'unknown', 64)}, attempt ${attempt}, request-scoped ${requestScoped ? 'yes' : 'no'}):`
     + ` retry-after=${retryAfterRaw == null ? 'none' : safeLine(retryAfterRaw, 32)}`
-    + ` parsed=${parsed}s${fallback && !requestScoped ? ' (fallback used)' : ''}${requestScoped ? ' (not applied)' : ''}`
+    + (noRetry ? ' parsed=not applied (upstream says do not retry)'
+      : ` parsed=${parsed}s${fallback && !requestScoped ? ' (fallback used)' : ''}${requestScoped ? ' (not applied)' : ''}`)
     + ` request-id=${header('request-id')} cf-ray=${header('cf-ray')} x-should-retry=${header('x-should-retry', 16)}`
     + ` ratelimit=${safeLine(JSON.stringify(limits), 2000)} ${error}`;
 }
@@ -3821,6 +3823,20 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
     // this is what lets a revalidation probe (a throttled account selected by
     // _selectProbe) clear its own hold and return the fleet to service.
     if (upstreamRes.status !== 429) accountManager.clearRateLimited(account.index);
+
+    // An explicit no-retry refusal gets the same evidence line as any other
+    // 429, with its retry-after marked as not applied. Its body is left unread
+    // for the normal relay below: diagnostic buffering would consume the error
+    // the client needs to see.
+    if (nonRetryable429) {
+      try {
+        console.log(formatRateLimitDiagnostic({
+          reqId, sessionId: ctx.sessionId, account: account.name, model: ctx.model,
+          attempt: retryCount, requestScoped: upstreamRes.headers.get('retry-after') == null && Object.keys(rateLimitHeaders).length === 0, noRetry: true,
+          headers: upstreamRes.headers, body: null,
+        }));
+      } catch { /* diagnostics only */ }
+    }
 
     // Other 429s retain their established classification: quota rejection
     // rotates, while a transient throttle pauses and retries.

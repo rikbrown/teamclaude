@@ -108,6 +108,16 @@ function resolveHeaderless429RetryDelayMs() {
   if (env === 0) return 0;
   return env > 0 ? env : DEFAULT_HEADERLESS_429_RETRY_DELAY_MS;
 }
+// The wait the proxy invents for a rate-limit 429 when upstream names none.
+const DEFAULT_RATE_LIMIT_FALLBACK_RETRY_AFTER_SECONDS = 60;
+
+/** @returns {number} */
+export function resolveRateLimitFallbackRetryAfterSeconds() {
+  const raw = envVar('RATE_LIMIT_FALLBACK_RETRY_AFTER_SECONDS');
+  if (raw == null || raw.trim() === '') return DEFAULT_RATE_LIMIT_FALLBACK_RETRY_AFTER_SECONDS;
+  const env = Number(raw);
+  return env > 0 ? env : DEFAULT_RATE_LIMIT_FALLBACK_RETRY_AFTER_SECONDS;
+}
 const OAUTH_ENTITLEMENT_ERROR_CODE = 'oauth_not_allowed_for_organization';
 const ERROR_BODY_INSPECTION_LIMIT = 64 * 1024;
 // How long an idle keep-alive connection is held open.
@@ -3353,13 +3363,13 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
     // to another account; a transient rate-limit throttle pauses + retries the
     // same account (never rotates — see #84).
     if (upstreamRes.status === 429) {
-      // Clamp Retry-After to a sane window: missing/invalid falls back to 60s,
-      // and out-of-range values are bounded to [1, 300]. A negative value would
-      // otherwise bypass the wait cap — setTimeout returns immediately and a
-      // pause/hold would be armed in the past.
+      // Clamp Retry-After to a sane window: missing/invalid uses the configured
+      // fallback, and out-of-range values are bounded to [1, 300]. A negative
+      // value would otherwise bypass the wait cap — setTimeout returns
+      // immediately and a pause/hold would be armed in the past.
       const retryAfterHeader = upstreamRes.headers.get('retry-after');
       let retryAfter = parseInt(retryAfterHeader, 10);
-      if (Number.isNaN(retryAfter)) retryAfter = 60;
+      if (Number.isNaN(retryAfter)) retryAfter = resolveRateLimitFallbackRetryAfterSeconds();
       // A 429 that says nothing about the account — no retry-after, no
       // anthropic-ratelimit-* — is about the REQUEST: a model id upstream
       // refuses, a shape it will not take. Neither of the account-level

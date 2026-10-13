@@ -190,7 +190,7 @@ test('with the meter off nothing fires, and the end entry is what it always was'
       await anthropicPost(port);
       assert.equal(calls.progress.length + calls.usage.length, 0, JSON.stringify(config));
       assert.deepEqual(Object.keys(calls.end[0].info).sort(),
-        ['account', 'attempts', 'callerRequestId', 'client', 'effort', 'method', 'model', 'path', 'pinned', 'sessionId', 'status']);
+        ['account', 'attempts', 'callerRequestId', 'client', 'effort', 'method', 'model', 'path', 'pinned', 'sessionId', 'status', 'viaSx']);
     });
   }
 });

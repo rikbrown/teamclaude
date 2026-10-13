@@ -1268,6 +1268,8 @@ export class TUI {
     const r = this.active.get(id);
     if (!r) return;
     r.account = info.account == null ? info.account : safeLine(info.account, 64);
+    // Per attempt: a hop to an account with its own proxy clears it.
+    r.viaSx = info.viaSx === true;
     if (this._throughputOn()) this._markLeg(r, info.account);
   }
 
@@ -1340,6 +1342,9 @@ export class TUI {
     const model = modelParen(label, info.effort, false); // shown when the request named a model
     const sid = info.sessionId || r?.sessionId || null;
     const pin = (info.pinned || r?.pinned) ? dim(' [pin]') : '';
+    // Follows the account it is shown beside: from the end report when that
+    // names the account, else from the last routed attempt.
+    const sx = (info.account ? info.viaSx : r?.viaSx) === true ? dim(' via sx') : '';
     // The server times output only while the meter is on, and says so by
     // carrying `outputTokens` at all. A buffered response is timed from when
     // the attempt that answered was sent, not from when the client asked:
@@ -1355,8 +1360,8 @@ export class TUI {
     // it, and drawn only while the meter is on (see _requestLine), so turning
     // the meter off gives back the old line for every entry, however it was
     // logged; and the pieces are kept so the line can be fitted around it.
-    this._addLog(`${tag} ${info.method} ${info.path}${model} → ${acct}${pin} (${info.status}, ${dur}s)`, {
-      head: `${tag} ${info.method} `, path: info.path, model: label || null, effort: info.effort || null, account: acct, pin,
+    this._addLog(`${tag} ${info.method} ${info.path}${model} → ${acct}${sx}${pin} (${info.status}, ${dur}s)`, {
+      head: `${tag} ${info.method} `, path: info.path, model: label || null, effort: info.effort || null, account: acct, pin: sx + pin,
       status: info.status, dur, tps,
     });
     if (this.active.size === 0) this._retick();   // animating → idle
@@ -3007,7 +3012,8 @@ export class TUI {
       const label = modelLabel(r.model, r.effort);
       const m = modelParen(label, r.effort, true); // filled in as soon as the model is peeked from the stream
       const pin = r.pinned ? dim(' [pin]') : '';
-      const a = r.account ? ` → ${r.account}${pin}` : '';
+      const sx = r.viaSx ? dim(' via sx') : '';
+      const a = r.account ? ` → ${r.account}${sx}${pin}` : '';
       if (!meter) {
         lines.push(` ${sp} ${gray(r.t)}  ${this._sessionTag(r.sessionId)} ${r.method} ${r.path}${m}${a} ${dim(`(${el}s...)`)}`);
         continue;
@@ -3019,7 +3025,7 @@ export class TUI {
       const est = tps != null ? ` ~${formatRate(tps)} tok/s` : '';
       const lead = ` ${sp} ${gray(r.t)}  ${this._sessionTag(r.sessionId)} ${r.method} `;
       const tail = ` ${dim(`(${el}s...${est})`)}`;
-      const middle = requestMiddle({ path: r.path, model: label || null, effort: r.effort, account: r.account || null, pin, dimModel: true }, W - vw(lead) - vw(tail));
+      const middle = requestMiddle({ path: r.path, model: label || null, effort: r.effort, account: r.account || null, pin: sx + pin, dimModel: true }, W - vw(lead) - vw(tail));
       lines.push(lead + middle + tail);
     }
 

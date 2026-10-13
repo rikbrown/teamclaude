@@ -154,4 +154,6 @@ The **sx.org mode** row cycles with `←`/`→`:
 
 TLS is established **end-to-end with `api.anthropic.com` over the tunnel**, so the sx.org proxy only ever relays ciphertext and the real Anthropic certificate is still verified. Mode and key changes apply live (no restart). A **Clear sx.org key** row appears once a key is set, to forget it entirely.
 
+In the activity pane, a request that left through sx.org shows a dim `via sx` after the account name, on the live row and on the finished line. The tag follows each attempt, so a direct first try that is retried through sx.org gains it, and an account with its own [routing proxy](accounts.md#per-account-routing-routing) never shows it.
+
 > **Cost:** in **always** mode *all* Claude traffic flows through the residential proxy, which sx.org meters by bandwidth — expect real per-GB cost. **on 429 only** uses the proxy just when you're actually being throttled, so it's the cheaper way to ride out rate limits.

@@ -1380,11 +1380,16 @@ export function clientSessionId(headers) {
  * `model` and `effort`, null or absent where the request ended before either
  * was read.
  *
+ * onRequestRouted runs once per attempt, so a failover hop or an sx.org retry
+ * reports again. Its `viaSx` is true when that attempt leaves through sx.org,
+ * which an account with its own routing proxy never does. onRequestEnd's
+ * `viaSx` is the same for the attempt that ended the request.
+ *
  * @typedef {{
  *   onRequestStart?: (id: number, info: Record<string, any>) => void,
  *   onRequestModel?: (id: number, info: { model: string|null, effort?: string|null }) => void,
- *   onRequestRouted?: (id: number, info: Record<string, any>) => void,
- *   onRequestEnd?: (id: number, info: Record<string, any>) => void,
+ *   onRequestRouted?: (id: number, info: { account: string, viaSx?: boolean } & Record<string, any>) => void,
+ *   onRequestEnd?: (id: number, info: { account?: string|null, viaSx?: boolean } & Record<string, any>) => void,
  * } & Record<string, any>} ActivityHooks
  */
 /**
@@ -1727,7 +1732,7 @@ export function createProxyRequestListener({ accountManager, upstream, logDir = 
         // marked open would send the outer catch to call that same throwing hook
         // a second time for one request.
         openEntry = null;
-        if (!hideActivity) hooks.onRequestEnd?.(reqId, { method: req.method, path: req.url, account: ctx.account, status: ctx.status, model: ctx.model, effort, sessionId, pinned: ctx.pinnedIndex != null, client });
+        if (!hideActivity) hooks.onRequestEnd?.(reqId, { method: req.method, path: req.url, account: ctx.account, viaSx: !!ctx.viaSx, status: ctx.status, model: ctx.model, effort, sessionId, pinned: ctx.pinnedIndex != null, client });
       }
     } catch (err) {
       reportFailure('[TeamClaude] Unhandled error:', err);
@@ -3021,6 +3026,7 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
       }
       ctx.status = 502;
       ctx.account = `(${[...rejected].join(', ')} refused)`;
+      ctx.viaSx = false;
       if (!res.headersSent) {
         res.writeHead(502, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
@@ -3035,6 +3041,7 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
     if (ctx.pinnedIndex != null) {
       ctx.status = 429;
       ctx.account = '(pinned account unavailable)';
+      ctx.viaSx = false;
       if (!res.headersSent) {
         res.writeHead(429, { 'Content-Type': 'application/json', 'retry-after': '5' });
         res.end(JSON.stringify({
@@ -3046,6 +3053,7 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
     }
     ctx.status = 429;
     ctx.account = '(none available)';
+    ctx.viaSx = false;
 
     // A Codex pool that is dry because its weekly windows are spent is the one
     // exhaustion here that a free reset credit can undo — and THIS is where it
@@ -3140,11 +3148,16 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
 
   // Track which account handles this request
   ctx.account = account.name;
+  // Whether this attempt really leaves through sx.org, decided the way
+  // upstreamFetch decides it: an account's own routing proxy outranks sx, and an
+  // unprovisioned sx is a direct dial. Per attempt, so a hop or an sx retry
+  // overwrites it.
+  ctx.viaSx = !!(route && !account.routing && sx?.isProvisioned());
   // Pin this conversation to the serving account for the model's weekly bucket
   // (for affinity) and keep it "active" in the running-sessions readout. Passive
   // when distribution is off.
   accountManager.recordSession(ctx.pinKey, account.index, ctx.model);
-  hooks.onRequestRouted?.(reqId, { account: account.name });
+  hooks.onRequestRouted?.(reqId, { account: account.name, viaSx: ctx.viaSx });
 
   // Refresh OAuth token if needed
   await accountManager.ensureTokenFresh(account.index);
@@ -3894,6 +3907,7 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
       // reached. A 503 with Retry-After lets the client back off briefly.
       ctx.status = 503;
       ctx.account = '(upstream queue full)';
+      ctx.viaSx = false;
       if (!res.headersSent && !clientGone(res)) {
         res.writeHead(503, { 'Content-Type': 'application/json', 'Retry-After': '1' });
         res.end(JSON.stringify({ type: 'error', error: { type: 'overloaded_error', message: 'Proxy upstream queue is full; retry shortly.' } }));

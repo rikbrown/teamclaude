@@ -1034,7 +1034,10 @@ export class TUI {
 
   onRequestRouted(id, info) {
     const r = this.active.get(id);
-    if (r) r.account = info.account == null ? info.account : safeLine(info.account, 64);
+    if (!r) return;
+    r.account = info.account == null ? info.account : safeLine(info.account, 64);
+    // Per attempt: a hop to an account with its own proxy clears it.
+    r.viaSx = info.viaSx === true;
   }
 
   onRequestEnd(id, info) {
@@ -1046,7 +1049,10 @@ export class TUI {
     const model = modelParen(modelLabel(info.model, info.effort), info.effort, false); // shown when the request named a model
     const sid = info.sessionId || r?.sessionId || null;
     const pin = (info.pinned || r?.pinned) ? dim(' [pin]') : '';
-    this._addLog(`${this._sessionTag(sid)} ${info.method} ${info.path}${model} → ${acct}${pin} (${info.status}, ${dur}s)`);
+    // Follows the account it is shown beside: from the end report when that
+    // names the account, else from the last routed attempt.
+    const sx = (info.account ? info.viaSx : r?.viaSx) === true ? dim(' via sx') : '';
+    this._addLog(`${this._sessionTag(sid)} ${info.method} ${info.path}${model} → ${acct}${sx}${pin} (${info.status}, ${dur}s)`);
     if (this.active.size === 0) this._retick();   // animating → idle
   }
 
@@ -2609,7 +2615,8 @@ export class TUI {
       const sp = cyan(SPINNER[this.frame]);
       const m = modelParen(modelLabel(r.model, r.effort), r.effort, true); // filled in as soon as the model is peeked from the stream
       const pin = r.pinned ? dim(' [pin]') : '';
-      const a = r.account ? ` → ${r.account}${pin}` : '';
+      const sx = r.viaSx ? dim(' via sx') : '';
+      const a = r.account ? ` → ${r.account}${sx}${pin}` : '';
       lines.push(` ${sp} ${gray(r.t)}  ${this._sessionTag(r.sessionId)} ${r.method} ${r.path}${m}${a} ${dim(`(${el}s...)`)}`);
     }
 

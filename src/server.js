@@ -5,6 +5,7 @@ import { createWriteStream, mkdirSync, writeSync } from 'node:fs';
 import { readdir, stat, unlink } from 'node:fs/promises';
 import { buffer } from 'node:stream/consumers';
 import { join } from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { ensureCerts, createConnectHandler, mitmHosts } from './mitm.js';
 import { inspectBillingError } from './billing-error.js';
 import { patchAccountUuid } from './account-uuid-rewrite.js';
@@ -130,6 +131,106 @@ const OAUTH_VERIFICATION_ERROR_CODE = 'verification_required';
 // A token missing a scope the endpoint needs (see isOAuthScopeInsufficient).
 const OAUTH_SCOPE_ERROR_CODE = 'oauth_scope_insufficient';
 const ERROR_BODY_INSPECTION_LIMIT = 64 * 1024;
+
+// A request that waits this long for its response headers gets one log line
+// saying where the time went. Sessions were seen sitting for one to four
+// minutes before the first byte, and nothing in the log said whether upstream
+// was slow to answer or the proxy was holding the request (an admission queue,
+// a 429 pause, an inline retry wait). 10s is well clear of a normal head and
+// well short of the hangs being chased. TEAMCLAUDE_SLOW_REQUEST_LOG_MS moves it;
+// 0 turns the line off.
+const DEFAULT_SLOW_REQUEST_LOG_MS = 10_000;
+
+/**
+ * The slow-request threshold in ms, or 0 for "never log". Read per request
+ * rather than at load, so a test can set it. Unset, empty, negative or
+ * unparseable mean the default, the same rule as the headerless-429 delay.
+ *
+ * @returns {number}
+ */
+function resolveSlowRequestLogMs() {
+  const raw = envVar('SLOW_REQUEST_LOG_MS');
+  if (raw == null || raw.trim() === '') return DEFAULT_SLOW_REQUEST_LOG_MS;
+  const env = Number(raw);
+  if (env === 0) return 0;
+  return env > 0 ? env : DEFAULT_SLOW_REQUEST_LOG_MS;
+}
+
+// An admission wait longer than this is worth its own line: it is the proxy,
+// not upstream, holding the request, and almost always a 429 pause on the
+// account. Once per request, so a long pause does not repeat itself per attempt.
+const ADMIT_WAIT_LOG_MS = 5_000;
+
+// How long a throttle 429's error body may take to arrive before the diagnostic
+// read gives up on it. The body is evidence, not something the retry logic
+// needs, so a stalled one must not add to the wait the client is already in.
+const RATE_LIMIT_DIAG_BODY_TIMEOUT_MS = 2_000;
+
+/**
+ * The one log line every upstream 429 produces: what upstream actually said.
+ *
+ * Without it the only trace of a 429 was the proxy's own reading of it ("waiting
+ * 60s", "looks IP-scoped"), and the 60 could be a fallback the proxy made up
+ * when upstream sent no retry-after at all. Upstream header fields and
+ * request correlation are bounded and kept on one line. The request body and
+ * credentials are never logged; unknown upstream error text is redacted.
+ *
+ * Can be tested without a network.
+ *
+ * @param {object} p
+ * @param {number|string} p.reqId  proxy request id
+ * @param {string|null|undefined} p.sessionId  validated client session id
+ * @param {string} p.account  account name
+ * @param {string|null|undefined} p.model  the request's model
+ * @param {number} p.attempt  retryCount of the attempt that drew the 429
+ * @param {boolean} p.requestScoped  no retry-after and no rate-limit headers
+ * @param {number} [p.retryAfterSeconds]  parsed delay from the retry branch
+ * @param {{ get(name: string): string|null, entries(): Iterable<[string, string]> }} p.headers  upstream response headers
+ * @param {Buffer|null} p.body  the error body, or null when it was not read
+ * @returns {string}
+ */
+export function formatRateLimitDiagnostic({ reqId, sessionId, account, model, attempt, requestScoped, retryAfterSeconds, headers, body }) {
+  const header = (/** @type {string} */ name, max = 80) => {
+    const v = headers.get(name);
+    return v == null ? 'none' : safeLine(v, max);
+  };
+  const retryAfterRaw = headers.get('retry-after');
+  const rawSeconds = parseInt(retryAfterRaw ?? '', 10);
+  const fallback = Number.isNaN(rawSeconds);
+  const parsed = retryAfterSeconds ?? (fallback ? resolveRateLimitFallbackRetryAfterSeconds() : rawSeconds);
+  /** @type {Record<string, string>} */
+  const limits = {};
+  for (const [key, value] of headers.entries()) {
+    if (key.startsWith('anthropic-ratelimit-') || key.startsWith('x-codex-')) {
+      limits[safeLine(key, 80)] = safeLine(value, 80);
+    }
+  }
+  let error = 'body unread';
+  if (body) {
+    try {
+      const parsedBody = JSON.parse(body.toString('utf8'))?.error;
+      // Error messages are upstream text, not a safe log field: a configured
+      // upstream may echo the prompt or Authorization header into them. Only
+      // exact, known, content-free messages are safe to print. Other messages
+      // retain their type, but not their potentially sensitive text.
+      const message = parsedBody?.message;
+      const safeMessage = typeof message === 'string' && /^(?:Number of request tokens has exceeded your per-minute rate limit|This model is not available\.)$/.test(message)
+        ? message : '[redacted]';
+      const type = typeof parsedBody?.type === 'string' && /^(?:rate_limit_error|overloaded_error|invalid_request_error|api_error)$/.test(parsedBody.type)
+        ? parsedBody.type : 'unknown';
+      error = `error.type=${type} error.message=${JSON.stringify(safeMessage)}`;
+    } catch {
+      error = 'error.type=unknown error.message="[redacted]"';
+    }
+  }
+  return `[TeamClaude] 429 from upstream request #${safeLine(reqId ?? 'unknown', 32)}`
+    + ` session=${safeLine(sessionId ?? 'none', 128)} on "${safeLine(account, 64)}"`
+    + ` (model ${safeLine(model ?? 'unknown', 64)}, attempt ${attempt}, request-scoped ${requestScoped ? 'yes' : 'no'}):`
+    + ` retry-after=${retryAfterRaw == null ? 'none' : safeLine(retryAfterRaw, 32)}`
+    + ` parsed=${parsed}s${fallback && !requestScoped ? ' (fallback used)' : ''}${requestScoped ? ' (not applied)' : ''}`
+    + ` request-id=${header('request-id')} cf-ray=${header('cf-ray')} x-should-retry=${header('x-should-retry', 16)}`
+    + ` ratelimit=${safeLine(JSON.stringify(limits), 2000)} ${error}`;
+}
 // How long an idle keep-alive connection is held open.
 //
 // Node's default is 5s, but a client's connection pool may hold the same socket
@@ -224,15 +325,23 @@ function isJsonContentType(value) {
 // Error payloads are normally tiny, but an alternate upstream is configurable.
 // Bound the diagnostic read so a hostile chunked 403 cannot make the proxy buffer
 // an arbitrary response merely to decide whether it should quarantine an account.
-async function readErrorBody(body, limit = ERROR_BODY_INSPECTION_LIMIT) {
+//
+// `timeoutMs` bounds the read in time as well, for a caller that only wants the
+// body as evidence: cancelling the reader ends the pending read, and a body cut
+// short that way reads as null rather than as a truncated payload.
+async function readErrorBody(body, limit = ERROR_BODY_INSPECTION_LIMIT, timeoutMs = 0) {
   if (!body) return Buffer.alloc(0);
   const reader = body.getReader();
   const chunks = [];
   let length = 0;
+  let timedOut = false;
+  const timer = timeoutMs > 0
+    ? setTimeout(() => { timedOut = true; reader.cancel().catch(() => {}); }, timeoutMs)
+    : null;
   try {
     while (true) {
       const { done, value } = await reader.read();
-      if (done) return Buffer.concat(chunks, length);
+      if (done) return timedOut ? null : Buffer.concat(chunks, length);
       length += value.byteLength;
       if (length > limit) {
         // Not awaited: on a tee branch (the 400 check) a cancel settles only
@@ -246,6 +355,7 @@ async function readErrorBody(body, limit = ERROR_BODY_INSPECTION_LIMIT) {
     await reader.cancel().catch(() => {});
     return null;
   } finally {
+    if (timer) clearTimeout(timer);
     reader.releaseLock();
   }
 }
@@ -2113,7 +2223,7 @@ export function createProxyRequestListener({ accountManager, upstream, logDir = 
       // retries and holds of this request keep them, and a reload applies to
       // subsequent requests.
       const output = hideActivity ? null : outputTrackerFor(config, hooks, reqId);
-      const ctx = { account: null, callerRequestId: callerId, status: null, attempt: 0, tried: new Set(), reauthed: new Set(), model, advisorModel, streamRequested: parseRequestStream(body), fleetMessageThreads: config?.messageThreads === true, pinnedIndex, provider, holdBudgetMs: holdMs, pinKey, onMessage, client, delivered: false, abandoned: false, onUsage: usageRecorder.onUsage, output, stripHeaders, stripOverage: shouldStripOverageHeaders(config), synthesizeQuota: shouldSynthesizeQuotaHeaders(config), poolQuota: shouldPoolQuotaHeaders(config), logLevel: resolveLogLevel(config), logMaxBodyBytes: resolveLogMaxBodyBytes(config) };
+      const ctx = { account: null, callerRequestId: callerId, status: null, sessionId, attempt: 0, tried: new Set(), reauthed: new Set(), model, advisorModel, streamRequested: parseRequestStream(body), fleetMessageThreads: config?.messageThreads === true, pinnedIndex, provider, holdBudgetMs: holdMs, pinKey, onMessage, client, delivered: false, abandoned: false, onUsage: usageRecorder.onUsage, output, stripHeaders, stripOverage: shouldStripOverageHeaders(config), synthesizeQuota: shouldSynthesizeQuotaHeaders(config), poolQuota: shouldPoolQuotaHeaders(config), logLevel: resolveLogLevel(config), logMaxBodyBytes: resolveLogMaxBodyBytes(config) };
       // Hold the session "in flight" across the WHOLE request (incl. retries and
       // a multi-minute streaming completion) so it stays counted as active and
       // never expires mid-request.
@@ -2158,6 +2268,10 @@ export function createProxyRequestListener({ accountManager, upstream, logDir = 
         // status of a row whose client will never read anything. It says
         // nothing about abandonment: that is still marked where it is observed.
         if (requestAbort.signal.aborted) ctx.status = 499;
+        // After the stream, but measured to the response headers: a long
+        // completion is not a slow request, a long wait for its first byte is.
+        // Never let the report itself fail the request.
+        try { reportSlowRequest(reqId, ctx); } catch { /* diagnostics only */ }
         // null = record nothing: the client walked away (neither an answer nor a
         // starvation), or this was not a completion at all. Abandonment is
         // observed where it happens, never inferred here: the proxy destroys the
@@ -2371,6 +2485,64 @@ function forgetRecoverableFailures(ctx, accountManager) {
     if (ctx.credentialRejected?.has(name) || ctx.unrenewed?.has(name)) continue;
     ctx.tried.delete(i);
   }
+}
+
+// waitForRetry for forwardRequest's own sleeps, booked against the request so
+// the slow-request line can say how much of the wait was the proxy choosing to
+// sleep (a 429 retry, an exhaustion hold) rather than upstream being slow.
+/**
+ * @param {{ signal?: AbortSignal, timing?: ReturnType<typeof newRequestTiming> }} ctx
+ * @param {number} ms
+ */
+async function requestWait(ctx, ms) {
+  const start = performance.now();
+  await waitForRetry(ms, ctx.signal);
+  if (ctx.timing) ctx.timing.waitMs += performance.now() - start;
+}
+
+/**
+ * Where one request's time went before its response headers, kept on ctx so
+ * the retries, which re-enter forwardRequest, all add to the same totals.
+ */
+function newRequestTiming() {
+  return {
+    startedAt: performance.now(),
+    /** Time spent in accountManager.admit(): the concurrency gate and 429 pauses. */
+    admitMs: 0,
+    /** Time the proxy spent sleeping on purpose: 429 retries and exhaustion holds. */
+    waitMs: 0,
+    /** Time from sending each upstream request to its response headers. */
+    upstreamMs: 0,
+    /** Upstream requests sent. */
+    attempts: 0,
+    /** When the last upstream response's headers arrived, or null if none did. */
+    headersAt: /** @type {number|null} */ (null),
+    lastStatus: /** @type {number|null} */ (null),
+    admitLogged: false,
+  };
+}
+
+// One line for a request that took too long to reach its response headers,
+// split into the phases that can be told apart. "other" is the remainder:
+// selection, token refreshes, reading a 429's body, and the like.
+/**
+ * @param {number|string} reqId
+ * @param {{ timing?: ReturnType<typeof newRequestTiming>, account?: string|null, model?: string|null, status?: number|null, sessionId?: string|null }} ctx
+ */
+function reportSlowRequest(reqId, ctx) {
+  const timing = ctx.timing;
+  const threshold = resolveSlowRequestLogMs();
+  if (!timing || threshold === 0) return;
+  const end = timing.headersAt ?? performance.now();
+  const total = end - timing.startedAt;
+  if (total <= threshold) return;
+  const ms = (/** @type {number} */ n) => Math.round(n);
+  const other = Math.max(0, total - timing.admitMs - timing.waitMs - timing.upstreamMs);
+  console.log(`[TeamClaude] slow request #${reqId} session=${safeLine(ctx.sessionId ?? 'none', 128)}: ${ms(total)}ms to response headers`
+    + ` on "${safeLine(ctx.account ?? 'none', 64)}" (model ${safeLine(ctx.model ?? 'unknown', 64)},`
+    + ` status ${timing.lastStatus ?? ctx.status ?? 'none'}, attempts ${timing.attempts})`
+    + ` — admit ${ms(timing.admitMs)}ms, retry waits ${ms(timing.waitMs)}ms, upstream ${ms(timing.upstreamMs)}ms, other ${ms(other)}ms`
+    + (timing.headersAt == null ? ' (no response headers arrived)' : ''));
 }
 
 function clientGone(res) {
@@ -3559,6 +3731,10 @@ async function relayOnClientCredential(req, res, upstream, sx, route, ctx) {
 
 export async function forwardRequest(req, res, body, accountManager, upstream, retryCount, hooks, reqId, ctx, logDir, sx, useSx) {
   const maxRetries = accountManager.accounts.length;
+  // Every retry re-enters here with the same ctx, so the first entry starts the
+  // clock and the rest add to it. The listener reports it once the request is
+  // over (reportSlowRequest).
+  ctx.timing ??= newRequestTiming();
   // This function is exported, so a caller may hand us a ctx built elsewhere.
   // The 401 path reads ctx.reauthed on every response; default it here rather
   // than trusting every construction site to include it.
@@ -3789,7 +3965,7 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
       const waitMs = Math.min(retryAfter * 1000, ctx.holdBudgetMs, 60_000);
       ctx.holdBudgetMs -= waitMs;
       console.log(`[TeamClaude] All accounts exhausted — holding connection, retry in ${Math.ceil(waitMs / 1000)}s (${Math.ceil(ctx.holdBudgetMs / 1000)}s budget left)`);
-      await waitForRetry(waitMs, ctx.signal);
+      await requestWait(ctx, waitMs);
       if (clientGone(res)) { ctx.abandoned = true; return; }
       forgetRecoverableFailures(ctx, accountManager);
       // A hold is a new attempt, not one more failover: the hops spent before
@@ -3802,7 +3978,7 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
     if (exhaustedRetries < 1 && retryAfter <= INLINE_RETRY_AFTER_MAX_SECONDS && holdsConnection(ctx.provider)) {
       ctx.exhaustedRetries = exhaustedRetries + 1;
       console.log(`[TeamClaude] All accounts exhausted — waiting ${retryAfter}s before retry`);
-      await waitForRetry(retryAfter * 1000, ctx.signal);
+      await requestWait(ctx, retryAfter * 1000);
       if (clientGone(res)) { ctx.abandoned = true; return; }
       forgetRecoverableFailures(ctx, accountManager);
       return forwardRequest(req, res, body, accountManager, upstream, retryCount, hooks, reqId, ctx, logDir, sx, route);
@@ -3977,7 +4153,26 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
     // clientGone — so this is a pure abandonment exit. It fires while an account
     // is paused or ramping, which is exactly when clients give up, so leaving it
     // unmarked clustered false positives where the signal is read hardest.
-    if (!await accountManager.admit(account.index, () => clientGone(res))) { ctx.abandoned = true; return; }
+    //
+    // Timed, because a wait here is the proxy holding the request, and from the
+    // client it looks exactly like upstream being slow. The pause state is read
+    // before the wait, since by the time it is over the pause has lapsed.
+    const admitAccount = accountManager.accounts[account.index];
+    const pausedForMs = admitAccount?.pausedUntil ? admitAccount.pausedUntil - Date.now() : 0;
+    const inFlightAtAdmit = admitAccount?.inFlight ?? 0;
+    const admitStart = performance.now();
+    const admitted = await accountManager.admit(account.index, () => clientGone(res));
+    const admitMs = performance.now() - admitStart;
+    if (ctx.timing) {
+      ctx.timing.admitMs += admitMs;
+      if (admitMs > ADMIT_WAIT_LOG_MS && !ctx.timing.admitLogged) {
+        ctx.timing.admitLogged = true;
+        console.log(`[TeamClaude] admit wait on "${safeLine(account.name, 64)}": ${Math.round(admitMs)}ms (request #${reqId}; `
+          + (pausedForMs > 0 ? `429 pause had ${Math.ceil(pausedForMs / 1000)}s left` : 'not paused, so the concurrency ramp')
+          + `; ${inFlightAtAdmit} in flight on entry${admitted ? '' : '; the client left while waiting'})`);
+      }
+    }
+    if (!admitted) { ctx.abandoned = true; return; }
     accountManager.beginActivity(account.index);
     activityOpened = true;
     // This request may have selected the account before another in-flight request
@@ -4017,6 +4212,8 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
     // overwrites it, so the time that survives is the answering attempt's, and
     // a buffered answer is timed from here rather than from the client's ask.
     ctx.output?.dispatched();
+    const fetchStart = performance.now();
+    if (ctx.timing) ctx.timing.attempts++;
     try {
       upstreamRes = await upstreamFetch(upstreamUrl, {
         method,
@@ -4045,6 +4242,15 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
     } finally {
       admittedLoad = accountManager.release(account.index,
         { successful: !!upstreamRes && upstreamRes.status < 400 }) || 0;
+      // A fetch that threw still spent its time upstream: a headers timeout is
+      // the slowest upstream answer there is.
+      if (ctx.timing) {
+        ctx.timing.upstreamMs += performance.now() - fetchStart;
+        if (upstreamRes) {
+          ctx.timing.headersAt = performance.now();
+          ctx.timing.lastStatus = upstreamRes.status;
+        }
+      }
     }
 
     let upstreamBody = upstreamRes.body;
@@ -4117,14 +4323,27 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
       // together they turned one request's problem into a fleet-wide stall
       // (#288). A throttle, by contrast, always carries the headers.
       const requestScoped = retryAfterHeader == null && Object.keys(rateLimitHeaders).length === 0;
-      // The body is diagnostic for a request-scoped refusal (it names the
-      // reason) and noise otherwise.
+      // The body names the reason for a request-scoped refusal, and is evidence
+      // for every other 429: the line below is the only record of what upstream
+      // said, since the request log writes nothing for a 429. A throttle's body
+      // is read under a short time bound, because nothing below depends on it.
+      let raw = null;
+      if (requestScoped) {
+        raw = await readErrorBody(upstreamRes.body).catch(() => null);
+      } else {
+        raw = await readErrorBody(upstreamRes.body, ERROR_BODY_INSPECTION_LIMIT, RATE_LIMIT_DIAG_BODY_TIMEOUT_MS).catch(() => null);
+        // readErrorBody consumes the body or cancels its reader on overflow/timeout.
+      }
+      try {
+        console.log(formatRateLimitDiagnostic({
+          reqId, sessionId: ctx.sessionId, account: account.name, model: ctx.model, attempt: retryCount, requestScoped,
+          retryAfterSeconds: retryAfter,
+          headers: upstreamRes.headers, body: raw,
+        }));
+      } catch { /* diagnostics only */ }
       let refusal = '';
       if (requestScoped) {
-        const raw = await readErrorBody(upstreamRes.body).catch(() => null);
         try { refusal = raw ? String(JSON.parse(raw.toString('utf8'))?.error?.message || '') : ''; } catch { refusal = ''; }
-      } else {
-        await upstreamRes.body?.cancel();
       }
 
       // Durable quota exhaustion vs. a transient rate limit. A "rejected" unified
@@ -4318,7 +4537,7 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
           ctx.requestScopedRetried = true;
           console.log(`[TeamClaude] 429 followed the request onto "${account.name}" with no rate-limit headers — retrying it once on the same account in ${retryDelayMs}ms`
             + (refusal ? ` (${safeLine(refusal)})` : ''));
-          await waitForRetry(retryDelayMs, ctx.signal);
+          await requestWait(ctx, retryDelayMs);
           if (clientGone(res)) { ctx.abandoned = true; return; }
           ctx.hopTo = account.index;
           return forwardRequest(req, res, body, accountManager, upstream, retryCount + 1, hooks, reqId, ctx, logDir, sx, route);
@@ -4365,7 +4584,7 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
           && holdsConnection(ctx.provider)) {
           ctx.requestScopedRetried = true;
           console.log(`[TeamClaude] 429 with no rate-limit headers on "${account.name}" — retrying once in ${retryDelayMs}ms${refusal ? ` (${safeLine(refusal)})` : ''}`);
-          await waitForRetry(retryDelayMs, ctx.signal);
+          await requestWait(ctx, retryDelayMs);
           if (clientGone(res)) { ctx.abandoned = true; return; }
           return forwardRequest(req, res, body, accountManager, upstream, retryCount + 1, hooks, reqId, ctx, logDir, sx, nextUseSx);
         }
@@ -4384,7 +4603,7 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
       // rate-limited account can't loop forever tying up the connection.
       if (retryAfter <= RATE_LIMIT_ABSORB_MAX_SECONDS && retryCount < maxRetries && holdsConnection(ctx.provider)) {
         console.log(`[TeamClaude] Rate-limit 429 on "${account.name}" — waiting ${retryAfter}s, retrying same account (no switch)`);
-        await waitForRetry(retryAfter * 1000, ctx.signal);
+        await requestWait(ctx, retryAfter * 1000);
         if (clientGone(res)) { ctx.abandoned = true; return; }
         return forwardRequest(req, res, body, accountManager, upstream, retryCount + 1, hooks, reqId, ctx, logDir, sx, nextUseSx);
       }

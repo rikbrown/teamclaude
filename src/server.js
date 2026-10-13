@@ -175,12 +175,13 @@ const RATE_LIMIT_DIAG_BODY_TIMEOUT_MS = 2_000;
  * @param {string|null|undefined} p.model  the request's model
  * @param {number} p.attempt  retryCount of the attempt that drew the 429
  * @param {boolean} p.requestScoped  no retry-after and no rate-limit headers
+ * @param {boolean} [p.noRetry]  upstream explicitly declined a retry
  * @param {number} [p.retryAfterSeconds]  parsed delay from the retry branch
  * @param {{ get(name: string): string|null, entries(): Iterable<[string, string]> }} p.headers  upstream response headers
  * @param {Buffer|null} p.body  the error body, or null when it was not read
  * @returns {string}
  */
-export function formatRateLimitDiagnostic({ reqId, sessionId, account, model, attempt, requestScoped, retryAfterSeconds, headers, body }) {
+export function formatRateLimitDiagnostic({ reqId, sessionId, account, model, attempt, requestScoped, noRetry = false, retryAfterSeconds, headers, body }) {
   const header = (/** @type {string} */ name, max = 80) => {
     const v = headers.get(name);
     return v == null ? 'none' : safeLine(v, max);
@@ -188,7 +189,7 @@ export function formatRateLimitDiagnostic({ reqId, sessionId, account, model, at
   const retryAfterRaw = headers.get('retry-after');
   const rawSeconds = parseInt(retryAfterRaw ?? '', 10);
   const fallback = Number.isNaN(rawSeconds);
-  const parsed = retryAfterSeconds ?? (fallback ? resolveRateLimitFallbackRetryAfterSeconds() : rawSeconds);
+  const parsed = noRetry ? null : (retryAfterSeconds ?? (fallback ? resolveRateLimitFallbackRetryAfterSeconds() : rawSeconds));
   /** @type {Record<string, string>} */
   const limits = {};
   for (const [key, value] of headers.entries()) {
@@ -218,7 +219,8 @@ export function formatRateLimitDiagnostic({ reqId, sessionId, account, model, at
     + ` session=${safeLine(sessionId ?? 'none', 128)} on "${safeLine(account, 64)}"`
     + ` (model ${safeLine(model ?? 'unknown', 64)}, attempt ${attempt}, request-scoped ${requestScoped ? 'yes' : 'no'}):`
     + ` retry-after=${retryAfterRaw == null ? 'none' : safeLine(retryAfterRaw, 32)}`
-    + ` parsed=${parsed}s${fallback && !requestScoped ? ' (fallback used)' : ''}${requestScoped ? ' (not applied)' : ''}`
+    + (noRetry ? ' parsed=not applied (upstream says do not retry)'
+      : ` parsed=${parsed}s${fallback && !requestScoped ? ' (fallback used)' : ''}${requestScoped ? ' (not applied)' : ''}`)
     + ` request-id=${header('request-id')} cf-ray=${header('cf-ray')} x-should-retry=${header('x-should-retry', 16)}`
     + ` ratelimit=${safeLine(JSON.stringify(limits), 2000)} ${error}`;
 }
@@ -3589,7 +3591,12 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
     // the parser by provider, so keeping only Anthropic's prefix handed a Codex
     // account an empty object and its quota never landed.
     const rateLimitHeaders = collectRateLimitHeaders(upstreamRes.headers);
-    accountManager.updateQuota(account.index, rateLimitHeaders, ctx.model);
+    const nonRetryable429 = upstreamRes.status === 429
+      && upstreamRes.headers.get('x-should-retry')?.trim().toLowerCase() === 'false';
+    // A refusal about this request may carry incidental account quota headers.
+    // Do not turn its status or reset into an account-wide hold or a new quota
+    // verdict. A healthy request will still refresh the account's quota.
+    if (!nonRetryable429) accountManager.updateQuota(account.index, rateLimitHeaders, ctx.model);
 
     // Any response at all came back through the account's routing proxy.
     accountManager.clearRoutingFailed(account.index);
@@ -3604,10 +3611,22 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
     // _selectProbe) clear its own hold and return the fleet to service.
     if (upstreamRes.status !== 429) accountManager.clearRateLimited(account.index);
 
-    // Two kinds of 429 are handled differently below: a quota rejection rotates
-    // to another account; a transient rate-limit throttle pauses + retries the
-    // same account (never rotates — see #84).
-    if (upstreamRes.status === 429) {
+    // Upstream can explicitly reject a retry even when incidental quota headers
+    // are present. Leave the original body unread for the normal relay below:
+    // diagnostic buffering would consume the error the client needs to see.
+    if (nonRetryable429) {
+      try {
+        console.log(formatRateLimitDiagnostic({
+          reqId, sessionId: ctx.sessionId, account: account.name, model: ctx.model,
+          attempt: retryCount, requestScoped: upstreamRes.headers.get('retry-after') == null && Object.keys(rateLimitHeaders).length === 0, noRetry: true,
+          headers: upstreamRes.headers, body: null,
+        }));
+      } catch { /* diagnostics only */ }
+    }
+
+    // Other 429s retain their established classification: a quota rejection
+    // rotates; a transient throttle pauses + retries the same account.
+    if (upstreamRes.status === 429 && !nonRetryable429) {
       // Clamp Retry-After to a sane window: missing/invalid uses the configured
       // fallback, and out-of-range values are bounded to [1, 300]. A negative
       // value would otherwise bypass the wait cap — setTimeout returns
@@ -4085,6 +4104,9 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
     getLog()?.write(`\n\n=== RESPONSE ${upstreamRes.status} ===\n${formatHeaders(upstreamRes.headers)}`);
 
     ctx.status = upstreamRes.status;
+    // This explicit, request-specific rejection is an answer the client can
+    // act on, not evidence that its session or account is starved.
+    const deliveredStatus = nonRetryable429 || answeredStatus(upstreamRes.status);
 
     // Build response headers (skip hop-by-hop and encoding headers). The
     // connection-specific names are also illegal on an HTTP/2 response — when
@@ -4126,7 +4148,7 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
       const l = getLog();
       if (l) { l.body('RESPONSE BODY', null); l.end(); }
       res.end();
-      ctx.delivered = answeredStatus(upstreamRes.status);
+      ctx.delivered = deliveredStatus;
       return;
     }
 
@@ -4142,7 +4164,7 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
         // which is the failure the token counters cannot see, since a stream
         // that emitted message_start has already recorded a usage report.
         if (clientGone(res)) ctx.abandoned = true;
-        else ctx.delivered = answeredStatus(upstreamRes.status);
+        else ctx.delivered = deliveredStatus;
       } finally {
         // Also on the failure path: without the note a capped body reads as a
         // stream that simply stopped, which is the other thing that happens here.
@@ -4155,7 +4177,7 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
       const l = getLog();
       if (l) { l.body('RESPONSE BODY', buf, contentType); l.end(); }
       res.end(buf);
-      ctx.delivered = answeredStatus(upstreamRes.status);
+      ctx.delivered = deliveredStatus;
     }
   } catch (err) {
     // Two of the things that can throw here are not upstream errors at all:

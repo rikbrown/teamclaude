@@ -29,17 +29,18 @@ function captureLog() {
   return { lines, restore: () => { console.log = orig; } };
 }
 
-async function withProxy(names, handler, fn) {
+async function withProxy(names, handler, fn, configOverrides = {}) {
   const seen = [];
   const upstream = http.createServer((req, res) => {
     seen.push(tokenOf(req));
     const hit = seen.length;
-    req.resume();
-    req.on('end', () => handler(req, res, hit));
+    let raw = '';
+    req.on('data', chunk => { raw += chunk; });
+    req.on('end', () => handler(req, res, hit, JSON.parse(raw).model));
   });
   const upstreamPort = await listen(upstream);
   const am = new AccountManager(names.map(account), 0.98, { refreshFn: async () => { throw new Error('no refresh'); } });
-  const proxy = createProxyServer(am, { proxy: { apiKey: 'k' }, upstream: `http://127.0.0.1:${upstreamPort}` });
+  const proxy = createProxyServer(am, { proxy: { apiKey: 'k' }, upstream: `http://127.0.0.1:${upstreamPort}`, ...configOverrides });
   const proxyPort = await listen(proxy);
   try { await fn({ am, proxyPort, seen }); } finally { proxy.close(); upstream.close(); }
 }
@@ -49,7 +50,7 @@ async function post(port, model = 'claude-test') {
     method: 'POST', headers: { 'content-type': 'application/json', 'x-claude-code-session-id': 'session-abc' },
     body: JSON.stringify({ model, messages: [] }),
   });
-  return { status: res.status, body: await res.text(), retryAfter: res.headers.get('retry-after') };
+  return { status: res.status, body: await res.text(), retryAfter: res.headers.get('retry-after'), headers: res.headers };
 }
 
 // The two methods the formatter reads off a fetch Headers object.
@@ -103,6 +104,101 @@ test('the 429 line says when the body was not read, and redacts a non-JSON body'
   // A request-scoped 429 never uses the fallback; an unknown body is private.
   assert.match(html, /request-scoped yes\): retry-after=none parsed=60s \(not applied\) request-id/);
   assert.match(html, /error\.type=unknown error\.message="\[redacted\]"$/);
+});
+
+test('x-should-retry false returns the original 429 and leaves healthy traffic unpaused', async () => {
+  const seen = [];
+  const responseBody = JSON.stringify({ type: 'error', error: { type: 'rate_limit_error', message: 'Usage credits are required for fast mode.' } });
+  const log = captureLog();
+  let firstFast;
+  const gotFast = new Promise(resolve => { firstFast = resolve; });
+  try {
+    await withProxy(['a', 'b'], (req, res, hit, model) => {
+      seen.push({ token: tokenOf(req), model });
+      if (model === 'claude-fast') {
+        res.writeHead(429, {
+          'content-type': 'application/json',
+          'x-should-retry': 'false',
+          'anthropic-ratelimit-unified-overage-disabled-reason': 'org_level_disabled',
+          'anthropic-ratelimit-unified-reset': '1793491200',
+          'request-id': 'req_fast_mode',
+          'connection': 'keep-alive',
+        });
+        res.end(responseBody);
+        firstFast();
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{"ok":true}');
+    }, async ({ am, proxyPort }) => {
+      const ask = (model, path) => fetch(`http://127.0.0.1:${proxyPort}${path}`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ model, messages: [] }), signal: AbortSignal.timeout(4_000),
+      });
+      const refused = ask('claude-fast', '/v1/messages');
+      await gotFast;
+      const healthy = ask('claude-healthy', '/tc-acct/a/v1/messages');
+      const [fastResult, healthyResult] = await Promise.all([refused, healthy]);
+      assert.equal(fastResult.status, 429);
+      assert.equal(await fastResult.text(), responseBody, 'upstream error body must not be rewritten');
+      assert.equal(fastResult.headers.get('x-should-retry'), 'false');
+      assert.equal(fastResult.headers.get('request-id'), 'req_fast_mode');
+      assert.equal(fastResult.headers.get('anthropic-ratelimit-unified-overage-disabled-reason'), 'org_level_disabled');
+      assert.equal(fastResult.headers.get('anthropic-ratelimit-unified-reset'), '1793491200');
+      assert.equal(fastResult.headers.get('retry-after'), null, 'no made-up delay reaches the client');
+      assert.equal(healthyResult.status, 200);
+      assert.deepEqual(JSON.parse(await healthyResult.text()), { ok: true });
+      assert.deepEqual(seen, [
+        { token: 't-a', model: 'claude-fast' },
+        { token: 't-a', model: 'claude-healthy' },
+      ], 'no retry or failover; the healthy call still uses the first account');
+      assert.equal(am.isPaused(0), false);
+      assert.equal(am.accounts[0].rampStartedAt, null, 'the rejection must not arm the concurrency ramp');
+      assert.equal(am.accounts[0].status, 'active');
+    });
+  } finally { log.restore(); }
+  const diag = log.lines.filter(l => l.startsWith('[TeamClaude] 429 from upstream'));
+  assert.equal(diag.length, 1, log.lines.join('\n'));
+  assert.match(diag[0], /x-should-retry=false/);
+  assert.match(diag[0], /parsed=not applied/);
+});
+
+test('explicit no-retry outranks a quota rejection and keeps existing overage filtering', async () => {
+  const log = captureLog();
+  try {
+    await withProxy(['a', 'b'], (req, res, hit, model) => {
+      if (model === 'claude-fast') {
+        res.writeHead(429, {
+          'content-type': 'application/json', 'x-should-retry': 'false', 'retry-after': '30',
+          'anthropic-ratelimit-unified-status': 'rejected',
+          'anthropic-ratelimit-unified-5h-status': 'rejected',
+          'anthropic-ratelimit-unified-5h-utilization': '1',
+          'anthropic-ratelimit-unified-overage-disabled-reason': 'org_level_disabled',
+        });
+        res.end('{"type":"error","error":{"type":"rate_limit_error","message":"Usage credits are required for fast mode."}}');
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{"ok":true}');
+    }, async ({ am, proxyPort, seen }) => {
+      am.accounts[0].quota.unified5h = 0.35;
+      const result = await post(proxyPort, 'claude-fast');
+      assert.equal(result.status, 429);
+      assert.equal(result.retryAfter, '30', 'an explicit upstream header remains unchanged');
+      assert.equal(result.headers.get('x-should-retry'), 'false');
+      assert.equal(result.headers.get('anthropic-ratelimit-unified-5h-status'), 'rejected');
+      assert.equal(result.headers.get('anthropic-ratelimit-unified-overage-disabled-reason'), null,
+        'the existing optional overage filter still applies');
+      assert.match(result.body, /Usage credits are required for fast mode/);
+      assert.deepEqual(seen, ['t-a']);
+      assert.equal(am.accounts[0].status, 'active');
+      assert.equal(am.isPaused(0), false);
+      assert.equal(am.accounts[0].quota.unified5h, 0.35, 'the request-only refusal is not stored as exhausted quota');
+      assert.equal((await post(proxyPort, 'claude-healthy')).status, 200);
+    }, { stripOverageHeaders: true });
+  } finally { log.restore(); }
+  const diag = log.lines.find(l => l.startsWith('[TeamClaude] 429 from upstream'));
+  assert.match(diag, /retry-after=30 parsed=not applied \(upstream says do not retry\)/);
 });
 
 test('a throttle 429 logs its evidence and is still paused and retried on the same account', async () => {

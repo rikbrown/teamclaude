@@ -29,7 +29,7 @@ function captureLog() {
   return { lines, restore: () => { console.log = orig; } };
 }
 
-async function withProxy(names, handler, fn) {
+async function withProxy(names, handler, fn, configOverrides = {}) {
   const seen = [];
   const upstream = http.createServer((req, res) => {
     seen.push(tokenOf(req));
@@ -39,7 +39,7 @@ async function withProxy(names, handler, fn) {
   });
   const upstreamPort = await listen(upstream);
   const am = new AccountManager(names.map(account), 0.98, { refreshFn: async () => { throw new Error('no refresh'); } });
-  const proxy = createProxyServer(am, { proxy: { apiKey: 'k' }, upstream: `http://127.0.0.1:${upstreamPort}` });
+  const proxy = createProxyServer(am, { proxy: { apiKey: 'k' }, upstream: `http://127.0.0.1:${upstreamPort}`, ...configOverrides });
   const proxyPort = await listen(proxy);
   try { await fn({ am, proxyPort, seen }); } finally { proxy.close(); upstream.close(); }
 }
@@ -49,7 +49,7 @@ async function post(port, model = 'claude-test') {
     method: 'POST', headers: { 'content-type': 'application/json', 'x-claude-code-session-id': 'session-abc' },
     body: JSON.stringify({ model, messages: [] }),
   });
-  return { status: res.status, body: await res.text(), retryAfter: res.headers.get('retry-after') };
+  return { status: res.status, body: await res.text(), retryAfter: res.headers.get('retry-after'), headers: res.headers };
 }
 
 // The two methods the formatter reads off a fetch Headers object.
@@ -103,6 +103,79 @@ test('the 429 line says when the body was not read, and redacts a non-JSON body'
   // A request-scoped 429 never uses the fallback; an unknown body is private.
   assert.match(html, /request-scoped yes\): retry-after=none parsed=60s \(not applied\) request-id/);
   assert.match(html, /error\.type=unknown error\.message="\[redacted\]"$/);
+});
+
+// Upstream's #555 decides what a no-retry 429 does (relayed untouched, nothing
+// paused; a spent quota window still rotates). These hold only the evidence
+// line this fork writes for it.
+test('a no-retry 429 logs one evidence line and leaves its body for the client', async () => {
+  const responseBody = JSON.stringify({ type: 'error', error: { type: 'rate_limit_error', message: 'Usage credits are required for fast mode.' } });
+  const log = captureLog();
+  try {
+    await withProxy(['a', 'b'], (req, res) => {
+      res.writeHead(429, {
+        'content-type': 'application/json',
+        'x-should-retry': 'false',
+        'anthropic-ratelimit-unified-overage-disabled-reason': 'org_level_disabled',
+        'request-id': 'req_fast_mode',
+      });
+      res.end(responseBody);
+    }, async ({ proxyPort, seen }) => {
+      const result = await post(proxyPort, 'claude-fast');
+      assert.equal(result.status, 429);
+      assert.equal(result.body, responseBody, 'the diagnostic must not consume the body the client needs');
+      assert.deepEqual(seen, ['t-a']);
+    });
+  } finally { log.restore(); }
+  const diag = log.lines.filter(l => l.startsWith('[TeamClaude] 429 from upstream'));
+  assert.equal(diag.length, 1, log.lines.join('\n'));
+  assert.match(diag[0], /retry-after=none parsed=not applied \(upstream says do not retry\) request-id=req_fast_mode/);
+  assert.match(diag[0], /x-should-retry=false/);
+});
+
+test('a no-retry 429 names its own retry-after as not applied, and keeps the overage filter', async () => {
+  const log = captureLog();
+  try {
+    await withProxy(['a', 'b'], (req, res) => {
+      res.writeHead(429, {
+        'content-type': 'application/json', 'x-should-retry': 'false', 'retry-after': '30',
+        'anthropic-ratelimit-unified-overage-disabled-reason': 'org_level_disabled',
+      });
+      res.end('{"type":"error","error":{"type":"rate_limit_error","message":"Usage credits are required for fast mode."}}');
+    }, async ({ proxyPort }) => {
+      const result = await post(proxyPort, 'claude-fast');
+      assert.equal(result.status, 429);
+      assert.equal(result.retryAfter, '30', 'an explicit upstream header remains unchanged');
+      assert.equal(result.headers.get('anthropic-ratelimit-unified-overage-disabled-reason'), null,
+        'the existing optional overage filter still applies');
+    }, { stripOverageHeaders: true });
+  } finally { log.restore(); }
+  const diag = log.lines.find(l => l.startsWith('[TeamClaude] 429 from upstream'));
+  assert.match(diag, /retry-after=30 parsed=not applied \(upstream says do not retry\)/);
+});
+
+test('a no-retry 429 that spends a quota window is logged as a quota rejection, and rotates', async () => {
+  const log = captureLog();
+  try {
+    await withProxy(['a', 'b'], (req, res, hit) => {
+      if (hit === 1) {
+        res.writeHead(429, {
+          'content-type': 'application/json', 'x-should-retry': 'false', 'retry-after': '30',
+          'anthropic-ratelimit-unified-5h-status': 'rejected',
+          'anthropic-ratelimit-unified-5h-utilization': '1',
+        });
+        res.end('{"type":"error","error":{"type":"rate_limit_error","message":"limit"}}');
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{"ok":true}');
+    }, async ({ proxyPort, seen }) => {
+      assert.equal((await post(proxyPort, 'claude-fast')).status, 200);
+      assert.deepEqual(seen, ['t-a', 't-b']);
+    });
+  } finally { log.restore(); }
+  const diag = log.lines.find(l => l.startsWith('[TeamClaude] 429 from upstream'));
+  assert.match(diag, /retry-after=30 parsed=30s /);
 });
 
 test('a throttle 429 logs its evidence and is still paused and retried on the same account', async () => {

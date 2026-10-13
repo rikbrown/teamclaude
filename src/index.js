@@ -870,7 +870,7 @@ async function serverCommand() {
     };
     hooks.onRequestRouted = (id, info) => {
       const r = inFlight.get(id);
-      if (r) r.account = info.account;
+      if (r) { r.account = info.account; r.viaSx = info.viaSx === true; }
     };
     hooks.onRequestEnd = (id, info) => {
       const r = inFlight.get(id);
@@ -884,7 +884,8 @@ async function serverCommand() {
       const sid = info.sessionId ? `${info.sessionId.slice(0, 6)} ` : '';
       const client = (info.client || r?.client) ? `[${info.client || r.client}] ` : '';
       const pin = (info.pinned || r?.pinned) ? ' [pin]' : '';
-      writeActivity(`${client}${sid}${info.method} ${info.path}${model} → ${acct}${pin} (${info.status}, ${dur}s)`);
+      const sx = (info.account ? info.viaSx : r?.viaSx) === true ? ' via sx' : '';
+      writeActivity(`${client}${sid}${info.method} ${info.path}${model} → ${acct}${sx}${pin} (${info.status}, ${dur}s)`);
     };
     // Tee console output to the activity log as well
     const origLog = console.log;

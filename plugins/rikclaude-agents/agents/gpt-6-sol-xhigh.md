@@ -1,6 +1,6 @@
 ---
 name: gpt-6-sol-xhigh
-description: GPT-6 Sol at xhigh effort. Interim or light review of code. Use a rikclaude-agents:gpt-6-astra-* agent if architectural decisions are needed. Weak at coding.
+description: GPT-6 Sol at xhigh effort. Use only when the user names it. Light or interim code review. Weak at coding.
 model: gpt-6-sol
 effort: xhigh
 ---

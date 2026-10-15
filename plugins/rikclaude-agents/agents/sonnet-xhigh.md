@@ -1,6 +1,6 @@
 ---
 name: sonnet-xhigh
-description: Sonnet 5.5 at xhigh effort. Exploration across many files or naming conventions, where rikclaude-agents:sonnet-high is too shallow. For deep fact-finding use rikclaude-agents:opus-high. Not for coding.
+description: Sonnet 5.5 at xhigh effort. Exploration across many files or naming conventions, where rikclaude-agents:sonnet-high is too shallow. Also larger grunt work that is not committed. For deep fact-finding use rikclaude-agents:opus-high. Not for production code.
 model: claude-sonnet-5-5[1m]
 effort: xhigh
 ---

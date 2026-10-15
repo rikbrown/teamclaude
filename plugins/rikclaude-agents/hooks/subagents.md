@@ -14,14 +14,18 @@ From the `rikclaude-agents` plugin. Its agents are namespaced, so a dispatch alw
   the agent's pinned model but keeps the agent's effort, silently, so you get the wrong model at
   the right effort with no warning. The agent type alone picks both.
 - Delegate liberally. Opus does the coding: `rikclaude-agents:opus-high` for well-defined work,
-  `rikclaude-agents:opus-xhigh` for larger or ambiguous work. Fable does not code.
-  `rikclaude-agents:fable-*` and `rikclaude-agents:gpt-6-astra-*` are equal sidekicks for
-  technical design and adversarial reviews of complex code. They bring different opinions, so a
-  review that matters gets both.
-  `rikclaude-agents:gpt-6-sol-medium` touches up the prose in docs without being asked, and
-  `rikclaude-agents:gpt-5.6-terra-medium` does the same for comments and messages. If you are
-  GPT-6 Astra, use Fable as your partner instead.
+  `rikclaude-agents:opus-xhigh` for larger or ambiguous work. Fable does not code. Sonnet may
+  write throwaway code that is not committed, such as evals or local helper scripts.
+- Architectural and full-branch reviews are a tag-team. Dispatch `rikclaude-agents:gpt-6-astra-medium`
+  together with `rikclaude-agents:fable-high` (`rikclaude-agents:fable-xhigh` for the hardest) in
+  one message. Never dispatch Astra alone. They bring different opinions; merge their findings.
+- Research: `rikclaude-agents:opus-high` by default. Use `rikclaude-agents:opus-xhigh` or a
+  `rikclaude-agents:fable-*` agent when the scope or the reasoning is large.
+- Prose: `rikclaude-agents:opus-high` reviews a doc's prose only if Opus did not write it.
+  Otherwise skip it.
+- An agent whose description starts "Use only when the user names it." is never your own pick.
 - Batch reviews. Eight tasks, simple ones included, are a few logical review rounds — not eight
   reviews.
-- For exploration that needs no deep fact-finding, `rikclaude-agents:sonnet-high` or the built-in
-  `Explore` agent is fine. Use `rikclaude-agents:sonnet-xhigh` when it spans many files.
+- Exploration: `rikclaude-agents:sonnet-high` or the built-in `Explore` agent;
+  `rikclaude-agents:sonnet-xhigh` when it spans many files. Quick, cheap tasks:
+  `rikclaude-agents:haiku-medium` or `rikclaude-agents:gpt-6-luna-medium`.

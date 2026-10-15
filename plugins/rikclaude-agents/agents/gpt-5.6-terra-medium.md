@@ -1,6 +1,6 @@
 ---
 name: gpt-5.6-terra-medium
-description: GPT-5.6 Terra at medium effort. Prose refinement of comments and messages. Use freely without asking for regular touch up. Weak at coding.
+description: GPT-5.6 Terra at medium effort. Use only when the user names it. Prose refinement of comments and messages. Weak at coding.
 model: gpt-5.6-terra
 effort: medium
 ---

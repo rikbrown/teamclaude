@@ -1,6 +1,6 @@
 ---
 name: gpt-6-luna-medium
-description: GPT-6 Luna at medium effort. Haiku-level tasks only. Weak at coding.
+description: GPT-6 Luna at medium effort. Quick, cheap tasks. On par with rikclaude-agents:haiku-medium. Weak at coding.
 model: gpt-6-luna
 effort: medium
 ---

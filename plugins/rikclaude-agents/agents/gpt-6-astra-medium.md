@@ -1,6 +1,6 @@
 ---
 name: gpt-6-astra-medium
-description: GPT-6 Astra at medium effort. Engineering sidekick, on par with Fable. Full-branch, architectural or technical design review.
+description: GPT-6 Astra at medium effort. The Astra half of the review tag-team for architectural or full-branch review. Dispatch it only together with rikclaude-agents:fable-high or rikclaude-agents:fable-xhigh, never alone.
 model: gpt-6-astra
 effort: medium
 ---

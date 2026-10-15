@@ -15,7 +15,9 @@ From the `rikclaude-agents` plugin. Its agents are namespaced, so a dispatch alw
   the right effort with no warning. The agent type alone picks both.
 - Delegate liberally. Opus does the coding: `rikclaude-agents:opus-high` for well-defined work,
   `rikclaude-agents:opus-xhigh` for larger or ambiguous work. Fable does not code. Sonnet may
-  write throwaway code that is not committed, such as evals or local helper scripts.
+  write code that only developers run: `rikclaude-agents:sonnet-high` for throwaway code that is
+  not committed, `rikclaude-agents:sonnet-xhigh` for committed internal tooling such as dev CLIs,
+  CI and build config, or evals. If a bug in it can reach a user, it goes to Opus.
 - Architectural and full-branch reviews are a tag-team. Dispatch `rikclaude-agents:gpt-6-astra-medium`
   together with `rikclaude-agents:fable-high` (`rikclaude-agents:fable-xhigh` for the hardest) in
   one message. Never dispatch Astra alone. They bring different opinions; merge their findings.

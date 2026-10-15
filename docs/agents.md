@@ -5,7 +5,7 @@ plus the routing policy that goes with them. Install it and a session can say "d
 `rikclaude-agents:gpt-6-astra-high`" and get exactly that model at exactly that effort, every
 time.
 
-The models it names are the ones a TeamClaude fleet serves — `fable[1m]`, `claude-opus-5-5[1m]` and `claude-sonnet-5-5[1m]` for Claude,
+The models it names are the ones a TeamClaude fleet serves — `fable[1m]`, `claude-opus-5-5[1m]`, `claude-sonnet-5-5[1m]` and `claude-haiku-5-5[1m]` for Claude,
 `gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna` and `gpt-5.6-terra` through the [Codex sidecar](openai.md). On a plain Claude
 Code install, with no fleet behind it, the GPT agents resolve to model ids nothing can answer.
 
@@ -65,13 +65,17 @@ at the moment it picks an agent, and they say more than this table does.
 
 | Model | Agents | Shape of the work |
 | --- | --- | --- |
-| `fable[1m]` | `fable-medium`, `fable-high`, `fable-xhigh` | Engineering sidekick on par with GPT-6 Astra: full-branch, architectural and design review, `xhigh` for the most challenging. Not code |
-| `claude-opus-5-5[1m]` | `opus-high`, `opus-xhigh` | The coding: well-defined work at `high`, larger or ambiguous work at `xhigh`. Also fact-finding |
-| `claude-sonnet-5-5[1m]` | `sonnet-high`, `sonnet-xhigh` | Exploration without deep fact-finding, `xhigh` when it spans many files. Not code |
-| `gpt-6-astra` | `gpt-6-astra-medium`, `gpt-6-astra-high` | Engineering sidekick on par with Fable: full-branch, architectural and design review |
-| `gpt-6-sol` | `gpt-6-sol-medium`, `gpt-6-sol-xhigh` | Prose refinement of docs; light or interim code review |
-| `gpt-5.6-terra` | `gpt-5.6-terra-medium` | Prose refinement of comments and messages |
-| `gpt-6-luna` | `gpt-6-luna-medium` | Haiku-level tasks |
+| `claude-opus-5-5[1m]` | `opus-high`, `opus-xhigh` | The coding: well-defined work at `high`, larger or ambiguous work at `xhigh`. Also fact-finding, research, and prose review of docs Opus did not write |
+| `claude-sonnet-5-5[1m]` | `sonnet-high`, `sonnet-xhigh` | Exploration without deep fact-finding, `xhigh` when it spans many files. Throwaway code that is not committed, never production code |
+| `fable[1m]` | `fable-medium`, `fable-high`, `fable-xhigh` | Research and design at `medium`. At `high` (`xhigh` for the hardest), the Fable half of the review tag-team. Not code |
+| `gpt-6-astra` | `gpt-6-astra-medium`, `gpt-6-astra-high` | `medium` is the Astra half of the review tag-team, never dispatched alone. `high` by name only |
+| `claude-haiku-5-5[1m]` | `haiku-medium` | Quick, cheap tasks, on par with Luna |
+| `gpt-6-luna` | `gpt-6-luna-medium` | Quick, cheap tasks, on par with Haiku |
+| `gpt-6-sol` | `gpt-6-sol-medium`, `gpt-6-sol-xhigh` | By name only. Prose refinement of docs; light or interim code review |
+| `gpt-5.6-terra` | `gpt-5.6-terra-medium` | By name only. Prose refinement of comments and messages |
+
+"By name only" agents open their description with "Use only when the user names it.", set by the
+roster's `byName` flag, so the orchestrator never picks them on its own judgement.
 
 Each prompt also carries a **nesting rule** — whether that agent may launch agents of its own, only
 when its brief says so, or not at all. Without it, a subagent that reaches the routing policy takes

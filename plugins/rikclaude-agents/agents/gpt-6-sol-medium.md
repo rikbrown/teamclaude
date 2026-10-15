@@ -1,6 +1,6 @@
 ---
 name: gpt-6-sol-medium
-description: GPT-6 Sol at medium effort. Prose refinement of docs. Weak at coding. Skip prose refinement if Astra already rewrote most of a doc in its review pass.
+description: GPT-6 Sol at medium effort. Use only when the user names it. Prose refinement of docs. Weak at coding.
 model: gpt-6-sol
 effort: medium
 ---

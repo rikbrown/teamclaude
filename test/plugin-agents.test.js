@@ -131,7 +131,7 @@ for (const file of agentFiles) {
 // any model family the roster has ever carried — must carry the prefix wherever
 // it appears in prose. Matched by shape rather than from the roster, so a name
 // that is commented out of the roster (or not in it yet) is still caught.
-const BARE_AGENT = /(?<![\w:.-])(?:fable|opus|sonnet|gpt-(?:\*|[\w.]+?(?:-[a-z]+)?))-(?:low|medium|high|xhigh|max|\*)(?![\w-])/g;
+const BARE_AGENT = /(?<![\w:.-])(?:fable|opus|sonnet|haiku|gpt-(?:\*|[\w.]+?(?:-[a-z]+)?))-(?:low|medium|high|xhigh|max|\*)(?![\w-])/g;
 
 /** Every agent-shaped token in `text` that is not preceded by the namespace. */
 function bareUses(text) {
@@ -147,8 +147,8 @@ function ruleText(text) {
 }
 
 test('bareUses catches names the roster does not carry, and only bare ones', () => {
-  const bad = 'use fable-medium or gpt-6-astra-xhigh, `gpt-5.6-sol-*`, opus-*, sonnet-xhigh or gpt-*-*; model: fable-high';
-  assert.deepEqual(bareUses(bad), ['fable-medium', 'gpt-6-astra-xhigh', 'gpt-5.6-sol-*', 'opus-*', 'sonnet-xhigh', 'gpt-*-*', 'fable-high']);
+  const bad = 'use fable-medium or gpt-6-astra-xhigh, haiku-medium, `gpt-5.6-sol-*`, opus-*, sonnet-xhigh or gpt-*-*; model: fable-high';
+  assert.deepEqual(bareUses(bad), ['fable-medium', 'gpt-6-astra-xhigh', 'haiku-medium', 'gpt-5.6-sol-*', 'opus-*', 'sonnet-xhigh', 'gpt-*-*', 'fable-high']);
   assert.deepEqual(bareUses('`rikclaude-agents:fable-medium`, rikclaude-agents:gpt-*-*, rikclaude-agents:sonnet-high, gpt-6-astra, Fable, high effort'), []);
 });
 

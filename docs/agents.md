@@ -66,7 +66,7 @@ at the moment it picks an agent, and they say more than this table does.
 | Model | Agents | Shape of the work |
 | --- | --- | --- |
 | `claude-opus-5-5[1m]` | `opus-high`, `opus-xhigh` | The coding: well-defined work at `high`, larger or ambiguous work at `xhigh`. Also fact-finding, research, and prose review of docs Opus did not write |
-| `claude-sonnet-5-5[1m]` | `sonnet-high`, `sonnet-xhigh` | Exploration without deep fact-finding, `xhigh` when it spans many files. Throwaway code that is not committed, never production code |
+| `claude-sonnet-5-5[1m]` | `sonnet-high`, `sonnet-xhigh` | Exploration without deep fact-finding, `xhigh` when it spans many files. Throwaway code at `high`; committed internal tooling only developers run (dev CLIs, CI and build config, evals) at `xhigh`. Never code a user runs or reads |
 | `fable[1m]` | `fable-medium`, `fable-high`, `fable-xhigh` | Research and design at `medium`. At `high` (`xhigh` for the hardest), the Fable half of the review tag-team. Not code |
 | `gpt-6-astra` | `gpt-6-astra-medium`, `gpt-6-astra-high` | `medium` is the Astra half of the review tag-team, never dispatched alone. `high` by name only |
 | `claude-haiku-5-5[1m]` | `haiku-medium` | Quick, cheap tasks, on par with Luna |

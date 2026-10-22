@@ -279,6 +279,20 @@ const PANE_BAR_FLOOR = 8;
 const LIST_MIN = 70;
 const PANE_MIN = 62;
 
+// The lengths the steer picker (`t`) offers, cycled with ←→. The first is the
+// longest a steer may run, which in practice means "until the account's weekly
+// wall or rollover ends it". ms null asks for that; the manager clamps every
+// steer to it anyway (see steer.js).
+const STEER_PRESETS = [
+  { label: 'until wall', ms: null },
+  { label: '1h', ms: 3600_000 },
+  { label: '6h', ms: 6 * 3600_000 },
+  { label: '24h', ms: 24 * 3600_000 },
+];
+// The steer's colour: on its row marker and in the header, so the two read
+// as one thing.
+const magenta = (/** @type {string} */ s) => fg(35, s);
+
 // Where an account sits in the list the operator arranged — the sort key behind
 // _displayOrder, written by _doMoveAccount and by nothing else.
 //
@@ -939,7 +953,9 @@ export class TUI {
     // Attach mode: the accounts belong to a server in another process, reached
     // over its control plane. Everything that would mutate local state is off,
     // and a switch becomes a request (applySwitch) instead of an assignment.
+    // A steer likewise (applySteer).
     remote = false, applySwitch = null,
+    applySteer = /** @type {((body: Record<string, any>) => Promise<any>) | null} */ (null),
     // Injectable so the import path can be exercised without a real credentials
     // file or a live profile call.
     readCredentials = importCredentials, readProfile = fetchProfile,
@@ -958,6 +974,7 @@ export class TUI {
     this.am = accountManager;
     this.remote = remote;
     this.applySwitch = applySwitch;
+    this.applySteer = applySteer;
     this.config = config;
     this.saveConfig = saveConfig;
     this.syncAccounts = syncAccounts;
@@ -997,9 +1014,11 @@ export class TUI {
     this.fleetMode = 'split';
     this.pick = null;        // active list picker (routes editor accounts/bucket/color)
     this.pickReturn = 'routes'; // mode to fall back to when the picker closes
-    this.selAction = null;   // switch | remove | toggle | reorder | routing
+    this.selAction = null;   // switch | steer | remove | toggle | reorder | routing
     this.selIdx = 0;
     this.selRoute = null;    // in switch mode: null = global default, else a getRoutes() entry to pin
+    this.steerDur = 0;       // in steer mode: index into STEER_PRESETS
+    this.steerRedeem = false; // in steer mode: redeem the target's reset at its weekly wall
     this.selReturn = 'normal'; // mode to fall back to when select mode closes
     this.setIdx = 0;         // cursor row on the settings screen (BIOS-style nav)
     this.setScroll = 0;      // first body line the settings screen shows (see _viewport)
@@ -1297,6 +1316,7 @@ export class TUI {
     r.account = info.account == null ? info.account : safeLine(info.account, 64);
     // Per attempt: a hop to an account with its own proxy clears it.
     r.viaSx = info.viaSx === true;
+    r.steered = info.steered === true;
     if (this._throughputOn()) this._markLeg(r, info.account);
   }
 
@@ -1372,6 +1392,8 @@ export class TUI {
     // Follows the account it is shown beside: from the end report when that
     // names the account, else from the last routed attempt.
     const sx = (info.account ? info.viaSx : r?.viaSx) === true ? dim(' via sx') : '';
+    // Placed by a steer: a new conversation's first request, or an untagged one.
+    const steer = (info.steered || r?.steered) ? dim(' [steer]') : '';
     // The server times output only while the meter is on, and says so by
     // carrying `outputTokens` at all. A buffered response is timed from when
     // the attempt that answered was sent, not from when the client asked:
@@ -1387,8 +1409,8 @@ export class TUI {
     // it, and drawn only while the meter is on (see _requestLine), so turning
     // the meter off gives back the old line for every entry, however it was
     // logged; and the pieces are kept so the line can be fitted around it.
-    this._addLog(`${tag} ${info.method} ${info.path}${model} → ${acct}${sx}${pin} (${info.status}, ${dur}s)`, {
-      head: `${tag} ${info.method} `, path: info.path, model: label || null, effort: info.effort || null, account: acct, pin: sx + pin,
+    this._addLog(`${tag} ${info.method} ${info.path}${model} → ${acct}${sx}${pin}${steer} (${info.status}, ${dur}s)`, {
+      head: `${tag} ${info.method} `, path: info.path, model: label || null, effort: info.effort || null, account: acct, pin: sx + pin + steer,
       status: info.status, dur, tps,
     });
     if (this.active.size === 0) this._retick();   // animating → idle
@@ -1607,6 +1629,9 @@ export class TUI {
       // server names an account that has since gone); start at the top instead.
       this.mode = 'select'; this.selAction = 'switch'; this.selIdx = Math.max(0, this.am.currentIndex); this.selRoute = null; this.selReturn = 'normal';
     }
+    // Steer: the same picker, for where NEW conversations go. Offered in attach
+    // mode too, where it is a request to the server like `s` is.
+    else if (k === 't' && this.am.accounts.length > 0) { this._openSteerPicker(); }
     else if (k === 'R') { this._doSync(); }
     // The keys below all edit local state or call out to Anthropic, neither of
     // which attach mode can do — the server owns both.
@@ -2013,9 +2038,21 @@ export class TUI {
     // dragged, and the row it marks travels with it.
     else if ((k === 'left' || k === 'h') && this.selAction === 'reorder') this._doMoveAccount(-1);
     else if ((k === 'right' || k === 'l') && this.selAction === 'reorder') this._doMoveAccount(+1);
+    // ←→ in steer mode pick how long, `r` whether to redeem at the wall. The
+    // cursor stays a pure ↑↓ thing, as in every other picker.
+    else if ((k === 'left' || k === 'h') && this.selAction === 'steer') this._cycleSteerDuration(-1);
+    else if ((k === 'right' || k === 'l' || k === 'tab') && this.selAction === 'steer') this._cycleSteerDuration(+1);
+    else if (k === 'r' && this.selAction === 'steer') {
+      // Only where there is a reset to redeem: the option is not drawn for
+      // any other row, and a key that toggled a hidden flag would arm it for
+      // the next row that does show it.
+      if (this._steerCanRedeem(this.selIdx)) this.steerRedeem = !this.steerRedeem;
+    }
     else if (k === 'enter') {
       if (this.selAction === 'switch') {
         this._doSwitchSelection();
+      } else if (this.selAction === 'steer') {
+        this._doSteerSelection();
       } else if (this.selAction === 'toggle') {
         this._doToggleDisabled(this.selIdx);
       } else if (this.selAction === 'login') {
@@ -2083,6 +2120,102 @@ export class TUI {
     } else {
       this._addLog(`Can't pin: ${res.reason}`); // stay in select mode to retry
     }
+  }
+
+  /** The steers in force, from either manager: the live one ends any whose
+   *  end has come before it answers, the attached one reports the server's.
+   *  A stand-in without steers (the older test doubles) reads as none.
+   *  @returns {Array<{ provider: string, target: string, index: number, until: number, redeem: boolean, redeeming: boolean }>} */
+  _steers() {
+    return typeof this.am.steerList === 'function' ? this.am.steerList() : [];
+  }
+
+  /** `t`: open the account picker for a steer. The cursor starts on the
+   *  account already steered for the current account's provider — so Enter
+   *  there clears it — else on the current account. The duration and the
+   *  redeem flag start from their defaults every time, so a choice made for
+   *  one account is never carried over to another without being seen. */
+  _openSteerPicker() {
+    const order = this._displayOrder();
+    const cur = this.am.accounts[this.am.currentIndex];
+    const steered = cur ? this._steers().find(s => s.provider === providerOf(cur)) : null;
+    const at = steered && this.am.accounts[steered.index] ? steered.index : null;
+    this.mode = 'select'; this.selAction = 'steer'; this.selReturn = 'normal';
+    this.selIdx = at ?? (cur ? this.am.currentIndex : (order[0] ?? 0));
+    this.steerDur = 0;
+    this.steerRedeem = false;
+  }
+
+  /** @param {number} dir */
+  _cycleSteerDuration(dir) {
+    this.steerDur = (this.steerDur + dir + STEER_PRESETS.length) % STEER_PRESETS.length;
+  }
+
+  /** Whether the row holds a banked reset or reset credit — the `RC` badge's
+   *  own test, so the option is offered exactly where the badge is drawn.
+   *  @param {number} idx */
+  _steerCanRedeem(idx) {
+    return heldResetCredits(this.am.accounts[idx]?.quota) > 0;
+  }
+
+  /** Whether the row is the account a steer currently sends work to.
+   *  @param {number} idx */
+  _isSteerTarget(idx) {
+    return this._steers().some(s => s.index === idx);
+  }
+
+  /** Enter in steer mode: steer to the highlighted account, or clear the steer
+   *  when it is the one already steered to. The manager logs the outcome in
+   *  process (the activity pane is its console); attach mode reports the
+   *  server's answer. */
+  _doSteerSelection() {
+    const idx = this.selIdx;
+    const acct = this.am.accounts[idx];
+    this.mode = 'normal';
+    if (!acct) { this._addLog('That account is no longer listed'); return; }
+    const clear = this._isSteerTarget(idx);
+    const preset = STEER_PRESETS[this.steerDur] ?? STEER_PRESETS[0];
+    const redeem = this.steerRedeem && this._steerCanRedeem(idx);
+    if (this.applySteer) { this._doSteerRemote(acct, { clear, preset, redeem }); return; }
+    if (clear) { this.am.clearSteer(providerOf(acct)); return; }
+    try {
+      this.am.setSteer(idx, { until: preset.ms == null ? null : Date.now() + preset.ms, redeem });
+      const { eligible, reason } = this.am.steerEligibility(idx);
+      if (!eligible) this._addLog(`"${safeLine(acct.name, 64)}" is ${reason}, so new conversations go elsewhere until that changes`);
+    } catch (/** @type {any} */ e) {
+      this._addLog(`Can't steer: ${safeLine(e?.message || String(e), 120)}`);
+    }
+  }
+
+  /** Ask the running server to steer, or to clear the steer. A refusal is
+   *  reported as one, so the dashboard never shows a steer the server did not
+   *  set; the next poll draws whatever it did.
+   *  @param {Record<string, any>} acct
+   *  @param {{ clear: boolean, preset: { label: string, ms: number|null }, redeem: boolean }} opts */
+  async _doSteerRemote(acct, { clear, preset, redeem }) {
+    const provider = providerOf(acct);
+    // Bounded and scrubbed: these strings arrive over the wire and are drawn
+    // into a fixed-width frame.
+    const said = (/** @type {unknown} */ v) => (typeof v === 'string' ? v.replace(/\p{C}/gu, ' ').trim().slice(0, 64) : '');
+    try {
+      /** @type {Record<string, any>} */
+      const body = clear
+        ? { account: null, provider }
+        : { account: acct.name, provider, ...(preset.ms == null ? {} : { for: Math.round(preset.ms / 1000) }), ...(redeem ? { redeem: true } : {}) };
+      const res = await this.applySteer?.(body);
+      if (clear) {
+        const was = Array.isArray(res?.cleared) && res.cleared.length ? said(res.cleared[0]?.target) || acct.name : null;
+        this._addLog(was ? `Steer to "${was}" cleared` : 'No steer was set');
+      } else {
+        const name = said(res?.steer?.target) || acct.name;
+        const left = Number.isFinite(res?.steer?.until) ? formatReset(res.steer.until) : '';
+        this._addLog(`Steering new conversations to "${name}"${left ? ` for ${left}` : ''}${res?.steer?.redeem ? ', redeeming its reset at the wall' : ''}`
+          + (res?.eligible === false ? ` — it is ${said(res.reason) || 'not eligible right now'}, so they go elsewhere until that changes` : ''));
+      }
+    } catch (/** @type {any} */ e) {
+      this._addLog(`Steer failed: ${safeLine(e?.message || String(e), 120)}`);
+    }
+    if (this.running) this.render();
   }
 
   // Ask the running server to switch. A failure is reported as one, so the
@@ -2945,8 +3078,24 @@ export class TUI {
     // can leave the two blocks alone wider than the line, and ' '.repeat(-1)
     // throws. There the header overruns and fitLine takes its tail, as it has
     // since long before there was a label to lose.
+    //
+    // Where new conversations are being sent, while a steer says so, sits at
+    // the head of the port block. Read once per frame: the rows below take
+    // their marker from the same list.
+    const steers = this._steers();
+    const steerText = steers.map(st => {
+      const notes = [formatReset(st.until), st.redeeming ? 'redeeming' : st.redeem ? 'redeem' : ''].filter(Boolean).join(' · ');
+      return `steer → ${safeLine(st.target, 64)}${notes ? ` (${notes})` : ''}`;
+    }).join('  ');
     const header = (/** @type {string} */ lead = '') => {
-      const right = `${lead}${sessStr}Port ${port} ${live} `;
+      const base = `${lead}${sessStr}Port ${port} ${live} `;
+      // The steer gives way first on a narrow terminal, to the speedo's
+      // reading in `lead` as well: the frame is cut at the right edge, and the
+      // port and the live marker are what a glance needs. The row's » still
+      // says which account it is.
+      const room = W - vw(left) - vw(base) - 3;
+      const steerStr = steerText && room >= 12 ? `${magenta(vw(steerText) > room ? truncate(steerText, room) : steerText)}  ` : '';
+      const right = `${steerStr}${base}`;
       return left + ' '.repeat(Math.max(1, W - vw(left) - vw(right))) + right;
     };
     lines.push(header());
@@ -3000,6 +3149,8 @@ export class TUI {
       // the fleet aggregate counts as reachable, and the route readout under the
       // pool blocks.
       const routes = this.am.getRoutes();
+      // The rows a steer sends new conversations to, for their » marker.
+      const steered = new Set(steers.map(st => st.index));
 
       // [f] — where the fleet block goes: beside the rows, in place of them, or
       // nowhere (FLEET_MODES). The conduit lines are drawn in all three: a local
@@ -3030,7 +3181,7 @@ export class TUI {
         // The rows open on their spacer line — or, in two panes, on the pane
         // titles that take its place — so the panel starts a line down, beside
         // the first row.
-        const left = this._accountLines(rowsW);
+        const left = this._accountLines(rowsW, steered);
         // Local backends sit under the seats, as a readout rather than rows —
         // and on the LEFT, under the rows they belong beside, not under a
         // column of pool aggregates they are deliberately absent from.
@@ -3063,7 +3214,8 @@ export class TUI {
       const m = modelParen(label, r.effort, true); // filled in as soon as the model is peeked from the stream
       const pin = r.pinned ? dim(' [pin]') : '';
       const sx = r.viaSx ? dim(' via sx') : '';
-      const a = r.account ? ` → ${r.account}${sx}${pin}` : '';
+      const steer = r.steered ? dim(' [steer]') : '';
+      const a = r.account ? ` → ${r.account}${sx}${pin}${steer}` : '';
       if (!meter) {
         lines.push(` ${sp} ${gray(r.t)}  ${this._sessionTag(r.sessionId)} ${r.method} ${r.path}${m}${a} ${dim(`(${el}s...)`)}`);
         continue;
@@ -3075,7 +3227,7 @@ export class TUI {
       const est = tps != null ? ` ~${formatRate(tps)} tok/s` : '';
       const lead = ` ${sp} ${gray(r.t)}  ${this._sessionTag(r.sessionId)} ${r.method} `;
       const tail = ` ${dim(`(${el}s...${est})`)}`;
-      const middle = requestMiddle({ path: r.path, model: label || null, effort: r.effort, account: r.account || null, pin: sx + pin, dimModel: true }, W - vw(lead) - vw(tail));
+      const middle = requestMiddle({ path: r.path, model: label || null, effort: r.effort, account: r.account || null, pin: sx + pin + steer, dimModel: true }, W - vw(lead) - vw(tail));
       lines.push(lead + middle + tail);
     }
 
@@ -3385,16 +3537,21 @@ export class TUI {
   }
 
   /** Draw one row against a layout from _listLayout. */
-  _renderRow(/** @type {number} */ idx, /** @type {any} */ L, /** @type {Set<number>} */ current) {
+  _renderRow(/** @type {number} */ idx, /** @type {any} */ L, /** @type {Set<number>} */ current, /** @type {Set<number>} */ steered = this._steerRows()) {
     const b = L.budgets.get(rowCategory(this.am.accounts[idx]));
-    return this._renderAcct(idx, b.bw, b.showBoth, L.routes, L.genRoutes, L.familyTarget, b.showFamily, L.nameW, { current, compact: L.compact, shortBar: b.shortBar });
+    return this._renderAcct(idx, b.bw, b.showBoth, L.routes, L.genRoutes, L.familyTarget, b.showFamily, L.nameW, { current, steered, compact: L.compact, shortBar: b.shortBar });
+  }
+
+  /** The rows a steer sends new work to. */
+  _steerRows() {
+    return new Set(this._steers().map(st => st.index));
   }
 
   /** The row, then for an account out of rotation as `error` the line `teamclaude status`
    *  prints for it, wrapped to the pane so the command at its end is not cut off. */
-  _rowLines(/** @type {number} */ idx, /** @type {any} */ L, /** @type {Set<number>} */ current) {
+  _rowLines(/** @type {number} */ idx, /** @type {any} */ L, /** @type {Set<number>} */ current, /** @type {Set<number>} */ steered = this._steerRows()) {
     const a = this.am.accounts[idx];
-    const row = this._renderRow(idx, L, current);
+    const row = this._renderRow(idx, L, current, steered);
     if (this._unavailable(a) !== 'error') return [row];
     const plain = (/** @type {string} */ s) => s;
     const why = unavailableLine({ ...a, unavailable: 'error', onExtraUsage: this._onExtraUsage(a) }, { dim: plain, yellow: plain, red: plain });
@@ -3459,9 +3616,10 @@ export class TUI {
    * its place.
    *
    * @param {number} W columns the rows are laid out in
+   * @param {Set<number>} [steered] the rows a steer sends new work to
    * @returns {string[]}
    */
-  _accountLines(W) {
+  _accountLines(W, steered = this._steerRows()) {
     const lines = [];
     const current = this._currentRows();
     const groups = this._providerGroups();
@@ -3469,8 +3627,8 @@ export class TUI {
     if (split) {
       const [a, b] = groups;
       lines.push(paneTitle(PROVIDERS[a.provider].label, split.leftW) + dim(PANE_GUTTER) + paneTitle(PROVIDERS[b.provider].label, split.rightW));
-      const left = a.indices.flatMap(i => this._rowLines(i, split.left, current));
-      const right = b.indices.flatMap(i => this._rowLines(i, split.right, current));
+      const left = a.indices.flatMap(i => this._rowLines(i, split.left, current, steered));
+      const right = b.indices.flatMap(i => this._rowLines(i, split.right, current, steered));
       for (let r = 0; r < Math.max(left.length, right.length); r++) {
         lines.push(fitLine(left[r] ?? '', split.leftW) + dim(PANE_GUTTER) + (right[r] ?? ''));
       }
@@ -3478,7 +3636,7 @@ export class TUI {
       lines.push('');
       const order = this._displayOrder();
       const layout = this._listLayout(order, W);
-      for (const i of order) lines.push(...this._rowLines(i, layout, current));
+      for (const i of order) lines.push(...this._rowLines(i, layout, current, steered));
     }
     return lines;
   }
@@ -3937,7 +4095,7 @@ export class TUI {
     return rows;
   }
 
-  _renderAcct(idx, bw, showBoth, routes = this.am.getRoutes(), genRoutes = routes.filter(r => routeFamily(r) === null), familyTarget = {}, showFamily = true, nameW = NAME_MIN, { current = this._currentRows(), compact = false, shortBar = true } = {}) {
+  _renderAcct(idx, bw, showBoth, routes = this.am.getRoutes(), genRoutes = routes.filter(r => routeFamily(r) === null), familyTarget = {}, showFamily = true, nameW = NAME_MIN, { current = this._currentRows(), steered = this._steerRows(), compact = false, shortBar = true } = {}) {
     const a = this.am.accounts[idx];
     const isCur = current.has(idx);
     const isSel = this.mode === 'select' && idx === this.selIdx;
@@ -3955,6 +4113,10 @@ export class TUI {
     const cursorAt = selFamily && barShown(selFamily) ? selFamily : null;
     const sel = !isSel ? ' ' : cursorAt ? dim('>') : cyan('>');
     const cur = isCur ? green('►') : ' ';
+    // The steer's target, in the column after ►: new conversations go here
+    // whatever the current marker says. One column wide, and a space on every
+    // other row, so no row's width changes for it.
+    const steer = steered.has(idx) ? magenta('»') : ' ';
     // The column before a family bar's marker: the cursor when it moved here, else the separator space.
     const famLead = fam => (cursorAt === fam ? cyan('>') : ' ');
 
@@ -4127,7 +4289,7 @@ export class TUI {
     // without a config, and it read none before this line existed.
     const pctInBar = this.config?.quotaBarPercent === true;
 
-    let line = ` ${sel}${cur} ${startSlot}${name} ${type}${status} ${l1} ${bar(r1, bw1, t1, w1, th1, pctInBar)}`;
+    let line = ` ${sel}${cur}${steer}${startSlot}${name} ${type}${status} ${l1} ${bar(r1, bw1, t1, w1, th1, pctInBar)}`;
     if (showBoth) {
       if (!weeklyFirst && !weeklyOnly && !sessionOnly) line += `  ${l2} ${bar(r2, bw, t2, w2, th2, pctInBar)}`;
       // A backend's monthly window has no unified slot; it draws its own bar
@@ -4673,8 +4835,8 @@ export class TUI {
         // gone.
         const fleet = `${bold('f')}leet`;
         return this.remote
-          ? ` ${bold('s')}witch  ${bold('R')}eload  ${fleet}  ${bold('q')}uit`
-          : ` ${bold('s')}witch  ${bold('d')}isable  ${this.loginAccount ? `${bold('l')}ogin  ` : ''}${bold('p')}robe quota  ${bold('R')}eload  ${fleet}${this.onRestart ? `  ${bold('u')}pdate` : ''}  ${bold('g')} settings  ${bold('q')}uit`;
+          ? ` ${bold('s')}witch  s${bold('t')}eer  ${bold('R')}eload  ${fleet}  ${bold('q')}uit`
+          : ` ${bold('s')}witch  s${bold('t')}eer  ${bold('d')}isable  ${this.loginAccount ? `${bold('l')}ogin  ` : ''}${bold('p')}robe quota  ${bold('R')}eload  ${fleet}${this.onRestart ? `  ${bold('u')}pdate` : ''}  ${bold('g')} settings  ${bold('q')}uit`;
       }
       case 'settings':
         return ` ${dim('↑↓')} navigate  ${dim('←→')} change  ${bold('Enter')} edit  ${bold('Esc')} back`;
@@ -4687,6 +4849,19 @@ export class TUI {
       case 'blocklist':
         return ` ${dim('↑↓')} select  ${bold('a')}dd  ${bold('d')}elete  ${bold('Esc')} back`;
       case 'select': {
+        if (this.selAction === 'steer') {
+          // Enter on the account already steered to clears the steer, and the
+          // footer says so rather than offering a length that would not apply.
+          if (this._isSteerTarget(this.selIdx)) {
+            return ` ${dim('↑↓')} select  ${bold('Enter')} clear steer  ${bold('Esc')} cancel`;
+          }
+          const preset = (STEER_PRESETS[this.steerDur] ?? STEER_PRESETS[0]).label;
+          // Offered only on a row holding a reset (the RC badge): see _keySelect.
+          const redeem = this._steerCanRedeem(this.selIdx)
+            ? `  ${bold('r')} redeem at wall: ${this.steerRedeem ? green('on') : gray('off')}`
+            : '';
+          return ` ${dim('↑↓')} select  ${dim('←→')} for: ${preset}${redeem}  ${bold('Enter')} steer  ${bold('Esc')} cancel`;
+        }
         if (this.selAction === 'switch' && this.remote) {
           return ` ${dim('↑↓')} select  ${bold('Enter')} switch  ${bold('Esc')} cancel`;
         }

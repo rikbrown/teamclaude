@@ -71,7 +71,7 @@ test('full mode lists every tool in a fixed order, annotated', async () => {
   const listed = tools.list();
   assert.deepEqual(listed.map(t => t.name), [
     'get_status', 'get_quota', 'get_settings',
-    'switch_account', 'reload_config', 'probe_quota',
+    'switch_account', 'set_steer', 'reload_config', 'probe_quota',
     'set_account_enabled', 'set_account_priority', 'set_account_routing', 'remove_account',
     'set_threshold', 'set_distribution', 'set_probe_interval', 'set_warmup',
     'set_route', 'remove_route', 'set_blocked_models', 'set_client_mode',
@@ -106,6 +106,31 @@ test('switch_account moves the preference and says whether rotation will follow'
   assert.equal(result.eligible, false);
   assert.match(result.reason, /outranked by higher-priority account "alice@example.com"/);
   assert.equal(am.currentIndex, 2);
+});
+
+test('set_steer steers new conversations for the hours given, and clear ends it', async () => {
+  const { tools, am } = await fixture();
+  const log = console.log;
+  console.log = () => {};
+  try {
+    const result = await ok(tools, 'set_steer', { account: 'bob@example.com', org: 'Acme', hours: 6 });
+    assert.equal(result.steer.target, 'bob@example.com (Acme)');
+    assert.ok(Math.abs(result.steer.until - (Date.now() + 6 * 3600_000)) < 60_000);
+    // A steer outranks priority, so the account a switch would call outranked
+    // is eligible for one.
+    assert.equal(result.eligible, true);
+    assert.equal(am.currentIndex, 0, 'the current account did not move');
+    assert.equal((await ok(tools, 'set_steer', { account: 'alice@example.com', hours: 400 })).clamped, true);
+    assert.match(await refused(tools, 'set_steer', { account: 'alice@example.com', redeem: true }), /holds no banked reset/);
+    assert.match(await refused(tools, 'set_steer', { account: 'alice@example.com', hours: -1 }), /"hours" must be/);
+    assert.match(await refused(tools, 'set_steer', {}), /needs "account"/);
+    assert.match(await refused(tools, 'set_steer', { account: 'alice@example.com', clear: true }), /not both/);
+    const cleared = await ok(tools, 'set_steer', { clear: true });
+    assert.deepEqual(cleared.cleared.map((/** @type {any} */ s) => s.target), ['alice@example.com']);
+    assert.deepEqual(am.steerList(), []);
+  } finally {
+    console.log = log;
+  }
 });
 
 test('an account token that fits several accounts is refused with the candidates', async () => {

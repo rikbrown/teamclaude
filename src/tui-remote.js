@@ -1,6 +1,6 @@
 import { TUI } from './tui.js';
 import { SessionTitles } from './session-titles.js';
-import { modelGlobMatches, resolveSwitchThreshold } from './model.js';
+import { modelGlobMatches, resolveSwitchThreshold, WEEKLY_BUCKET_KEYS } from './model.js';
 import { safeLine } from './safe-text.js';
 import { providerOf } from './provider.js';
 import { QuotaProjection } from './quota-projection.js';
@@ -79,6 +79,24 @@ export class RemoteControl {
     } catch (err) {
       if (!err.answered && (err.status === 404 || err.status === 501)) {
         throw new Error('this server does not support switching accounts');
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Set or clear the running server's steer: the body of POST
+   * /teamclaude/steer as is (`{ account, provider, for?, redeem? }`, or
+   * `account: null` to clear). Reported like a switch: a server predating the
+   * endpoint says so rather than reading as a refusal of this account.
+   * @param {Record<string, any>} body
+   */
+  async steer(body) {
+    try {
+      return await this._action('POST', '/teamclaude/steer', body);
+    } catch (/** @type {any} */ err) {
+      if (!err.answered && (err.status === 404 || err.status === 501)) {
+        throw new Error('this server does not support steering');
       }
       throw err;
     }
@@ -204,6 +222,9 @@ export class RemoteAccountManager {
     this.distributeSessions = false;
     this.distributionMode = 'off';
     this.routes = [];
+    // The server's steers, as its status names them (see applyStatus).
+    /** @type {Array<{ provider: string, target: string, index: number, startedAt: number|null, until: number, redeem: boolean, redeeming: boolean }>} */
+    this.steers = [];
     this.sessions = { active: 0, known: 0, perAccount: {} };
     this.connected = false;   // false ⇒ the view is a stale snapshot
     this.lastError = null;
@@ -241,7 +262,17 @@ export class RemoteAccountManager {
    * @param {string} bucket
    * @param {any} [account] */
   thresholdFor(bucket, account = null) {
+    // The server gates a `steer --redeem` target's weekly buckets at 1
+    // (AccountManager.thresholdFor), and a bar that reddened at the fleet's
+    // number would show the account as refused while it is still serving.
+    if (account && WEEKLY_BUCKET_KEYS.includes(bucket) && this.steers.some(s => s.redeem && s.index === account.index)) return 1;
     return resolveSwitchThreshold(account?.switchThreshold, bucket, this._fleetThresholdFor(bucket));
+  }
+
+  /** Mirrors AccountManager.steerList off the payload, so the shared renderer
+   *  asks one question of either manager. */
+  steerList() {
+    return this.steers;
   }
 
   /** @param {string} bucket */
@@ -339,6 +370,22 @@ export class RemoteAccountManager {
           eligible: !!a?.eligible,
         })),
     }));
+    // Named by position AND name, and kept only where both agree: the row's
+    // marker and the picker's "Enter clears" both act on that index, and a
+    // payload naming a row that has since moved must not point them at its
+    // neighbour. An older server sends no `steers` and none is drawn.
+    this.steers = (Array.isArray(status?.steers) ? status.steers : []).flatMap((/** @type {any} */ st) => {
+      const target = text(st?.target, NAME_MAX);
+      const provider = text(st?.provider, LABEL_MAX);
+      const at = Number.isInteger(st?.index) && this.accounts[st.index]?.name === target ? st.index
+        : this.accounts.findIndex(a => a.name === target && providerOf(a) === provider);
+      if (!target || at < 0 || !Number.isFinite(st?.until)) return [];
+      return [{
+        provider, target, index: at,
+        startedAt: Number.isFinite(st?.startedAt) ? st.startedAt : null,
+        until: st.until, redeem: st?.redeem === true, redeeming: st?.redeeming === true,
+      }];
+    });
     // A server too old to send versionLabel still sends version; one older than
     // both leaves the label empty and the header simply omits it.
     this.versionLabel = text(status?.server?.versionLabel ?? status?.server?.version, LABEL_MAX);
@@ -460,6 +507,7 @@ export function createAttachSession({ control, config, onQuit, pollMs = DEFAULT_
     saveConfig: async () => { throw new Error('attach mode cannot write config'); },
     syncAccounts: async () => (await control.reload())?.added || 0,
     applySwitch: name => control.switchAccount(name),
+    applySteer: body => control.steer(body),
     onQuit: () => { stop(); onQuit?.(); },
   });
 

@@ -29,7 +29,8 @@ import { routeReachabilityWarnings } from './route-warnings.js';
 import { resolveAccounts } from './resolve-accounts.js';
 import { loginCodex, startCodexLogin } from './codex-auth.js';
 import { isRemoteSession, openBrowser, PANEL_LOGIN_TIMEOUT_MS } from './login-flow.js';
-import { providerOf } from './provider.js';
+import { providerOf, PROVIDERS } from './provider.js';
+import { formatSteerLeft } from './steer.js';
 import { syncAccountsFromDisk } from './sync-accounts.js';
 import { mergeAccountsForSave, syncRefreshedTokens, removedAccountIds, clearRemovedAccountIds, clearAddedAccountIds, markAccountRemoved, configIndexFor } from './account-pairing.js';
 import { ensureAccountIds, accountIdsComplete } from './account-id.js';
@@ -158,6 +159,18 @@ const THRESHOLD_USAGE = [
 
 const DISTRIBUTE_USAGE = 'Usage: teamclaude distribute <on|off|adaptive|load>';
 
+const STEER_USAGE = [
+  'Usage: teamclaude steer                                   (show the steers in force)',
+  '       teamclaude steer <account> [--for <6h|90m|1d12h>] [--until <ISO time>] [--redeem] [--provider <anthropic|codex>]',
+  '       teamclaude steer --clear [--provider <anthropic|codex>]',
+  '',
+  'Sends NEW conversations to one account; running conversations keep theirs, so',
+  'no prompt cache is lost. Ends at the account\'s weekly wall, when its week',
+  'rolls over, at the end time (7 days at most, and by default), or on --clear.',
+  '--redeem runs the account to upstream\'s own weekly wall, then redeems its',
+  'banked reset once. A redemption cannot be undone.',
+].join('\n');
+
 const ROUTING_USAGE = [
   'Usage: teamclaude routing <account-name|email> [--check]      (show the account\'s routing; --check tests it)',
   '       teamclaude routing <account-name|email> <url>          (set it; --no-check skips the proxy test)',
@@ -220,6 +233,10 @@ switch (command) {
     break;
   case 'switch':
     await switchCommand();
+    process.exit(0);
+    break;
+  case 'steer':
+    await steerCommand();
     process.exit(0);
     break;
   case 'remove':
@@ -424,6 +441,9 @@ async function serverCommand() {
     return null;
   });
   if (savedState?.quota) accountManager.restoreQuotaState(savedState.quota);
+  // After the quota: a steer restored onto an account whose saved week has
+  // since rolled over ends on the first look, which needs that week read back.
+  if (savedState?.steers) accountManager.restoreSteers(savedState.steers);
 
   // Per-client usage (proxy.clientKeys). Restored alongside quota so the
   // per-client counters survive a restart the same way rotation state does.
@@ -447,7 +467,7 @@ async function serverCommand() {
 
   // Periodically persist quota (and once more on shutdown) to the state file.
   const persistQuotaState = () =>
-    saveState({ quota: accountManager.exportQuotaState(), clients: clientUsage.exportState(), usageDimensions: dimensionUsage.exportState(), sidecars: sidecar?.exportPids() || savedState?.sidecars || {}, spend: exportSpend?.() ?? savedState?.spend ?? null })
+    saveState({ quota: accountManager.exportQuotaState(), clients: clientUsage.exportState(), usageDimensions: dimensionUsage.exportState(), steers: accountManager.exportSteers(), sidecars: sidecar?.exportPids() || savedState?.sidecars || {}, spend: exportSpend?.() ?? savedState?.spend ?? null })
       .catch(err => console.error(`[TeamClaude] Failed to save quota state: ${err.message}`));
   /** @type {ReturnType<typeof setInterval>|null} */
   let quotaSaveInterval = null;
@@ -460,6 +480,10 @@ async function serverCommand() {
   };
   /** @type {ReturnType<typeof setInterval>|null} */
   let quotaSeriesInterval = null;
+  // A steer is an operator's decision, not a reading, so it is written when it
+  // changes rather than at the next minute's save: a crash in between would
+  // otherwise drop the steer, or bring back one that had ended.
+  accountManager.onSteersChanged(() => { persistQuotaState(); });
 
   // An account admitted from somewhere other than this install's config: the
   // callback.net credential store (credential-sync.js). Same three lists the
@@ -890,7 +914,7 @@ async function serverCommand() {
     };
     hooks.onRequestRouted = (id, info) => {
       const r = inFlight.get(id);
-      if (r) { r.account = info.account; r.viaSx = info.viaSx === true; }
+      if (r) { r.account = info.account; r.viaSx = info.viaSx === true; r.steered = info.steered === true; }
     };
     hooks.onRequestEnd = (id, info) => {
       const r = inFlight.get(id);
@@ -905,7 +929,9 @@ async function serverCommand() {
       const client = (info.client || r?.client) ? `[${info.client || r.client}] ` : '';
       const pin = (info.pinned || r?.pinned) ? ' [pin]' : '';
       const sx = (info.account ? info.viaSx : r?.viaSx) === true ? ' via sx' : '';
-      writeActivity(`${client}${sid}${info.method} ${info.path}${model} → ${acct}${sx}${pin} (${info.status}, ${dur}s)`);
+      // Placed by a steer: a new conversation's first request, or an untagged one.
+      const steer = (info.steered || r?.steered) ? ' [steer]' : '';
+      writeActivity(`${client}${sid}${info.method} ${info.path}${model} → ${acct}${sx}${pin}${steer} (${info.status}, ${dur}s)`);
     };
     // Tee console output to the activity log as well
     const origLog = console.log;
@@ -950,6 +976,10 @@ async function serverCommand() {
   const claudeRedeemer = new ClaudeResetRedeemer(accountManager, { config });
   hooks.redeemClaudeResetForPool = (/** @type {Record<string, any>[]} */ accounts) => claudeRedeemer.maybeRedeemForPool(accounts);
   hooks.redeemCodexResetForPool = (/** @type {Record<string, any>[]} */ accounts) => redeemer.maybeRedeemForPool(accounts);
+  // And a `steer --redeem`, once its target has spent its week: the same two
+  // redeemers, through the entry point that takes the steer as consent for
+  // that one account and keeps every other guard (see redeemForSteer).
+  accountManager.setSteerRedeemer((account) => (providerOf(account) === 'codex' ? redeemer : claudeRedeemer).redeemForSteer(account));
   hooks.getStatusExtra = () => ({
     // Read live from the shared config (not a startup snapshot) so the TUI's
     // blocklist editor shows up in `status` immediately, the same way the
@@ -2056,7 +2086,7 @@ async function statusCommand() {
 // The interactive dashboard against a server that is ALREADY running. A proxy
 // installed as a background service has no foreground TUI, so this is the only
 // way to watch and steer it live; it renders from polled status and can only do
-// what the control plane exposes (switch, reload).
+// what the control plane exposes (switch, steer, reload).
 async function attachCommand() {
   const config = await loadOrCreateConfig();
   const port = config.proxy.port;
@@ -2262,6 +2292,107 @@ async function switchSessionCommand(port, headers, name) {
   if (data.seen === false) {
     console.error(`Warning: the proxy has not seen a request from session ${shown} in the last hour. The pin applies once one arrives;`
       + ' if this session does not run through teamclaude, or sends a different session id, it never will.');
+  }
+}
+
+// ── steer ───────────────────────────────────────────────────
+
+// Steer new conversations onto one account, against a RUNNING server: the
+// steer lives in the server (and its state file), so the server is the only
+// place that can answer or apply it. Same shape as `switch`: the endpoint does
+// the work, and this says what it settled on and anything that stops it
+// taking effect.
+async function steerCommand() {
+  const config = await loadOrCreateConfig();
+  const port = config.proxy.port;
+  const headers = { 'x-api-key': config.proxy.apiKey };
+  const name = args[1] && !args[1].startsWith('-') ? args[1] : null;
+  const clear = args.includes('--clear');
+  const provider = argValue('--provider');
+  const forValue = argValue('--for');
+  const untilValue = argValue('--until');
+  const redeem = args.includes('--redeem');
+  const shaping = forValue != null || untilValue != null || redeem;
+  if ((clear && (name || shaping)) || (!name && !clear && shaping)) {
+    console.error(STEER_USAGE);
+    process.exit(1);
+  }
+  const at = (/** @type {number} */ ms) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
+  const label = (/** @type {string} */ p) => PROVIDERS[/** @type {keyof typeof PROVIDERS} */ (p)]?.label ?? p;
+
+  /** @param {string} path @param {Record<string, any>} [body] */
+  const call = async (path, body) => {
+    try {
+      const res = await fetch(`http://localhost:${port}${path}`, body === undefined ? { headers } : {
+        method: 'POST',
+        headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      return { res, data: await res.json().catch(() => null) };
+    } catch (/** @type {any} */ err) {
+      console.error('Cannot connect to proxy at localhost:' + port);
+      console.error('Is the server running? Start with: teamclaude server');
+      if (err?.message) console.error(`Details: ${err.message}`);
+      process.exit(1);
+    }
+  };
+
+  if (!name && !clear) {
+    const { res, data } = await call('/teamclaude/status');
+    if (!res.ok || !data || !Array.isArray(data.accounts)) {
+      console.error(`Unexpected reply from localhost:${port} (HTTP ${res.status}) — no account list in it.`);
+      console.error('Something is listening there, but it does not answer like this teamclaude version.');
+      process.exit(1);
+    }
+    const steers = Array.isArray(data.steers) ? data.steers : [];
+    if (!steers.length) {
+      console.log('No steer is set.');
+      console.log('\nSteer with: teamclaude steer <name> [--for 6h] [--redeem]');
+      return;
+    }
+    for (const steer of steers) {
+      const redeemNote = steer.redeeming ? ', redeeming its banked reset now'
+        : steer.redeem ? ', then its banked reset is redeemed at the weekly wall' : '';
+      console.log(`${label(steer.provider)}: new conversations go to "${safeLine(steer.target, 64)}" — ${formatSteerLeft(steer.until - Date.now())} left (until ${at(steer.until)})${redeemNote}`);
+    }
+    return;
+  }
+
+  /** @type {Record<string, any>} */
+  const body = { account: clear ? null : name };
+  if (provider) body.provider = provider;
+  if (forValue != null) body.for = forValue;
+  if (untilValue != null) body.until = untilValue;
+  if (redeem) body.redeem = true;
+  const { res, data } = await call('/teamclaude/steer', body);
+  if (!res.ok || data?.ok !== true) {
+    // Our own errors are strings; a server too old to know this endpoint
+    // answers with something else (see switchCommand).
+    const detail = typeof data?.error === 'string' ? data.error : null;
+    console.error(detail || `Steer failed: unexpected reply from localhost:${port} (HTTP ${res.status}).`);
+    if (!detail) console.error('An older server without this endpoint answers this way; restart it to pick up the new version.');
+    if (data?.accounts?.length) {
+      console.error('Known accounts:');
+      for (const n of data.accounts) console.error(`  ${n}`);
+    }
+    process.exit(1);
+  }
+  if (clear) {
+    const cleared = Array.isArray(data.cleared) ? data.cleared : [];
+    if (!cleared.length) console.log('No steer was set.');
+    for (const steer of cleared) console.log(`Steer to "${safeLine(steer.target, 64)}" cleared; new conversations are placed as usual again.`);
+    return;
+  }
+  const steer = data.steer;
+  const target = safeLine(steer.target, 64);
+  console.log(`Steering new conversations to "${target}" for ${formatSteerLeft(steer.until - Date.now())} (until ${at(steer.until)}). Running conversations stay where they are.`);
+  if (data.replaced && data.replaced.target !== steer.target) console.log(`It replaces the steer to "${safeLine(data.replaced.target, 64)}".`);
+  if (steer.redeem) console.log('At its weekly wall its banked reset is redeemed, once. A redemption cannot be undone.');
+  if (data.clamped) console.log(`A steer runs at most 7 days, so this one ends at ${at(steer.until)}.`);
+  // Set is not the same as in effect: a placement the target cannot take
+  // goes elsewhere, and saying nothing would be a quiet lie.
+  if (data.eligible === false) {
+    console.error(`Warning: "${target}" is ${data.reason || 'not currently eligible'}, so new conversations go elsewhere until that changes; the steer stays set.`);
   }
 }
 
@@ -3188,13 +3319,18 @@ Commands:
   status [--json]     Show rich proxy/account/probe status (live)
                       Use --color=always|never to control ANSI colors
   attach              Open the live dashboard against a running server; s
-                      switches account, R reloads config, q leaves it running
+                      switches account, t steers new conversations, R reloads
+                      config, q leaves it running
   dashboard           Open the web dashboard of a running server in the browser
   accounts            List configured accounts
   switch [NAME]       Make the running server prefer one account (as 's' in the
                       TUI does); with no NAME, list accounts and mark the current
                       --session [ID] moves only that session ($CLAUDE_CODE_SESSION_ID
                       by default); --session --clear drops its pin
+  steer [NAME]        Send NEW conversations to one account (as 't' in the TUI
+                      does); running ones keep theirs. --for 6h / --until <ISO>
+                      (7 days at most); --redeem spends its banked reset once at
+                      its weekly wall; --clear ends it; no NAME shows the steers
   remove <name>       Remove an account (by name or email; --org to disambiguate)
   disable <name>      Temporarily exclude an account from rotation
   enable <name>       Re-enable a disabled account (also clears a stuck error)

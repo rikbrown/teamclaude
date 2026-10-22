@@ -389,6 +389,30 @@ export function sessionPinsText(pins) {
   return 'pinned: ' + pins.map(function (p) { return (p && p.session || '?') + ' \u2192 ' + (p && p.account || '?'); }).join(', ');
 }
 
+// "steer → api-1 (5h12m left, redeem)" — where new conversations are being
+// sent, one entry per provider steered, or '' when none is. Self-contained:
+// it is serialised into the page with the other shared helpers.
+/** @param {any} steers @param {number} [now] */
+export function steersText(steers, now) {
+  if (!Array.isArray(steers) || !steers.length) return '';
+  var at = typeof now === 'number' ? now : Date.now();
+  var left = function (/** @type {number} */ ms) {
+    if (!(ms > 0)) return '0m';
+    var mins = Math.ceil(ms / 60000);
+    if (mins < 60) return mins + 'm';
+    var hrs = Math.floor(mins / 60);
+    if (hrs < 24) return hrs + 'h' + (mins % 60 ? (mins % 60) + 'm' : '');
+    return Math.floor(hrs / 24) + 'd' + (hrs % 24 ? (hrs % 24) + 'h' : '');
+  };
+  var named = steers.length > 1;
+  return steers.map(function (s) {
+    var notes = [left((s && s.until) - at) + ' left'];
+    if (s && s.redeeming) notes.push('redeeming');
+    else if (s && s.redeem) notes.push('redeem');
+    return 'steer' + (named ? ' ' + (s && s.provider || '?') : '') + ' \u2192 ' + (s && s.target || '?') + ' (' + notes.join(', ') + ')';
+  }).join(' \u00b7 ');
+}
+
 export function filterSessionRows(rows, filters) {
   var f = filters || {};
   return (rows || []).filter(function (r) {
@@ -764,7 +788,7 @@ export function usageFor(entry, view) {
 export const CARD_NOTE_MAX_AGE_MS = 60 * 1000;
 
 const SHARED_HELPERS = [
-  scopedWeeklyRows, accountTokens, modelLabel, recentModelLabels, providerLabel, accountGroups, thresholdBadgeText, accountBadges, sessionRows, sessionPinsText, filterSessionRows, sortRows, uniqSorted,
+  scopedWeeklyRows, accountTokens, modelLabel, recentModelLabels, providerLabel, accountGroups, thresholdBadgeText, accountBadges, sessionRows, sessionPinsText, steersText, filterSessionRows, sortRows, uniqSorted,
   switchRequest, switchOutcome, accountControlRequest, accountControlOutcome, thresholdRequest, thresholdPercentText, thresholdOutcome, routeRows, problems, usageFor,
   outsideSpendText, forecastText, fleetForecastText, showSessionRow, showWeeklyRow, callerCan, callerNotice, cardNoteKey, cardNoteFor, backendQuotaRows,
 ].map(fn => fn.toString()).join('\n\n');
@@ -1446,6 +1470,8 @@ ${SHARED_HELPERS}
     sum.appendChild(el('span', '', ' · ' + (sess.active || 0) + ' active / ' + (sess.known || 0) + ' known conversations' + (up ? ' · ' + up : '')));
     var pinsText = sessionPinsText(s.sessionPins);
     if (pinsText) sum.appendChild(el('span', 'pin', ' · ' + pinsText));
+    var steerText = steersText(s.steers, Date.now());
+    if (steerText) sum.appendChild(el('span', 'pin', ' · ' + steerText));
     var fleetText = fleetForecastText(s.fleetForecast, Date.now());
     if (fleetText) sum.appendChild(el('span', '', ' · ' + fleetText));
     var probe = s.probe || {};

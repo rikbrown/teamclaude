@@ -37,6 +37,7 @@ import { codexSpentWindows, isAccountWideCodexWindow } from './codex-quota.js';
 import { atomicConfigUpdate } from './config.js';
 import { ConfigOpError, setThreshold, thresholdRatio } from './config-ops.js';
 import { envVar, legacyControlUrl } from './brand.js';
+import { resolveSteerUntil, SteerError } from './steer.js';
 /** @typedef {import('./types.js').CodedError} CodedError */
 
 
@@ -725,6 +726,10 @@ const CLIENT_KEY_REFUSED_PATHS = new Map([
   // Drain stops new traffic for the whole proxy, which is the operator's call.
   ['/teamclaude/drain', 'a client key cannot drain the proxy'],
   ['/teamclaude/undrain', 'a client key cannot drain the proxy'],
+  // Not a config write either, but it decides where every tenant's NEW
+  // conversations go, and a --redeem steer can spend a reset that cannot be
+  // given back.
+  ['/teamclaude/steer', 'a client key cannot steer the fleet'],
 ]);
 
 // What an inference-scoped key is refused: every route under the control
@@ -1216,6 +1221,82 @@ export function createProxyServer(accountManager, config, hooks = {}, sx = null,
         return;
       }
 
+      // Steer — place NEW conversations of one provider on one account for a
+      // while, leaving every running conversation where it is (`teamclaude
+      // steer`; see steer.js). Body: {"account": "<as for /switch>" | null,
+      // "provider"?: "anthropic" | "codex", "for"?: <seconds> | "<6h>",
+      // "until"?: "<ISO 8601>", "redeem"?: <boolean>}. `account: null` clears
+      // that provider's steer, or every steer with no provider named. Runtime
+      // state like /switch, but kept in the state file, so it survives a
+      // restart. The answer echoes what the manager settled on — the end time
+      // after the 7-day clamp above all — and whether the target can take a
+      // placement right now.
+      if (req.method === 'POST' && req.url === '/teamclaude/steer') {
+        const names = () => (accountManager.accounts || []).map((/** @type {any} */ a) => a.name);
+        const reply = (/** @type {number} */ code, /** @type {Record<string, any>} */ payload) => {
+          res.writeHead(code, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(payload));
+        };
+        let body;
+        try {
+          body = JSON.parse((await readControlBody(req)) || '{}');
+        } catch (/** @type {any} */ err) {
+          const tooLarge = err.message === 'body too large';
+          reply(tooLarge ? 413 : 400, { ok: false, error: tooLarge ? 'request body too large' : 'invalid request body' });
+          return;
+        }
+        if (!body || typeof body !== 'object' || Array.isArray(body)) {
+          reply(400, { ok: false, error: 'invalid request body' });
+          return;
+        }
+        const provider = body.provider ?? null;
+        if (provider !== null && !(typeof provider === 'string' && Object.hasOwn(PROVIDERS, provider))) {
+          reply(400, { ok: false, error: `"provider" must be one of: ${Object.keys(PROVIDERS).join(', ')}` });
+          return;
+        }
+        const target = body.account;
+        if (target === null) {
+          const cleared = accountManager.clearSteer(provider);
+          reply(200, { ok: true, cleared });
+          return;
+        }
+        if (typeof target !== 'string' || !target.trim()) {
+          reply(400, { ok: false, error: 'missing "account" (null clears the steer)', accounts: names() });
+          return;
+        }
+        if (body.redeem != null && typeof body.redeem !== 'boolean') {
+          reply(400, { ok: false, error: '"redeem" must be true or false' });
+          return;
+        }
+        const end = resolveSteerUntil({ for: body.for, until: body.until });
+        if ('error' in end) {
+          reply(400, { ok: false, error: end.error });
+          return;
+        }
+        const index = resolveSteerTarget(accountManager, target, provider);
+        if (index == null) {
+          reply(404, { ok: false, error: `no such account "${safeLine(target, 64)}"${provider ? ` among the ${provider} accounts` : ''}`, accounts: names() });
+          return;
+        }
+        let result;
+        try {
+          result = accountManager.setSteer(index, { until: end.until, redeem: body.redeem === true });
+        } catch (/** @type {any} */ err) {
+          // A SteerError is the caller's own request (a --redeem on an API
+          // key, a target already at its wall) and safe to echo; anything else
+          // is ours.
+          if (!(err instanceof SteerError)) throw err;
+          reply(400, { ok: false, error: err.message });
+          return;
+        }
+        const { eligible, reason } = accountManager.steerEligibility(index);
+        if (!eligible) {
+          console.log(`[TeamClaude] Steer target "${safeLine(result.steer.target, 64)}" is ${reason}, so new conversations go elsewhere until that changes`);
+        }
+        reply(200, { ok: true, ...result, clamped: end.clamped, eligible, ...(reason ? { reason } : {}) });
+        return;
+      }
+
       // Threshold endpoint — the utilization at which rotation leaves an
       // account, the web equivalent of `teamclaude threshold <1-100>` and of the
       // set_threshold MCP tool. Unlike /switch, which only moves currentIndex in
@@ -1585,6 +1666,25 @@ export function resolveAccountPin(accountManager, token) {
   ]) if (i >= 0) return i;
 
   return null;
+}
+
+/**
+ * Resolve a steer's account the way a pin is resolved (resolveAccountPin),
+ * among one provider's accounts when the caller names one. One person's Claude
+ * and Codex subscriptions are usually one email, so a mixed fleet lists that
+ * name twice; the attached TUI and the CLI's --provider say which they mean,
+ * where a bare name would take whichever comes first.
+ * @param {any} accountManager
+ * @param {string} token
+ * @param {string|null} provider
+ * @returns {number|null}
+ */
+export function resolveSteerTarget(accountManager, token, provider) {
+  if (provider == null) return resolveAccountPin(accountManager, token);
+  const all = accountManager.accounts || [];
+  const accounts = all.filter((/** @type {any} */ a) => providerOf(a) === provider);
+  const i = resolveAccountPin({ accounts }, token);
+  return i == null ? null : all.indexOf(accounts[i]);
 }
 
 /**
@@ -2225,7 +2325,7 @@ export function createProxyRequestListener({ accountManager, upstream, logDir = 
       // retries and holds of this request keep them, and a reload applies to
       // subsequent requests.
       const output = hideActivity ? null : outputTrackerFor(config, hooks, reqId);
-      const ctx = { account: null, callerRequestId: callerId, status: null, sessionId, attempt: 0, tried: new Set(), reauthed: new Set(), model, advisorModel, streamRequested: parseRequestStream(body), fleetMessageThreads: config?.messageThreads === true, pinnedIndex, provider, holdBudgetMs: holdMs, pinKey, onMessage, client, delivered: false, abandoned: false, onUsage: usageRecorder.onUsage, output, stripHeaders, stripOverage: shouldStripOverageHeaders(config), synthesizeQuota: shouldSynthesizeQuotaHeaders(config), poolQuota: shouldPoolQuotaHeaders(config), logLevel: resolveLogLevel(config), logMaxBodyBytes: resolveLogMaxBodyBytes(config) };
+      const ctx = { account: null, callerRequestId: callerId, status: null, sessionId, attempt: 0, tried: new Set(), reauthed: new Set(), model, advisorModel, streamRequested: parseRequestStream(body), fleetMessageThreads: config?.messageThreads === true, pinnedIndex, steered: false, provider, holdBudgetMs: holdMs, pinKey, onMessage, client, delivered: false, abandoned: false, onUsage: usageRecorder.onUsage, output, stripHeaders, stripOverage: shouldStripOverageHeaders(config), synthesizeQuota: shouldSynthesizeQuotaHeaders(config), poolQuota: shouldPoolQuotaHeaders(config), logLevel: resolveLogLevel(config), logMaxBodyBytes: resolveLogMaxBodyBytes(config) };
       // Hold the session "in flight" across the WHOLE request (incl. retries and
       // a multi-minute streaming completion) so it stays counted as active and
       // never expires mid-request.
@@ -2287,7 +2387,7 @@ export function createProxyRequestListener({ accountManager, upstream, logDir = 
         openEntry = null;
         // With the meter on, the end also carries the settled output count and
         // when the output started and stopped; off, the entry is what it was.
-        if (!hideActivity) hooks.onRequestEnd?.(reqId, { callerRequestId: callerId, method: req.method, path: req.url, account: ctx.account, viaSx: !!ctx.viaSx, status: ctx.status, model: ctx.model, effort, sessionId, pinned: ctx.pinnedIndex != null, client, attempts: ctx.attempt || 0, ...output?.summary() });
+        if (!hideActivity) hooks.onRequestEnd?.(reqId, { callerRequestId: callerId, method: req.method, path: req.url, account: ctx.account, viaSx: !!ctx.viaSx, status: ctx.status, model: ctx.model, effort, sessionId, pinned: ctx.pinnedIndex != null, steered: ctx.steered === true, client, attempts: ctx.attempt || 0, ...output?.summary() });
       }
     } catch (err) {
       reportFailure('[TeamClaude] Unhandled error:', err);
@@ -3777,6 +3877,7 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
   // What this attempt's selection decided beyond which account it returned.
   // Carried on ctx rather than read straight back, because the failover hops
   // below run after an upstream round trip.
+  /** @type {{ rolledOff?: Set<number>, steered?: boolean }} */
   const selection = {};
   // A pin bypasses selection entirely, so the provider partition has to be
   // enforced here too — otherwise TC_ACCT aimed at a Claude subscription would
@@ -3802,6 +3903,10 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
     ctx.rolledOff ??= new Set();
     for (const i of selection.rolledOff) ctx.rolledOff.add(i);
   }
+  // Whether THIS attempt was placed by a steer, for the activity view's
+  // [steer] mark. Per attempt: a failover after it lands wherever the hop or
+  // the next selection put it, and the last attempt is the one that served.
+  ctx.steered = selection.steered === true;
   if (pinnedWrongProvider && !res.headersSent && !clientGone(res)) {
     // Named plainly: a pin that cannot serve is a configuration mistake, and the
     // exhausted-account response would send the operator looking at quota.
@@ -4011,7 +4116,7 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
   // (for affinity) and keep it "active" in the running-sessions readout. Passive
   // when distribution is off.
   accountManager.recordSession(ctx.pinKey, account.index, ctx.model);
-  hooks.onRequestRouted?.(reqId, { account: account.name, viaSx: ctx.viaSx });
+  hooks.onRequestRouted?.(reqId, { account: account.name, viaSx: ctx.viaSx, steered: ctx.steered === true });
 
   // Refresh OAuth token if needed
   await accountManager.ensureTokenFresh(account.index);

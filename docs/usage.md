@@ -80,7 +80,7 @@ It is a setting, not a nudge: the number is written to the config file (under it
 
 You usually don't need to call it directly. `login`, `import`, `enable`, `disable`, `priority`, `route`, `threshold`, `distribute`, `probe` and `warmup` notify a running server themselves.
 
-Control-plane **writes** (`reload`, `switch`, `session-pin`, `threshold`, `priority`, `disable`) are refused when the request carries a browser `Origin` or a cross-site `Sec-Fetch-Site`. Loopback is exempt from the proxy API key so the CLI needs no configuration, but that exemption also covers any web page you happen to visit: a page can POST to `127.0.0.1` cross-origin without a preflight, and while it cannot read the reply, the write would still land. `curl` and the CLI send neither header and are unaffected. Reads (`status`) are not restricted — the same-origin policy already stops a page from seeing the response.
+Control-plane **writes** (`reload`, `switch`, `session-pin`, `steer`, `threshold`, `priority`, `disable`) are refused when the request carries a browser `Origin` or a cross-site `Sec-Fetch-Site`. Loopback is exempt from the proxy API key so the CLI needs no configuration, but that exemption also covers any web page you happen to visit: a page can POST to `127.0.0.1` cross-origin without a preflight, and while it cannot read the reply, the write would still land. `curl` and the CLI send neither header and are unaffected. Reads (`status`) are not restricted — the same-origin policy already stops a page from seeing the response.
 
 `GET /teamclaude/quota` is the compact read endpoint for status-line integrations. It returns tier-weighted fleet aggregates and the underlying per-account limits; see [Fleet quota endpoint](quota.md#fleet-quota-endpoint).
 
@@ -119,6 +119,7 @@ curl -X POST http://localhost:3456/teamclaude/priority \
 | Key | Action |
 | --- | --- |
 | `s` | Switch active account (`←`/`→` picks the default account or a specific [route](routing.md#model-routes)) |
+| `t` | [Steer](routing.md#steer-new-conversations-to-one-account) new conversations to an account: `←`/`→` choose how long (until the wall, 1h, 6h, 24h), `r` redeems its banked reset at the weekly wall (on a row with an `RC` badge), `Enter` on the steered account clears it. Running conversations keep their accounts. Also in attach mode |
 | `d` | Enable/disable an account |
 | `l` | Sign an account in again (opens on the first account in `error`; not in attach mode). A panel shows the sign-in link, clickable and copied to the clipboard, and takes the pasted answer back, so it works over SSH — see [Signing in again from the TUI](accounts.md#signing-in-again-from-the-tui) |
 | `p` | Refresh quota on all accounts (one-shot probe of the zero-spend usage endpoint) |
@@ -268,6 +269,7 @@ teamclaude attach            # Open the live dashboard against a running server
 teamclaude dashboard         # Open the web dashboard in the browser (needs server)
 teamclaude service install   # Run the proxy as a login service (uninstall/status/print)
 teamclaude switch [name]     # Prefer an account; no name lists them (needs server)
+teamclaude steer [name]      # Send NEW conversations to one account (--for 6h, --redeem, --clear)
 teamclaude remove <name>     # Remove an account (by name or email)
 teamclaude disable <name>    # Temporarily exclude an account from rotation
 teamclaude enable <name>     # Re-enable it (also clears a stuck error state)
@@ -292,7 +294,7 @@ teamclaude help              # Show all commands
 
 `teamclaude status` prints the same picture as the TUI, once, as text. Handy over SSH or in a script; `--json` for machine-readable output. The JSON's `server.version` is the version of the process answering — read once at startup, so right after `teamclaude update` it still names the old code until the restart, where the installed CLI's `teamclaude version` already names the new one; `server.pid` is that process's id, so a caller can tell which server answered on a port. Each account's shared windows carry the time upstream last stated them, beside the value: `quota.unified5hSeenAt` and `quota.unified7dSeenAt`, in epoch milliseconds, for Claude and Codex accounts alike. Only a response or probe that states that window's utilization moves its stamp; a reset time alone, a failed probe or a model-scoped weekly bucket does not. (A Codex subscription states its only 5-hour window inside a model-named family; that reading is the account's 5-hour value, so it moves the 5-hour stamp.) The stamps survive a restart, and a value restored from a state file written before they existed reads `null` until upstream states it again, so `null` means "age unknown", never "just now".
 
-`teamclaude attach` opens the terminal dashboard itself against a server that is already running, which is how you get interactive control back when the proxy runs as a background service. It polls the same status endpoint every second and can do the two things the remote control exposes: `s` switches account, `R` reloads config. The browser dashboard adds the matching **Reload config** action plus a zero-spend **Probe quotas** action; settings editing and the request activity stream still stay in the server's own TUI because they need state that only that process has. When contact with the server drops, the header marker turns from `▲` to `▼` and what is on screen is the last snapshot, not the current state.
+`teamclaude attach` opens the terminal dashboard itself against a server that is already running, which is how you get interactive control back when the proxy runs as a background service. It polls the same status endpoint every second and can do the three things the remote control exposes: `s` switches account, `t` [steers](routing.md#steer-new-conversations-to-one-account) new conversations, `R` reloads config. The browser dashboard adds the matching **Reload config** action plus a zero-spend **Probe quotas** action; settings editing and the request activity stream still stay in the server's own TUI because they need state that only that process has. When contact with the server drops, the header marker turns from `▲` to `▼` and what is on screen is the last snapshot, not the current state.
 
 `teamclaude service install` registers the proxy as a user service that starts at login and restarts on its own — a LaunchAgent on macOS, a `systemd --user` unit on Linux (`uninstall`, `status` and `print` round it out; `print` writes the unit to stdout without touching anything). On macOS the LaunchAgent runs with `ProcessType` `Standard`: the `Background` class it used before carried a QoS clamp that starved the proxy under host contention (status timeouts, seconds of event-loop lag). The unit is only written at install time, so an existing install keeps whatever it was installed with until you re-run `teamclaude service install`. The service `PATH` includes `~/.local/bin` when that directory exists, which is where the native Claude Code installer places `claude`. Keep-warm also checks that directory when `claude` is not on the service `PATH`, so an already-installed service finds the binary without another install.
 
@@ -302,7 +304,7 @@ Re-running `teamclaude service install` rewrites the unit and restarts the proxy
 
 ## Control routes under a second name
 
-Every `/teamclaude/…` route the server exposes — `status`, `quota`, `reload`, `switch`, `disable`, `priority`, `threshold`, `probe`, `drain`, `undrain`, `dashboard` and `mcp` — also answers at the same path under `/teamrouter/…`, with the same gates and the same replies. It is the first step of the [rename to TeamRouter](../README.md#renaming-to-teamrouter); scripts and dashboards written against `/teamclaude/…` keep working unchanged.
+Every `/teamclaude/…` route the server exposes — `status`, `quota`, `reload`, `switch`, `session-pin`, `steer`, `disable`, `priority`, `threshold`, `probe`, `drain`, `undrain`, `dashboard` and `mcp` — also answers at the same path under `/teamrouter/…`, with the same gates and the same replies. It is the first step of the [rename to TeamRouter](../README.md#renaming-to-teamrouter); scripts and dashboards written against `/teamclaude/…` keep working unchanged.
 
 ## Draining for maintenance
 

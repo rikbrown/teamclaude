@@ -20,6 +20,7 @@ import { sanitizeText, safeLine } from './safe-text.js';
 // all read them from there, so they cannot drift apart (#426).
 import { MAX_PROBE_SECONDS, ROUTE_COLORS } from './config-ops.js';
 import { isLocalUpstream } from './provider.js';
+import { canRedeemOn, formatSteerLeft } from './steer.js';
 import { hyperlink, clipboardSequence } from './osc.js';
 /** @typedef {import('./login-flow.js').LoginPrompt} LoginPrompt */
 
@@ -1650,9 +1651,9 @@ export class TUI {
     else if ((k === 'left' || k === 'h') && this.selAction === 'steer') this._cycleSteerDuration(-1);
     else if ((k === 'right' || k === 'l' || k === 'tab') && this.selAction === 'steer') this._cycleSteerDuration(+1);
     else if (k === 'r' && this.selAction === 'steer') {
-      // Only where there is a reset to redeem: the option is not drawn for
-      // any other row, and a key that toggled a hidden flag would arm it for
-      // the next row that does show it.
+      // Only where a reset could be redeemed: the option is not drawn for any
+      // other row, and a key that toggled a hidden flag would arm it for the
+      // next row that does show it.
       if (this._steerCanRedeem(this.selIdx)) this.steerRedeem = !this.steerRedeem;
     }
     else if (k === 'enter') {
@@ -1758,11 +1759,13 @@ export class TUI {
     this.steerDur = (this.steerDur + dir + STEER_PRESETS.length) % STEER_PRESETS.length;
   }
 
-  /** Whether the row holds a banked reset or reset credit — the `RC` badge's
-   *  own test, so the option is offered exactly where the badge is drawn.
+  /** Whether the row is an account a reset can be spent on at all (a Claude
+   *  or Codex subscription login). Not whether one has been seen: the count
+   *  comes from the quota probe, which is off by default, so most rows have
+   *  never had one read. The server's own guards decide when it gets there.
    *  @param {number} idx */
   _steerCanRedeem(idx) {
-    return heldResetCredits(this.am.accounts[idx]?.quota) > 0;
+    return canRedeemOn(this.am.accounts[idx]);
   }
 
   /** Whether the row is the account a steer currently sends work to.
@@ -1786,7 +1789,8 @@ export class TUI {
     if (this.applySteer) { this._doSteerRemote(acct, { clear, preset, redeem }); return; }
     if (clear) { this.am.clearSteer(providerOf(acct)); return; }
     try {
-      this.am.setSteer(idx, { until: preset.ms == null ? null : Date.now() + preset.ms, redeem });
+      const now = Date.now();
+      this.am.setSteer(idx, { until: preset.ms == null ? null : now + preset.ms, redeem, now });
       const { eligible, reason } = this.am.steerEligibility(idx);
       if (!eligible) this._addLog(`"${safeLine(acct.name, 64)}" is ${reason}, so new conversations go elsewhere until that changes`);
     } catch (/** @type {any} */ e) {
@@ -1815,7 +1819,7 @@ export class TUI {
         this._addLog(was ? `Steer to "${was}" cleared` : 'No steer was set');
       } else {
         const name = said(res?.steer?.target) || acct.name;
-        const left = Number.isFinite(res?.steer?.until) ? formatReset(res.steer.until) : '';
+        const left = Number.isFinite(res?.steer?.until) ? formatSteerLeft(res.steer.until - Date.now()) : '';
         this._addLog(`Steering new conversations to "${name}"${left ? ` for ${left}` : ''}${res?.steer?.redeem ? ', redeeming its reset at the wall' : ''}`
           + (res?.eligible === false ? ` — it is ${said(res.reason) || 'not eligible right now'}, so they go elsewhere until that changes` : ''));
       }
@@ -2644,7 +2648,7 @@ export class TUI {
     const steers = this._steers();
     const base = `${sessStr}Port ${port} ${live} `;
     const steerText = steers.map(st => {
-      const notes = [formatReset(st.until), st.redeeming ? 'redeeming' : st.redeem ? 'redeem' : ''].filter(Boolean).join(' · ');
+      const notes = [formatSteerLeft(st.until - Date.now()), st.redeeming ? 'redeeming' : st.redeem ? 'redeem' : ''].filter(Boolean).join(' · ');
       return `steer → ${safeLine(st.target, 64)}${notes ? ` (${notes})` : ''}`;
     }).join('  ');
     // The steer gives way first on a narrow terminal: the frame is cut at the
@@ -3883,9 +3887,12 @@ export class TUI {
             return ` ${dim('↑↓')} select  ${bold('Enter')} clear steer  ${bold('Esc')} cancel`;
           }
           const preset = (STEER_PRESETS[this.steerDur] ?? STEER_PRESETS[0]).label;
-          // Offered only on a row holding a reset (the RC badge): see _keySelect.
+          // Offered on any row a reset can be spent on: see _steerCanRedeem.
+          // Without an `RC` badge it is said that none has been seen, which
+          // with the probe off is not the same as none being held.
+          const unseen = heldResetCredits(this.am.accounts[this.selIdx]?.quota) > 0 ? '' : dim(' (no reset seen)');
           const redeem = this._steerCanRedeem(this.selIdx)
-            ? `  ${bold('r')} redeem at wall: ${this.steerRedeem ? green('on') : gray('off')}`
+            ? `  ${bold('r')} redeem at wall: ${this.steerRedeem ? green('on') : gray('off')}${unseen}`
             : '';
           return ` ${dim('↑↓')} select  ${dim('←→')} for: ${preset}${redeem}  ${bold('Enter')} steer  ${bold('Esc')} cancel`;
         }

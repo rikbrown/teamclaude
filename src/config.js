@@ -53,6 +53,43 @@ export async function saveState(state) {
 }
 
 /**
+ * One writer for a document rewritten whole from a snapshot, such as the state
+ * file: never two writes at once, and never an older snapshot landing after a
+ * newer one.
+ *
+ * Each save used to run on its own, so two in flight raced their renames, and
+ * whichever finished last won: a "set" begun just before a "clear" could land
+ * after it and bring the cleared steer back at the next start. Here a save
+ * asked for while a write runs starts nothing beside it. Every such request
+ * joins ONE follow-up, which takes its snapshot when it starts, so it writes
+ * the newest state there is, and what it replaces is older by construction.
+ *
+ * The answer settles once a write that began after the call has finished,
+ * which is what a caller that must be on disk before it acts (a steer about
+ * to spend a reset) waits for. `write` is expected to report its own failures
+ * and resolve: a rejection here would only reach the caller of the moment.
+ *
+ * @param {() => any} snapshot  builds the document, at the moment it is written
+ * @param {(doc: any) => Promise<void>} write
+ * @returns {() => Promise<void>}
+ */
+export function latestWriter(snapshot, write) {
+  /** @type {Promise<void>|null} */
+  let running = null;
+  /** @type {Promise<void>|null} */
+  let next = null;
+  const run = () => {
+    running = (async () => { await write(snapshot()); })().finally(() => { running = null; });
+    return running;
+  };
+  return () => {
+    if (!running) return run();
+    next ??= running.catch(() => {}).then(() => { next = null; return run(); });
+    return next;
+  };
+}
+
+/**
  * Write a JSON document so that the file at `path` is, at every instant, either
  * the previous complete document or the new one.
  *

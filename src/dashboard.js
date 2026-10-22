@@ -17,6 +17,7 @@
 import { createHash } from 'node:crypto';
 import { UNAVAILABLE_TEXT, RESET_CREDIT_MAX_AGE_MS, outsideSpendText, forecastText, showSessionRow, showWeeklyRow } from './status-renderer.js';
 import { USAGE_WINDOWS } from './client-usage.js';
+import { formatSteerLeft } from './steer.js';
 
 export function renderDashboardHtml() {
   return PAGE;
@@ -362,23 +363,16 @@ export function sessionPinsText(pins) {
 }
 
 // "steer → api-1 (5h12m left, redeem)" — where new conversations are being
-// sent, one entry per provider steered, or '' when none is. Self-contained:
-// it is serialised into the page with the other shared helpers.
+// sent, one entry per provider steered, or '' when none is. Serialised into
+// the page with the other shared helpers, formatSteerLeft among them, so the
+// page counts time left exactly as the CLI and the TUI do.
 /** @param {any} steers @param {number} [now] */
 export function steersText(steers, now) {
   if (!Array.isArray(steers) || !steers.length) return '';
   var at = typeof now === 'number' ? now : Date.now();
-  var left = function (/** @type {number} */ ms) {
-    if (!(ms > 0)) return '0m';
-    var mins = Math.ceil(ms / 60000);
-    if (mins < 60) return mins + 'm';
-    var hrs = Math.floor(mins / 60);
-    if (hrs < 24) return hrs + 'h' + (mins % 60 ? (mins % 60) + 'm' : '');
-    return Math.floor(hrs / 24) + 'd' + (hrs % 24 ? (hrs % 24) + 'h' : '');
-  };
   var named = steers.length > 1;
   return steers.map(function (s) {
-    var notes = [left((s && s.until) - at) + ' left'];
+    var notes = [formatSteerLeft((s && s.until) - at) + ' left'];
     if (s && s.redeeming) notes.push('redeeming');
     else if (s && s.redeem) notes.push('redeem');
     return 'steer' + (named ? ' ' + (s && s.provider || '?') : '') + ' \u2192 ' + (s && s.target || '?') + ' (' + notes.join(', ') + ')';
@@ -756,7 +750,7 @@ export function usageFor(entry, view) {
 export const CARD_NOTE_MAX_AGE_MS = 60 * 1000;
 
 const SHARED_HELPERS = [
-  scopedWeeklyRows, accountTokens, modelLabel, recentModelLabels, providerLabel, thresholdBadgeText, accountBadges, sessionRows, sessionPinsText, steersText, filterSessionRows, sortRows, uniqSorted,
+  scopedWeeklyRows, accountTokens, modelLabel, recentModelLabels, providerLabel, thresholdBadgeText, accountBadges, sessionRows, sessionPinsText, steersText, formatSteerLeft, filterSessionRows, sortRows, uniqSorted,
   switchRequest, switchOutcome, accountControlRequest, accountControlOutcome, thresholdRequest, thresholdPercentText, thresholdOutcome, routeRows, problems, usageFor,
   outsideSpendText, forecastText, showSessionRow, showWeeklyRow, callerCan, callerNotice, cardNoteKey, cardNoteFor, backendQuotaRows,
 ].map(fn => fn.toString()).join('\n\n');

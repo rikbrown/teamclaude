@@ -187,7 +187,11 @@ export function blockedUntil(account, now = Date.now()) {
   return until;
 }
 
-/** @typedef {{ redeemed: boolean, reason: string, account?: string, result?: string|null, resetsLeft?: number|null, cleared?: string[] }} ClaudeRedeemResult */
+/**
+ * `outcome` and `retryAt` are for a steer's --redeem (AccountManager._afterSteerAttempt);
+ * the dry-pool caller reads `redeemed` alone.
+ * @typedef {{ redeemed: boolean, reason: string, account?: string, result?: string|null, resetsLeft?: number|null, cleared?: string[], outcome?: import('./steer.js').SteerRedeemResult['outcome'], retryAt?: number }} ClaudeRedeemResult
+ */
 
 export class ClaudeResetRedeemer {
   /**
@@ -280,26 +284,46 @@ export class ClaudeResetRedeemer {
    * never claim at once: this one waits out a pool attempt in flight, and a
    * dry-pool refusal arriving meanwhile joins this one.
    *
+   * The answer carries an `outcome` the steer acts on (see SteerRedeemResult),
+   * and `beforeSpend` is awaited right before the claim: the steer saves itself
+   * as mid-spend there, and answers false when it ended during the attempt.
+   *
    * @param {Record<string, any>} account
+   * @param {{ beforeSpend?: ((claim: { requestId: string }) => Promise<boolean>)|null }} [opts]
    * @returns {Promise<ClaudeRedeemResult>}
    */
-  async redeemForSteer(account) {
+  async redeemForSteer(account, { beforeSpend = null } = {}) {
     while (this.inFlight) await this.inFlight.catch(() => {});
-    const attempt = this._attemptForSteer(account).finally(() => { if (this.inFlight === attempt) this.inFlight = null; });
+    const attempt = this._attemptForSteer(account, beforeSpend).finally(() => { if (this.inFlight === attempt) this.inFlight = null; });
     this.inFlight = attempt;
     return attempt;
   }
 
-  /** @param {Record<string, any>} account @returns {Promise<ClaudeRedeemResult>} */
-  async _attemptForSteer(account) {
+  /**
+   * @param {Record<string, any>} account
+   * @param {((claim: { requestId: string }) => Promise<boolean>)|null} beforeSpend
+   * @returns {Promise<ClaudeRedeemResult>}
+   */
+  async _attemptForSteer(account, beforeSpend) {
     const name = safeLine(account?.name, 64);
     const now = this.now();
-    if (!this._isClaude(account) || !account.orgUuid) return { redeemed: false, account: name, reason: 'not a Claude subscription account with an organization' };
-    if (account.disabled) return { redeemed: false, account: name, reason: 'the account is disabled' };
-    if (now < this.fleetHoldUntil) return { redeemed: false, account: name, reason: 'holding off after a recent Claude reset attempt' };
-    if (account.quota?.resetCredits?.available === 0) return { redeemed: false, account: name, reason: 'its last reading holds no reset' };
-    if (now < this._stateFor(account).cooldownUntil) return { redeemed: false, account: name, reason: 'cooling down after a recent attempt on it' };
-    return this._redeem(account, now + this.timeoutMs, 'its steer has spent its week (--redeem)');
+    /** @type {(reason: string, retryAt?: number) => ClaudeRedeemResult} */
+    const later = (reason, retryAt = now + DECLINED_COOLDOWN_MS) => ({ redeemed: false, account: name, reason, outcome: 'not-now', retryAt });
+    if (!this._isClaude(account) || !account.orgUuid) {
+      return { redeemed: false, account: name, reason: 'not a Claude subscription account with an organization', outcome: 'nothing-held' };
+    }
+    // The dry pool's own test (resetClears): disabled, a cap, an error state,
+    // an OAuth denial all survive a cleared window, so a reset spent there is
+    // gone for nothing. Each can change, so the steer asks again later.
+    const blocked = this.am.resetBlockedBy?.(account) ?? null;
+    if (blocked) return later(`a reset would not put it back in service while it is ${blocked}`);
+    if (now < this.fleetHoldUntil) return later('holding off after a recent Claude reset attempt', this.fleetHoldUntil);
+    if (account.quota?.resetCredits?.available === 0) {
+      return { redeemed: false, account: name, reason: 'its last reading holds no reset', outcome: 'nothing-held' };
+    }
+    const cooldown = this._stateFor(account).cooldownUntil;
+    if (now < cooldown) return later('cooling down after a recent attempt on it', cooldown);
+    return this._redeem(account, now + this.timeoutMs, 'its steer has spent its week (--redeem)', { beforeSpend, applyUsage: true });
   }
 
   /** @param {Record<string, any>[]} accounts */
@@ -324,61 +348,80 @@ export class ClaudeResetRedeemer {
   }
 
   /**
+   * `beforeSpend` and `applyUsage` are a steer's (see _attemptForSteer). With
+   * `applyUsage`, an upstream that says the account is NOT at its limit also
+   * has its usage reading applied: the steer was sent here by a local reading
+   * at 100%, and that reading is what keeps traffic off the account, so
+   * leaving it would leave the account unable to reach the wall upstream is
+   * waiting for.
+   *
    * @param {Record<string, any>} account
    * @param {number} deadline
    * @param {string} [why]  what asked, for the log line and the result
+   * @param {{ beforeSpend?: ((claim: { requestId: string }) => Promise<boolean>)|null, applyUsage?: boolean }} [opts]
    * @returns {Promise<ClaudeRedeemResult>}
    */
-  async _redeem(account, deadline, why = 'no Claude account can serve the request') {
+  async _redeem(account, deadline, why = 'no Claude account can serve the request', { beforeSpend = null, applyUsage = false } = {}) {
     const name = safeLine(account.name, 64);
     const state = this._stateFor(account);
     const now = this.now();
+    /** @type {(reason: string) => ClaudeRedeemResult} */
+    const later = reason => ({ redeemed: false, account: name, reason, outcome: 'not-now', retryAt: Math.max(state.cooldownUntil, now + 1) });
+    /** @type {(reason: string) => ClaudeRedeemResult} */
+    const none = reason => ({ redeemed: false, account: name, reason, outcome: 'nothing-held' });
     try { await this.am.ensureTokenFresh(account.index); } catch (/** @type {any} */ err) {
-      return { redeemed: false, account: name, reason: `token refresh failed (${safeLine(err?.message || String(err), 80)})` };
+      return { ...later(`token refresh failed (${safeLine(err?.message || String(err), 80)})`), retryAt: now + DECLINED_COOLDOWN_MS };
     }
     const left = () => Math.max(1, deadline - this.now());
     const read = await this.statusFn(account, { timeoutMs: left() });
     if (read?.error) {
       state.cooldownUntil = now + DECLINED_COOLDOWN_MS;
-      return { redeemed: false, account: name, reason: `could not read reset status (${read.error})` };
+      return later(`could not read reset status (${read.error})`);
     }
     const status = read.reset;
     if (!status || !status.eligible) {
       state.cooldownUntil = now + NOTHING_COOLDOWN_MS;
-      return { redeemed: false, account: name, reason: `not eligible for resets${status?.ineligibleReason ? ` (${status.ineligibleReason})` : ''}` };
+      return none(`not eligible for resets${status?.ineligibleReason ? ` (${status.ineligibleReason})` : ''}`);
     }
     const grant = claimableGrant(status, now);
     if (!grant) {
       state.cooldownUntil = now + NOTHING_COOLDOWN_MS;
-      return { redeemed: false, account: name, reason: 'holds no usable reset' };
+      return none('holds no usable reset');
     }
     {
       if (!status.atLimit || !status.exhausted.length) {
         state.cooldownUntil = now + DECLINED_COOLDOWN_MS;
-        return { redeemed: false, account: name, reason: 'not at a usage limit' };
+        if (applyUsage && read.usage && !read.usage.error) this.am.applyUsageData(account.index, read.usage);
+        return later('not at a usage limit');
       }
       // A grant is scarce and a 5-hour wall lifts on its own within hours: spend
       // one only where a weekly limit (the all-models week or a family's,
       // `seven_day*`) is what turns the account away.
       if (!status.exhausted.some((/** @type {string} */ limit) => limit.startsWith('seven_day'))) {
         state.cooldownUntil = now + DECLINED_COOLDOWN_MS;
-        return { redeemed: false, account: name, reason: 'no weekly limit is exhausted' };
+        if (applyUsage && read.usage && !read.usage.error) this.am.applyUsageData(account.index, read.usage);
+        return later('no weekly limit is exhausted');
       }
       // Spent on an account it would not return to service, a reset buys this
       // request nothing — and the grant is gone.
       const uncovered = status.exhausted.filter((/** @type {string} */ limit) => !grant.clears.includes(limit));
       if (uncovered.length) {
         state.cooldownUntil = now + DECLINED_COOLDOWN_MS;
-        return { redeemed: false, account: name, reason: `its reset does not clear ${uncovered.join(', ')}` };
+        return later(`its reset does not clear ${uncovered.join(', ')}`);
       }
     }
     // Upstream already says a claim now would answer `cooldown`: save the POST.
     if (status.cooldownUntil != null && status.cooldownUntil > now) {
       state.cooldownUntil = status.cooldownUntil;
-      return { redeemed: false, account: name, reason: 'upstream reports a reset cooldown' };
+      return later('upstream reports a reset cooldown');
     }
     if (state.grantId !== grant.id) { state.grantId = grant.id; state.requestId = null; }
     state.requestId ||= randomUUID();
+    // The last moment before the one irreversible request. The key is kept
+    // whichever way this goes, as an unsent key is harmless to send later.
+    if (beforeSpend && (await beforeSpend({ requestId: state.requestId })) === false) {
+      return { redeemed: false, account: name, reason: 'the steer ended before the reset was spent', outcome: 'cancelled' };
+    }
     this.log(`[TeamClaude] Redeeming a banked Claude usage-limit reset on "${name}" — ${why}`);
     const r = await this.claimFn(account, { grantId: grant.id, requestId: state.requestId }, { timeoutMs: left() });
 
@@ -388,7 +431,7 @@ export class ClaudeResetRedeemer {
       state.cooldownUntil = now + UNKNOWN_HOLD_MS;
       this._holdFleet(account, now + UNKNOWN_HOLD_MS);
       this.log(`[TeamClaude] Claude reset on "${name}" got no verdict (${r.error}); it may have been spent, so the fleet holds off`);
-      return { redeemed: false, account: name, reason: `reset request failed (${r.error}); it may still have gone through` };
+      return { redeemed: false, account: name, reason: `reset request failed (${r.error}); it may still have gone through`, outcome: 'unknown' };
     }
     state.requestId = null;
     state.grantId = null;
@@ -399,11 +442,16 @@ export class ClaudeResetRedeemer {
       await this._reapply(account, deadline);
       // A steer on this account was about spending the week that just went.
       this.am.noteResetRedeemed?.(account);
-      return { redeemed: true, account: name, reason: why, result: r.result, resetsLeft: r.resetsLeft, cleared: r.cleared };
+      return { redeemed: true, account: name, reason: why, result: r.result, resetsLeft: r.resetsLeft, cleared: r.cleared, outcome: 'redeemed' };
     }
     state.cooldownUntil = r.result === 'cooldown' && r.cooldownUntil ? r.cooldownUntil : now + DECLINED_COOLDOWN_MS;
     this.log(`[TeamClaude] Claude reset on "${name}" declined upstream (${r.result || 'no result'}${r.reason ? `: ${r.reason}` : ''}); nothing was spent`);
-    return { redeemed: false, account: name, reason: `upstream declined (${r.result || 'no result'}${r.reason ? `: ${r.reason}` : ''})`, result: r.result };
+    const declined = `upstream declined (${r.result || 'no result'}${r.reason ? `: ${r.reason}` : ''})`;
+    // `ineligible` and `unavailable` say there is nothing to spend here;
+    // `not_limited` and `cooldown` say not yet.
+    if (r.result === 'ineligible' || r.result === 'unavailable') return { ...none(declined), result: r.result };
+    if (applyUsage && r.result === 'not_limited' && read.usage && !read.usage.error) this.am.applyUsageData(account.index, read.usage);
+    return { ...later(declined), result: r.result };
   }
 
   /**

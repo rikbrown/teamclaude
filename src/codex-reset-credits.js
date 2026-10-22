@@ -369,7 +369,9 @@ export function shouldRedeemReset({ account, autoRedeemResets = false, pool = []
  * What every path through `maybeRedeemForPool` answers with. `redeemed` is the
  * only field a caller must read: the rest describe the decision for a log line.
  *
- * @typedef {{redeemed: boolean, reason: string, code?: string|null, windowsReset?: number}} RedeemResult
+ * `outcome` and `retryAt` are for a steer's --redeem (AccountManager._afterSteerAttempt).
+ *
+ * @typedef {{redeemed: boolean, reason: string, code?: string|null, windowsReset?: number, outcome?: import('./steer.js').SteerRedeemResult['outcome'], retryAt?: number}} RedeemResult
  */
 
 /**
@@ -576,35 +578,61 @@ export class ResetCreditRedeemer {
    * consume at once: this one waits out a pool attempt in flight, and a dry-pool
    * refusal arriving meanwhile joins this one.
    *
+   * The answer carries an `outcome` the steer acts on (see SteerRedeemResult),
+   * and `beforeSpend` is awaited right before the consume: the steer saves
+   * itself as mid-spend there, and answers false when it ended meanwhile.
+   *
    * @param {Record<string, any>} account
+   * @param {{ beforeSpend?: ((claim: { requestId: string }) => Promise<boolean>)|null }} [opts]
    * @returns {Promise<RedeemResult>}
    */
-  async redeemForSteer(account) {
+  async redeemForSteer(account, { beforeSpend = null } = {}) {
     while (this.inFlight) await this.inFlight.catch(() => {});
-    const attempt = this._attemptForSteer(account).finally(() => { if (this.inFlight === attempt) this.inFlight = null; });
+    const attempt = this._attemptForSteer(account, beforeSpend).finally(() => { if (this.inFlight === attempt) this.inFlight = null; });
     this.inFlight = attempt;
     return attempt;
   }
 
   /**
    * @param {Record<string, any>} account
+   * @param {((claim: { requestId: string }) => Promise<boolean>)|null} beforeSpend  awaited right before the consume; false stops it (see AccountManager._redeemOnSteer)
    * @returns {Promise<RedeemResult>}
    */
-  async _attemptForSteer(account) {
+  async _attemptForSteer(account, beforeSpend) {
     const now = this.now();
+    /** @type {(reason: string, retryAt?: number) => RedeemResult} */
+    const later = (reason, retryAt = now + RETRY_COOLDOWN_MS) => ({ redeemed: false, reason, outcome: 'not-now', retryAt });
+    if (providerOf(account) !== 'codex') return { redeemed: false, reason: 'not a Codex account', outcome: 'nothing-held' };
+    // The dry pool's own test (resetClears): disabled, a cap, an error state
+    // all survive a cleared window, so a credit spent there is gone for
+    // nothing. Each can change, so the steer asks again later.
+    const blocked = this.am.resetBlockedBy?.(account) ?? null;
+    if (blocked) return later(`a reset would not put it back in service while it is ${blocked}`);
     if (now < this.fleetCooldownUntil) {
-      return { redeemed: false, reason: 'the pool is cooling down after a recent redemption attempt' };
+      return later('the pool is cooling down after a recent redemption attempt', this.fleetCooldownUntil);
     }
     const deadline = now + this.timeoutMs;
     const state = this._stateFor(account);
     const ready = await this._ready(account, state, now, deadline, true);
-    if (!ready.credits) return { redeemed: false, reason: ready.reason ?? 'holds no credit worth spending' };
+    if (!ready.credits) {
+      if (ready.none) return { redeemed: false, reason: ready.reason ?? 'holds no reset credits', outcome: 'nothing-held' };
+      return later(ready.reason ?? 'holds no credit worth spending', state.cooldownUntil > now ? state.cooldownUntil : undefined);
+    }
     // Plan support is read off the fresh detail rows here, not off the
     // probe's `applicable` count: that count was taken while the window still
     // had room, when no credit had anything to reset.
     const credit = redeemableCredit(ready.credits);
-    if (!credit) return { redeemed: false, reason: 'holds no redeemable credit' };
-    return this._consume(account, state, { redeem: true, reason: 'its steer has spent its week (--redeem)', creditId: credit.id }, now, deadline);
+    if (!credit) return { redeemed: false, reason: 'holds no redeemable credit', outcome: 'nothing-held' };
+    const result = await this._consume(account, state, { redeem: true, reason: 'its steer has spent its week (--redeem)', creditId: credit.id }, now, deadline, beforeSpend);
+    // Upstream has nothing of this account's to reset: the weekly reading that
+    // sent the steer here is stale. Re-read it, inside what is left of the
+    // budget, so the account can take traffic again and reach the real wall.
+    if (result.code === 'nothing_to_reset') {
+      const timeoutMs = this._timeLeft(deadline);
+      const usage = timeoutMs > 0 ? await this.usageFn(account, { timeoutMs }).catch(() => null) : null;
+      if (usage && !usage.error) this.am.applyCodexUsageData(account.index, usage);
+    }
+    return result;
   }
 
   /**
@@ -620,7 +648,7 @@ export class ResetCreditRedeemer {
    * @param {number} now
    * @param {number} deadline
    * @param {boolean} [consented]  a steer's --redeem names this account (see redeemPreconditions)
-   * @returns {Promise<{credits?: ResetCredit[], reason?: string}>}
+   * @returns {Promise<{credits?: ResetCredit[], reason?: string, none?: boolean}>}  `none`: the holdings count says there is nothing to spend
    */
   async _ready(account, state, now, deadline, consented = false) {
     const autoRedeemResets = this.config?.autoRedeemResets === true;
@@ -636,7 +664,7 @@ export class ResetCreditRedeemer {
     // reading is likewise not "none": the probe is off by default, and the
     // detail fetch reports the count anyway.
     if (account.quota?.resetCredits?.available === 0) {
-      return { reason: 'holds no reset credits' };
+      return { reason: 'holds no reset credits', none: true };
     }
 
     const credits = await this._credits(account, state, now, deadline);
@@ -767,31 +795,43 @@ export class ResetCreditRedeemer {
    * @param {{redeem: boolean, reason: string, creditId: string|null}} verdict
    * @param {number} now
    * @param {number} deadline
+   * @param {((claim: { requestId: string }) => Promise<boolean>)|null} [beforeSpend]  a steer's: awaited right before the consume, false stops it
    * @returns {Promise<RedeemResult>}
    */
-  async _consume(account, state, verdict, now, deadline) {
+  async _consume(account, state, verdict, now, deadline, beforeSpend = null) {
     const name = safeLine(account.name, 64);
     // Raced against the deadline, not merely measured after the fact: the
     // budget exists to bound what the waiting client is held for, and a check
     // that runs once the refresh has returned can only report a promise already
     // broken. See _freshToken.
     const fresh = await this._freshToken(account, deadline);
-    const timeoutMs = fresh.ok ? this._timeLeft(deadline) : 0;
-    if (timeoutMs <= 0) {
+    let timeoutMs = fresh.ok ? this._timeLeft(deadline) : 0;
+    /** @param {string} why @returns {RedeemResult} */
+    const stopped = why => {
       // Declined like any other attempt that spent nothing: a cooldown, so a
-      // burst against a slow upstream cannot re-enter here per refusal, and
-      // no idempotency key minted for a request never made. Per-account only —
-      // nothing was sent, so the fleet has nothing to be careful of.
-      const why = fresh.error || 'ran out of the redeem budget';
+      // burst against a slow upstream cannot re-enter here per refusal.
+      // Per-account only — nothing was sent, so the fleet has nothing to be
+      // careful of.
       state.cooldownUntil = now + RETRY_COOLDOWN_MS;
       this.log(`[TeamClaude] Codex rate-limit reset on "${name}" stopped before redeeming — ${why}`);
-      return { redeemed: false, reason: why };
-    }
+      return { redeemed: false, reason: why, outcome: 'not-now', retryAt: state.cooldownUntil };
+    };
+    // No idempotency key minted for a request never made.
+    if (timeoutMs <= 0) return stopped(fresh.error || 'ran out of the redeem budget');
 
     // Reused across retries of the SAME logical attempt: an attempt that failed
     // after upstream had already acted is indistinguishable from one that never
     // arrived, and replaying the key is what makes upstream say so.
     state.redeemRequestId ||= randomUUID();
+    // A steer's last word before the one irreversible request. The key is
+    // kept whichever way this goes: a key never sent is harmless to send later.
+    if (beforeSpend) {
+      if ((await beforeSpend({ requestId: state.redeemRequestId })) === false) {
+        return { redeemed: false, reason: 'the steer ended before the credit was spent', outcome: 'cancelled' };
+      }
+      timeoutMs = this._timeLeft(deadline);
+      if (timeoutMs <= 0) return stopped('ran out of the redeem budget');
+    }
     this.log(`[TeamClaude] Redeeming a free Codex rate-limit reset on "${name}" — ${verdict.reason}`);
 
     const result = await this.consumeFn(account,
@@ -811,7 +851,7 @@ export class ResetCreditRedeemer {
       state.cooldownUntil = now + RETRY_COOLDOWN_MS;
       this.fleetCooldownUntil = Math.max(this.fleetCooldownUntil, now + RETRY_COOLDOWN_MS);
       this.log(`[TeamClaude] Codex rate-limit reset failed on "${name}" — ${safeLine(result.error, 120)}; it may still have been spent, so the pool holds off`);
-      return { redeemed: false, reason: `redeem failed (${result.error})` };
+      return { redeemed: false, reason: `redeem failed (${result.error})`, outcome: 'unknown' };
     }
 
     state.redeemRequestId = null;
@@ -835,12 +875,16 @@ export class ResetCreditRedeemer {
       await this._refresh(account, name, deadline);
       // A steer on this account was about spending the week that just went.
       this.am.noteResetRedeemed?.(account);
-      return { redeemed: true, reason: verdict.reason, code: result.code, windowsReset: windows };
+      return { redeemed: true, reason: verdict.reason, code: result.code, windowsReset: windows, outcome: 'redeemed' };
     }
 
     state.cooldownUntil = now + RETRY_COOLDOWN_MS;
     this.log(`[TeamClaude] Codex rate-limit reset declined on "${name}" — upstream said "${result?.code || 'nothing'}", no credit spent`);
-    return { redeemed: false, reason: `upstream declined (${result?.code || 'no code'})` };
+    // `no_credit` says there is nothing to spend; anything else, not yet.
+    return {
+      redeemed: false, reason: `upstream declined (${result?.code || 'no code'})`, code: result?.code ?? null,
+      ...(result?.code === 'no_credit' ? { outcome: 'nothing-held' } : { outcome: 'not-now', retryAt: state.cooldownUntil }),
+    };
   }
 
   /**

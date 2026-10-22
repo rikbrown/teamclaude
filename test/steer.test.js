@@ -30,10 +30,21 @@ function fleet(accounts, opts = {}) {
 
 /** The account a request lands on, recorded as the server records it. */
 function route(am, sessionId, model = OPUS, { provider = 'anthropic', exclude = null } = {}) {
+  /** @type {{ steered?: boolean }} */
   const decision = {};
   const account = am.getActiveAccount(exclude, model, null, sessionId, provider, decision);
-  if (account && sessionId) am.recordSession(sessionId, account.index, model);
+  if (account && sessionId) am.recordSession(sessionId, account.index, model, { steered: decision.steered === true });
   return { name: account?.name ?? null, steered: decision.steered === true };
+}
+
+/** Run `fn` (async) with console.log captured, returning the lines. */
+async function loggedAsync(fn) {
+  const original = console.log;
+  /** @type {string[]} */
+  const lines = [];
+  console.log = (...a) => { lines.push(a.join(' ')); };
+  try { await fn(); } finally { console.log = original; }
+  return lines;
 }
 
 /** Run `fn` with console.log captured, returning the lines. */
@@ -87,10 +98,9 @@ test('a new conversation goes to the steer target over priority and every distri
     am.setDistributeSessions(mode);
     assert.deepEqual(route(am, `new-${mode}`), { name: 't', steered: true }, mode);
   }
-  // And the placement holds. Its next request finds the pin outranked, as
-  // priority always outranks a pin, and the placement that follows is the
-  // steer's again, so the conversation does not move.
-  assert.equal(route(am, 'new-even').name, 't');
+  // And the placement holds: the pin the steer made is exempt from the
+  // priority preemption, so its next request is served by the pin, not placed.
+  assert.deepEqual(route(am, 'new-even'), { name: 't', steered: false });
 });
 
 test('a new conversation goes to the steer target outside the expiry band', () => {
@@ -370,19 +380,46 @@ test('at upstream\'s weekly wall a --redeem steer redeems exactly once, then end
   assert.deepEqual(am.steerList(), []);
 });
 
-test('a redemption that spends nothing still ends the steer, and says why', async () => {
+test('an attempt that spent nothing for now leaves the steer armed, and asks again only after its back-off', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
   const am = fleet([oauth('a'), oauth('t')], { distributeSessions: true });
-  const t = am.accounts[indexOf(am, 't')];
-  am.setSteerRedeemer(async () => ({ redeemed: false, reason: 'not at a usage limit' }));
-  logged(() => am.setSteer(t.index, { redeem: true }));
-  t.quota.unified7d = 1;
+  const target = am.accounts[indexOf(am, 't')];
+  let asked = 0;
+  am.setSteerRedeemer(async () => { asked++; return { redeemed: false, reason: 'not at a usage limit', outcome: 'not-now', retryAt: Date.now() + 30 * 60_000 }; });
+  logged(() => am.setSteer(target.index, { redeem: true }));
+  target.quota.unified7d = 1;
   logged(() => route(am, 'x'));
   const steer = am._steers.get('anthropic');
-  const lines = [];
-  const original = console.log;
-  console.log = (...a) => { lines.push(a.join(' ')); };
-  try { await steer?.attempt; } finally { console.log = original; }
-  assert.deepEqual(lines, ['[TeamClaude] Steer to "t" ended — its week was spent, but no reset was redeemed: not at a usage limit']);
+  const lines = await loggedAsync(async () => { await steer?.attempt; });
+  assert.match(lines.join('\n'), /no reset was redeemed yet — not at a usage limit; the steer stays, and asks again in 30m/);
+  assert.deepEqual(am.steerList().map(s => [s.target, s.redeeming, s.redeemRetryAt]), [['t', false, Date.now() + 30 * 60_000]]);
+
+  logged(() => { route(am, 'y'); route(am, null); });
+  assert.equal(asked, 1, 'not again inside the back-off');
+  t.mock.timers.tick(30 * 60_000);
+  logged(() => route(am, 'z'));
+  assert.equal(am._steers.get('anthropic')?.phase, 'redeeming', 'asked again once it is over');
+  await am._steers.get('anthropic')?.attempt;
+  assert.equal(asked, 2);
+});
+
+test('an attempt ends the steer when it spent, may have spent, or found nothing to spend', async () => {
+  for (const [r, want] of /** @type {Array<[any, RegExp]>} */ ([
+    [{ redeemed: false, reason: 'holds no usable reset', outcome: 'nothing-held' }, /holds nothing to redeem: holds no usable reset/],
+    [{ redeemed: false, reason: 'reset request failed (socket hang up)', outcome: 'unknown' }, /got no answer .*may have been spent — check the account/],
+    [{ redeemed: false, reason: 'a redeemer that predates outcomes' }, /got no answer/],
+  ])) {
+    const am = fleet([oauth('a'), oauth('t')], { distributeSessions: true });
+    const target = am.accounts[indexOf(am, 't')];
+    am.setSteerRedeemer(async () => r);
+    logged(() => am.setSteer(target.index, { redeem: true }));
+    target.quota.unified7d = 1;
+    logged(() => route(am, 'x'));
+    const steer = am._steers.get('anthropic');
+    const lines = await loggedAsync(async () => { await steer?.attempt; });
+    assert.match(lines.join('\n'), want, JSON.stringify(r));
+    assert.deepEqual(am.steerList(), [], JSON.stringify(r));
+  }
 });
 
 test('without --redeem the wall ends the steer and redeems nothing', () => {
@@ -395,4 +432,119 @@ test('without --redeem the wall ends the steer and redeems nothing', () => {
   logged(() => { route(am, 'x'); route(am, 'y'); });
   assert.deepEqual(am.steerList(), []);
   assert.equal(asked, 0);
+});
+
+// ── review fixes ────────────────────────────────────────────────────────────
+
+/** The headers of a refused request, as upstream sends them. */
+const refusal = (/** @type {Record<string, string>} */ statuses, utilization = '0.999') => ({
+  'anthropic-ratelimit-unified-status': 'rejected',
+  'anthropic-ratelimit-unified-7d-utilization': utilization,
+  ...statuses,
+});
+
+test('upstream\'s weekly refusal is the wall, whatever utilization it carries; a 5-hour or family refusal is not', async () => {
+  for (const [label, headers, wall] of /** @type {Array<[string, Record<string, string>, boolean]>} */ ([
+    ['weekly at 0.999', refusal({ 'anthropic-ratelimit-unified-7d-status': 'rejected' }), true],
+    ['weekly, no utilization', { 'anthropic-ratelimit-unified-status': 'rejected', 'anthropic-ratelimit-unified-7d-status': 'rejected' }, true],
+    ['5-hour only', refusal({ 'anthropic-ratelimit-unified-5h-status': 'rejected', 'anthropic-ratelimit-unified-7d-status': 'allowed' }), false],
+    ['Fable only', refusal({ 'anthropic-ratelimit-unified-7d_oi-status': 'rejected', 'anthropic-ratelimit-unified-7d-status': 'allowed' }), false],
+  ])) {
+    const am = fleet([oauth('a'), oauth('t')], { distributeSessions: true });
+    const target = am.accounts[indexOf(am, 't')];
+    let asked = 0;
+    am.setSteerRedeemer(async () => { asked++; return { redeemed: true, reason: 'x', outcome: 'redeemed' }; });
+    logged(() => am.setSteer(target.index, { redeem: true }));
+    logged(() => { am.updateQuota(target.index, headers); am.markRateLimited(target.index, 600); });
+    logged(() => route(am, 'failover'));
+    await am._steers.get('anthropic')?.attempt;
+    assert.equal(asked, wall ? 1 : 0, label);
+    assert.equal(am.steerList().length, wall ? 0 : 1, label);
+  }
+});
+
+test('without --redeem, upstream\'s weekly refusal ends the steer; a later allowed week clears the refusal', () => {
+  const am = fleet([oauth('a'), oauth('t')], { distributeSessions: true });
+  const target = am.accounts[indexOf(am, 't')];
+  logged(() => am.updateQuota(target.index, refusal({ 'anthropic-ratelimit-unified-7d-status': 'rejected' }, '0.5')));
+  assert.throws(() => am.setSteer(target.index), /already at its weekly switch threshold/);
+  logged(() => am.updateQuota(target.index, { 'anthropic-ratelimit-unified-7d-status': 'allowed', 'anthropic-ratelimit-unified-7d-utilization': '0.5' }));
+  logged(() => am.setSteer(target.index));
+  logged(() => am.updateQuota(target.index, refusal({ 'anthropic-ratelimit-unified-7d-status': 'rejected' }, '0.5')));
+  assert.match(logged(() => route(am, 'x')).join('\n'), /ended — upstream refused it on its weekly limit/);
+});
+
+test('a steer is written as mid-spend before its claim goes out, and a restart from there does not spend again', async () => {
+  const am = fleet([oauth('a'), oauth('t')], { distributeSessions: true });
+  const target = am.accounts[indexOf(am, 't')];
+  /** @type {any[]} */
+  let saved = [];
+  am.onSteersChanged(async () => { saved = JSON.parse(JSON.stringify(am.exportSteers())); });
+  /** @type {any[]} */
+  let atClaim = [];
+  am.setSteerRedeemer(async (_account, { beforeSpend }) => {
+    assert.equal(await beforeSpend({ requestId: 'req-1' }), true);
+    atClaim = saved; // what was on disk when the irreversible request went out
+    return new Promise(() => {}); // the server stops before the answer
+  });
+  logged(() => am.setSteer(target.index, { redeem: true }));
+  target.quota.unified7d = 1;
+  logged(() => route(am, 'x'));
+  while (!atClaim.length) await new Promise(r => setImmediate(r));
+  assert.deepEqual(atClaim.map(r => [r.phase, r.redeemRequestId]), [['redeeming', 'req-1']]);
+
+  const after = fleet([oauth('a'), oauth('t')], { distributeSessions: true });
+  let asked = 0;
+  after.setSteerRedeemer(async () => { asked++; return { redeemed: true, reason: 'x', outcome: 'redeemed' }; });
+  const lines = logged(() => after.restoreSteers(atClaim));
+  assert.match(lines.join('\n'), /"t" not restored — it was redeeming its banked reset when the server stopped, and the outcome of the redemption before the restart is unknown — check the account \(request id req-1\)/);
+  after.accounts[1].quota.unified7d = 1;
+  logged(() => route(after, 'y'));
+  assert.deepEqual(after.steerList(), []);
+  assert.equal(asked, 0, 'no second attempt after the restart');
+});
+
+test('a steer cleared during its attempt stops the spend at the last moment', async () => {
+  const am = fleet([oauth('a'), oauth('t')], { distributeSessions: true });
+  const target = am.accounts[indexOf(am, 't')];
+  /** @type {boolean|null} */
+  let answer = null;
+  am.setSteerRedeemer(async (_account, { beforeSpend }) => {
+    logged(() => am.clearSteer());
+    answer = await beforeSpend({ requestId: 'req-2' });
+    return { redeemed: false, reason: 'the steer ended before the reset was spent', outcome: 'cancelled' };
+  });
+  logged(() => am.setSteer(target.index, { redeem: true }));
+  target.quota.unified7d = 1;
+  const steer = am._steers.get('anthropic');
+  logged(() => route(am, 'x'));
+  await loggedAsync(async () => { await steer?.attempt; });
+  assert.equal(answer, false);
+  assert.deepEqual(am.steerList(), []);
+});
+
+test('a pin a steer placed on an outranked target is not preempted when the steer ends, with distribution on or off', () => {
+  for (const distributeSessions of [true, false]) {
+    const am = fleet([oauth('a'), oauth('t', { priority: 3 })], { distributeSessions });
+    const t = indexOf(am, 't');
+    logged(() => am.setSteer(t));
+    assert.deepEqual(route(am, 'placed'), { name: 't', steered: true });
+    assert.deepEqual(route(am, 'placed'), { name: 't', steered: false }, 'served by its pin, not placed again');
+    logged(() => am.clearSteer());
+    assert.equal(route(am, 'placed').name, 't', `no snap once the steer ends (distributeSessions ${distributeSessions})`);
+    assert.equal(route(am, 'unsteered').name, 'a', 'priority still places what the steer did not');
+    // It still moves when its account can no longer serve it, as every pin does.
+    am.accounts[t].quota.unified5h = 0.99;
+    assert.equal(route(am, 'placed').name, 'a');
+  }
+});
+
+test('a plain steer replacing a --redeem one is judged against its own threshold', () => {
+  const am = fleet([oauth('a'), oauth('t')]);
+  const target = am.accounts[indexOf(am, 't')];
+  target.quota.unified7d = 0.99;
+  logged(() => am.setSteer(target.index, { redeem: true }));
+  assert.equal(am.thresholdFor('unified7d', target), 1, 'lifted by the steer standing');
+  assert.throws(() => am.setSteer(target.index), /already at its weekly switch threshold/);
+  assert.equal(am.steerList()[0].redeem, true, 'the refused replacement left the old steer alone');
 });

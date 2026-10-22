@@ -316,3 +316,63 @@ test('a steer\'s claim that gets no verdict holds the fleet, as a dry-pool one d
   assert.match((await redeemer.redeemForSteer(am.accounts[1])).reason, /holding off/);
   assert.equal(calls.claim.length, 1);
 });
+
+test('a steer\'s --redeem answers with what the steer should do next', async () => {
+  for (const [label, opts, outcome] of /** @type {Array<[string, any, string]>} */ ([
+    ['spent', {}, 'redeemed'],
+    ['no answer', { claim: () => ({ error: 'socket hang up' }) }, 'unknown'],
+    ['no grant', { status: () => block({ next_grant_id: null }) }, 'nothing-held'],
+    ['not eligible', { status: () => ({ ...block(), eligible: false, ineligible_reason: 'plan' }) }, 'nothing-held'],
+    ['declined ineligible', { claim: () => ({ result: 'ineligible', reason: null, cleared: [] }) }, 'nothing-held'],
+    ['declined not_limited', { claim: () => ({ result: 'not_limited', reason: null, cleared: [] }) }, 'not-now'],
+    ['upstream cooldown', { status: () => block({ cooldown_until: new Date(Date.now() + 2 * H).toISOString() }) }, 'not-now'],
+  ])) {
+    const { am, redeemer } = harness({ config: {}, ...opts });
+    const r = await redeemer.redeemForSteer(am.accounts[0]);
+    assert.equal(r.outcome, outcome, label);
+    if (outcome === 'not-now') assert.ok(/** @type {number} */ (r.retryAt) > Date.now(), `${label}: says when to ask again`);
+  }
+});
+
+test('not yet at a limit upstream: the steer is told to ask again, and the stale 100% reading is corrected', async () => {
+  const { am, redeemer, calls } = harness({ config: {}, status: () => block({ at_limit: false, exhausted: [] }) });
+  am.accounts[0].quota.unified7d = 1;
+  const r = await redeemer.redeemForSteer(am.accounts[0]);
+  assert.equal(r.outcome, 'not-now');
+  assert.match(r.reason, /not at a usage limit/);
+  assert.equal(r.retryAt, redeemer._stateFor(am.accounts[0]).cooldownUntil, 'backs off by the redeemer\'s own cooldown');
+  assert.equal(am.accounts[0].quota.unified7d, 0, 'the fresh usage reading was applied');
+  assert.equal(calls.claim.length, 0);
+});
+
+test('a steer\'s --redeem spends nothing where a reset would not put the account back in service', async () => {
+  for (const [label, extra] of /** @type {Array<[string, Record<string, any>]>} */ ([
+    ['disabled', { disabled: true }],
+    ['capped', { maxUsage: 0.4 }],
+  ])) {
+    const { am, redeemer, calls } = harness({ config: {}, accounts: [oauth('t', extra)] });
+    const r = await redeemer.redeemForSteer(am.accounts[0]);
+    assert.equal(r.redeemed, false, label);
+    assert.equal(r.outcome, 'not-now', label);
+    assert.match(r.reason, /would not put it back in service/, label);
+    assert.equal(calls.status + calls.claim.length, 0, `${label}: no request at all`);
+  }
+});
+
+test('a steer\'s --redeem waits for beforeSpend before the claim, with the key the claim then sends, and stops on false', async () => {
+  const go = harness({ config: {} });
+  /** @type {string[]} */
+  const order = [];
+  const claimFn = go.redeemer.claimFn;
+  go.redeemer.claimFn = async (/** @type {any} */ a, /** @type {any} */ c, /** @type {any} */ o) => { order.push(`claim ${c.requestId}`); return claimFn(a, c, o); };
+  const r = await go.redeemer.redeemForSteer(go.am.accounts[0], { beforeSpend: async ({ requestId }) => { order.push(`saved ${requestId}`); return true; } });
+  assert.equal(r.redeemed, true);
+  assert.equal(order.length, 2);
+  assert.equal(order[0], `saved ${go.calls.keys[0]}`);
+  assert.equal(order[1], `claim ${go.calls.keys[0]}`);
+
+  const stop = harness({ config: {} });
+  const stopped = await stop.redeemer.redeemForSteer(stop.am.accounts[0], { beforeSpend: async () => false });
+  assert.equal(stopped.outcome, 'cancelled');
+  assert.equal(stop.calls.claim.length, 0);
+});

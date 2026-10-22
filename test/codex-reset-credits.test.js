@@ -1100,3 +1100,40 @@ test('a steer\'s --redeem keeps every Codex safeguard', async () => {
   assert.match((await twice.redeemer.redeemForSteer(twice.am.accounts[0])).reason, /cooling down/);
   assert.equal(twice.calls.consume, 1, 'the success hold binds the steer\'s path too');
 });
+
+test('a steer\'s --redeem on a Codex account answers with what the steer should do next', async () => {
+  const stale = harness({ config: {}, code: 'nothing_to_reset' });
+  const r = await stale.redeemer.redeemForSteer(stale.am.accounts[0]);
+  assert.equal(r.outcome, 'not-now');
+  assert.equal(r.retryAt, stale.redeemer._stateFor(stale.am.accounts[0]).cooldownUntil);
+  assert.equal(stale.calls.usage, 1, 'upstream had nothing to reset, so the reading is re-read');
+  assert.equal(stale.am.accounts[0].quota.unified7d, 0, 'and the stale 100% is corrected');
+
+  const none = harness({ config: {}, code: 'no_credit' });
+  assert.equal((await none.redeemer.redeemForSteer(none.am.accounts[0])).outcome, 'nothing-held');
+  const lost = harness({ config: {}, code: () => ({ error: 'socket hang up' }) });
+  assert.equal((await lost.redeemer.redeemForSteer(lost.am.accounts[0])).outcome, 'unknown');
+  const spent = harness({ config: {} });
+  assert.equal((await spent.redeemer.redeemForSteer(spent.am.accounts[0])).outcome, 'redeemed');
+});
+
+test('a steer\'s --redeem spends no Codex credit on an account a reset would not put back in service', async () => {
+  const { am, redeemer, calls } = harness({ config: {}, accounts: [codex('t', { disabled: true })] });
+  const r = await redeemer.redeemForSteer(am.accounts[0]);
+  assert.equal(r.outcome, 'not-now');
+  assert.match(r.reason, /would not put it back in service while it is disabled/);
+  assert.equal(calls.details + calls.consume, 0);
+});
+
+test('a steer\'s Codex consume waits for beforeSpend with its key, and stops on false', async () => {
+  const go = harness({ config: {} });
+  /** @type {string[]} */
+  const saved = [];
+  assert.equal((await go.redeemer.redeemForSteer(go.am.accounts[0], { beforeSpend: async ({ requestId }) => { saved.push(requestId); return true; } })).redeemed, true);
+  assert.deepEqual(saved, go.calls.keys, 'the key saved is the key consumed with');
+
+  const stop = harness({ config: {} });
+  const r = await stop.redeemer.redeemForSteer(stop.am.accounts[0], { beforeSpend: async () => false });
+  assert.equal(r.outcome, 'cancelled');
+  assert.equal(stop.calls.consume, 0);
+});

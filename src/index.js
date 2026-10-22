@@ -5,7 +5,7 @@ import { createInterface } from 'node:readline';
 import { createWriteStream, existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import net from 'node:net';
-import { loadOrCreateConfig, loadConfig, loadConfigPersistingIds, saveConfig, atomicConfigUpdate, getConfigPath, getCrashLogPath, loadState, saveState } from './config.js';
+import { loadOrCreateConfig, loadConfig, loadConfigPersistingIds, saveConfig, atomicConfigUpdate, getConfigPath, getCrashLogPath, loadState, saveState, latestWriter } from './config.js';
 import { installCrashHandlers } from './crash-log.js';
 import { AccountManager, distributionMode, accountRouting } from './account-manager.js';
 import { validateAdaptiveConfig } from './adaptive-distribution.js';
@@ -429,14 +429,18 @@ async function serverCommand() {
   accountManager.selectActiveAccount();
 
   // Periodically persist quota (and once more on shutdown) to the state file.
-  const persistQuotaState = () =>
-    saveState({ quota: accountManager.exportQuotaState(), clients: clientUsage.exportState(), usageDimensions: dimensionUsage.exportState(), steers: accountManager.exportSteers() })
-      .catch(err => console.error(`[TeamClaude] Failed to save quota state: ${err.message}`));
+  // One writer for every save (the minute's, shutdown's and a steer's), so two
+  // never race their renames and an older snapshot cannot land last.
+  const persistQuotaState = latestWriter(
+    () => ({ quota: accountManager.exportQuotaState(), clients: clientUsage.exportState(), usageDimensions: dimensionUsage.exportState(), steers: accountManager.exportSteers() }),
+    state => saveState(state).catch(err => console.error(`[TeamClaude] Failed to save quota state: ${err.message}`)),
+  );
   let quotaSaveInterval = null;
   // A steer is an operator's decision, not a reading, so it is written when it
   // changes rather than at the next minute's save: a crash in between would
-  // otherwise drop the steer, or bring back one that had ended.
-  accountManager.onSteersChanged(() => { persistQuotaState(); });
+  // otherwise drop the steer, or bring back one that had ended. Answered with
+  // the write, which a --redeem steer awaits before it spends.
+  accountManager.onSteersChanged(() => persistQuotaState());
 
   // An account admitted from somewhere other than this install's config: the
   // callback.net credential store (credential-sync.js). Same three lists the
@@ -886,7 +890,7 @@ async function serverCommand() {
   // And a `steer --redeem`, once its target has spent its week: the same two
   // redeemers, through the entry point that takes the steer as consent for
   // that one account and keeps every other guard (see redeemForSteer).
-  accountManager.setSteerRedeemer((account) => (providerOf(account) === 'codex' ? redeemer : claudeRedeemer).redeemForSteer(account));
+  accountManager.setSteerRedeemer((account, opts) => (providerOf(account) === 'codex' ? redeemer : claudeRedeemer).redeemForSteer(account, opts));
   hooks.getStatusExtra = () => ({
     // Read live from the shared config (not a startup snapshot) so the TUI's
     // blocklist editor shows up in `status` immediately, the same way the

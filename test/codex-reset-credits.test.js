@@ -1060,3 +1060,43 @@ test('the status line says how old the reading is', () => {
   const both = resetCreditLine({ quota: { resetCredits: { available: 1, applicable: 0, seenAt: now - DAY } } }, paint, now);
   assert.match(both, /none applicable to a window right now, as of 1d ago$/);
 });
+
+// ── a steer's --redeem ──────────────────────────────────────────────────────
+//
+// `teamclaude steer <account> --redeem` spends one of the target's credits once
+// its week is spent. The flag is consent for that one account: the fleet
+// switch, the account's exemption and the dry-pool justification are skipped,
+// and every safeguard is kept.
+
+test('a steer\'s --redeem spends a credit with the fleet unarmed, the account exempt and a sibling serving', async () => {
+  const { am, redeemer, calls } = harness({ accounts: [codex('t', { autoRedeemReset: false }), codex('ok')], config: {} });
+  assert.equal((await redeemer.maybeRedeemForPool([am.accounts[0]])).redeemed, false, 'the dry-pool path refuses');
+  /** @type {any} */
+  let noted = null;
+  am.noteResetRedeemed = (/** @type {any} */ a) => { noted = a; };
+  const r = await redeemer.redeemForSteer(am.accounts[0]);
+  assert.equal(r.redeemed, true);
+  assert.equal(calls.consume, 1);
+  assert.equal(am.accounts[0].quota.unified7d, 0, 'the quota was re-read');
+  assert.equal(noted, am.accounts[0], 'the manager is told, so a steer on it ends');
+});
+
+test('a steer\'s --redeem keeps every Codex safeguard', async () => {
+  const healthy = harness({ config: {}, quota: account => { account.quota.unified7d = 0.5; } });
+  assert.match((await healthy.redeemer.redeemForSteer(healthy.am.accounts[0])).reason, /not exhausted/);
+  assert.equal(healthy.calls.details + healthy.calls.consume, 0);
+
+  const unsupported = harness({ config: {}, credits: [credit({ supportedByPlan: false })] });
+  assert.match((await unsupported.redeemer.redeemForSteer(unsupported.am.accounts[0])).reason, /no redeemable credit/);
+  assert.equal(unsupported.calls.consume, 0);
+
+  const zero = harness({ config: {} });
+  zero.am.accounts[0].quota.resetCredits = { available: 0, applicable: 0, seenAt: Date.now() };
+  assert.match((await zero.redeemer.redeemForSteer(zero.am.accounts[0])).reason, /holds no reset credits/);
+  assert.equal(zero.calls.details, 0);
+
+  const twice = harness({ config: {} });
+  assert.equal((await twice.redeemer.redeemForSteer(twice.am.accounts[0])).redeemed, true);
+  assert.match((await twice.redeemer.redeemForSteer(twice.am.accounts[0])).reason, /cooling down/);
+  assert.equal(twice.calls.consume, 1, 'the success hold binds the steer\'s path too');
+});

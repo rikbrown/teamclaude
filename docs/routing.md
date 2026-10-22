@@ -334,6 +334,72 @@ URL-encode spaces and parens in a name here. The fully-qualified `accountUuid/or
 
 </details>
 
+## Steer new conversations to one account
+
+`teamclaude steer <account>` sends **new** conversations to one account for a while, and leaves every running conversation on the account it already has. It is for when one account's quota should be spent before the others': most often an account holding a [banked reset](accounts.md#claude-banked-usage-limit-resets) or a [reset credit](accounts.md#free-rate-limit-reset-credits), whose current week is worth spending before the reset is.
+
+```bash
+teamclaude steer work-max                 # until its week is spent (7 days at most)
+teamclaude steer work-max --for 6h        # or --until 2026-10-23T18:00:00Z
+teamclaude steer work-max --redeem        # then redeem its banked reset, once
+teamclaude steer                          # show the steers in force
+teamclaude steer --clear                  # end them (--provider anthropic|codex for one)
+```
+
+The two older controls cannot do this without breaking prompt caches. `teamclaude switch` moves the cursor: with `distributeSessions` on, placement does not read the cursor, so a switch places nothing; with it off, every conversation follows the cursor and moves at once, each with a cold cache. `teamclaude priority <name> 0` reorders the fleet, and every conversation pinned to a lower-priority account then re-routes on its next request (see [Session-aware routing](#session-aware-routing)). A steer changes placement and nothing else.
+
+### What a steer changes
+
+- **Placement only.** A conversation with no usable pin — a new one, or one leaving its pin because that account can no longer serve it or its window [rolled over](#expiry-pressure-routing) — goes to the target. So does a request with no session id, which has no cache to lose. A conversation whose pin is usable keeps it.
+- **It wins over** priority, the distribution mode (even, `load` and `adaptive`) and the expiry-pressure band. Those order the accounts a placement could use; the steer names one. A steer does not change priority, so a pin outranked by a higher-priority account moves as it always has. When the target itself is the outranked one, the placement that follows lands on the target again, so its conversations stay.
+- **It loses to** anything that keeps the target from serving this request: every reason on its **Blocked** line in `teamclaude status` (disabled, a `maxUsage` cap, the 5-hour window, a 429 hold, an OAuth denial, a spent Fable or Sonnet bucket for that family's requests, an exclusive `routes` entry that does not list it), a rate-limit pause, and the target already being tried by this request. The conversation is then placed as if there were no steer, and pinned where it lands. The steer stays armed, and takes new conversations again when the target recovers.
+- **Resolved before it:** a manual route pin, `TC_ACCT` (and `/tc-acct/`), and a [session pin](#move-one-running-session). None of them consults placement.
+- **One per provider.** A Claude steer and a Codex steer can stand side by side; each names one account. One email often holds both logins, so `--provider` says which one you mean.
+- **Overflow is unchanged.** When the target throttles, the [one-hop failover](#one-failover-hop-on-a-rate-limit) applies as usual, and that conversation pins where the hop landed.
+
+### With distribution off
+
+With `distributeSessions` off, every conversation normally follows the cursor. A steer leaves the cursor where it is. While it stands, it turns on session affinity for its provider: a running conversation stays on the account its pin names, since pins are recorded in every mode, and a new one goes to the target. A new conversation the target cannot take goes where the cursor walk sends it, as it would without a steer.
+
+When the steer ends, for any reason, that provider's conversations go to the [drain](#adaptive-distribution), as they do when distribution is turned off: each keeps its account until it finishes, idles out or can no longer be served there. Nothing snaps back onto the cursor with a cold cache. A reload that turns `distributeSessions` on or off during a steer applies as usual, and affinity holds while the steer stands either way.
+
+### When a steer ends
+
+Each ending is logged once, with its reason:
+
+- the target's shared weekly reaches its switch threshold (the fleet's `switchThreshold`, or the account's own): its **weekly wall**. A spent Fable or Sonnet bucket diverts that family only, and does not end the steer;
+- the target's weekly window rolls over, or moves forward before its own end, which only a redeemed reset does — here or anywhere else (the claude.ai usage page, `/limit-reset`, the Codex CLI);
+- the proxy redeems a reset on the target;
+- the end time passes: `--for` or `--until`, by default 7 days, and never more than 7 days from when it was set, whatever was asked;
+- `teamclaude steer --clear`;
+- the account is removed.
+
+The checks are made by the requests and status reads that ask, so no timer runs for them.
+
+### Persistence
+
+A steer is saved in the state file (`teamclaude.state.json`, beside the config) with its end time and flags, and restored when the server starts. A saved steer whose end passed while the server was down, or whose account is no longer in the fleet, is dropped, and the log says so. The account is matched by identity, as the saved quota is: by its `accountUuid` (Claude) or account id (Codex), so a steer follows a rename; an API key goes by its name. Deleting the state file drops the steer with the rest.
+
+### `--redeem`
+
+`--redeem` asks for the target's week to be spent in full, and then for its banked reset to be spent, once.
+
+- **The weekly threshold is lifted for the target.** While the steer stands, its weekly thresholds, the shared one and the family ones, count as 100%, so it serves until upstream itself refuses. The reason: the Claude redeemer spends a reset only on an account that upstream reports **at** a limit, and rotation normally leaves an account at its switch threshold, before upstream would say so. Without the lift, every redemption would be declined as "not at a usage limit". The 5-hour threshold is not lifted, since a 5-hour wall lifts on its own, and neither is a `maxUsage` cap.
+- **One redemption, in the background.** Once the target's weekly reading reaches 100%, the next placement for that provider starts one redemption on it. The request upstream refused is normally that placement: it fails over as usual and does not wait for the redemption. A status read never starts one, because a read must not send an irreversible request upstream.
+- **The flag is your consent for that one account.** So `autoRedeemResets` does not have to be on, the account's `autoRedeemReset: false` is set aside, and the rest of the pool does not have to be dry. Every other guard still holds. For Claude: upstream must report the account at a limit, a weekly one among them; the grant must clear every limit the account is at; only `next_grant_id` is spent; an upstream cooldown is respected; and the holds after a success or an unread answer, with the request-id replay, apply as in [Spending a Claude reset automatically](accounts.md#spending-a-claude-reset-automatically). For Codex: the weekly window must be spent, and the credit available and supported by the plan, with the same holds as the [automatic redemption](accounts.md#free-rate-limit-reset-credits). A redemption from a steer and one from a dry pool never run at the same time.
+- **The steer ends after the attempt,** whatever it found, and the log line says whether a reset was redeemed and, if not, why.
+- **A redemption cannot be undone.** Only a Claude or Codex subscription login can take `--redeem`; on an API key it is refused.
+
+Without `--redeem` the steer ends at the normal weekly threshold, and spends nothing.
+
+### Seeing and changing it
+
+- **TUI:** `t` opens the account picker that `s` and `l` use. `↑`/`↓` choose the account. `←`/`→` choose how long: until the wall (the 7-day limit), 1h, 6h or 24h. On a row holding a reset (its `RC` badge), `r` turns redeem-at-wall on or off. `Enter` sets the steer; `Enter` on the account already steered to clears it; `Esc` cancels. The header reads `steer → <name> (<time left> · redeem)`, and the target's row carries a magenta `»`. It works the same in `teamclaude attach`.
+- **Status:** `teamclaude status` prints a **Steer** line. `/teamclaude/status` carries `steers`: one `{ provider, target, index, startedAt, until, redeem, redeeming }` per steer, times in epoch milliseconds. The dashboard shows it in its summary.
+- **Activity:** a request a steer placed is marked `[steer]`: the first request of a new conversation, and every request with no session id. A conversation's later requests follow its pin and are not marked.
+- **HTTP:** `POST /teamclaude/steer` with `{"account": "<name>", "for": "6h", "redeem": true}` — the account in every form `TC_ACCT` accepts, `for` in seconds or as `90m`, `6h`, `1d12h`, or `"until"` as an ISO time, and an optional `"provider"`. `"account": null` clears that provider's steer, or every steer when none is named. The reply echoes what was set, after the 7-day limit (`clamped` says the limit shortened it), and whether the target can take a new conversation now (`eligible`, with a `reason` when not). An unknown account is a `404`. A caller holding a [client key](configuration.md) is refused with `403`, as for the other control-plane writes.
+- **MCP:** the `set_steer` tool does the same with `account`, `hours`, `redeem`, or `clear`.
+
 ## Prompt caching across rotation
 
 Rotation is transparent to your Claude Code session, but it's worth knowing how it interacts with Anthropic's [prompt cache](https://docs.claude.com/en/docs/build-with-claude/prompt-caching).

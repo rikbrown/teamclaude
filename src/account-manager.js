@@ -16,7 +16,10 @@ import { safeLine } from './safe-text.js';
 import { parseRoutingUrl, describeRouting, routingToUrl, isRoutingFailure } from './account-routing.js';
 import { isSelfProxy } from './upstream-proxy.js';
 import { envVar } from './brand.js';
+import { STEER_MAX_MS, SteerError, canRedeemOn, formatSteerLeft } from './steer.js';
 /** @typedef {import('./session-tracker.js').Observation} Observation */
+/** @typedef {import('./steer.js').Steer} Steer */
+/** @typedef {import('./steer.js').SteerView} SteerView */
 
 // Re-exported for callers that import these model helpers from here.
 export { isFableModel, parseRequestModel, parseAdvisorModel } from './model.js';
@@ -557,6 +560,21 @@ export class AccountManager {
   constructor(accounts, switchThreshold = 0.98, { refreshFn = refreshAccessToken, codexRefreshFn = refreshCodexToken, refreshCoordinator = (_account, refresh, _info) => refresh(), throttleProbeFloorMs, familyStaleMs, statusStaleMs, forcedRefreshFloorMs = FORCED_REFRESH_FLOOR_MS, routes, ramp, distributeSessions = false, adaptive, sessionTracker, expiryRouting, advisorEligibility, listener = null } = {}) {
     // How long a just-minted token is trusted against a forced refresh.
     this._forcedRefreshFloorMs = forcedRefreshFloorMs;
+    // Operator steers (`teamclaude steer`): provider → the one account NEW
+    // conversations of that provider are placed on for a while (see steer.js
+    // and _steerPlacement). First, because thresholdFor reads it and nothing
+    // may reach that before the map exists.
+    /** @type {Map<string, Steer>} */
+    this._steers = new Map();
+    // What spends a `--redeem` steer's reset once its target's week is spent:
+    // index.js wires the two redeemers here. Null spends nothing, which is what
+    // every manager built without a server is.
+    /** @type {((account: Record<string, any>) => Promise<{ redeemed: boolean, reason: string }>)|null} */
+    this._steerRedeemer = null;
+    // Told when a steer starts or ends, so the state file holds it at once
+    // rather than at the next minute's save.
+    /** @type {(() => void)|null} */
+    this._onSteersChanged = null;
     // Injectable for tests (mirrors Prober's probeFn); defaults to the real
     // OAuth token refresh.
     this._refreshFn = refreshFn;
@@ -743,6 +761,15 @@ export class AccountManager {
    * @param {any} [account]
    */
   thresholdFor(bucket, account = null) {
+    // A `steer --redeem` target serves until upstream itself refuses on the
+    // week, so its weekly buckets — shared and family alike — gate at 1. The
+    // Claude redeemer spends a reset only on an account upstream reports AT a
+    // limit, and an account rotation left at 99.9% never is: without this the
+    // redemption the operator asked for would always be declined as "not at a
+    // usage limit". The 5-hour bucket is left alone, since a 5-hour wall lifts
+    // on its own and burning into it buys nothing. A cap (maxUsage) is a
+    // separate gate and is not relaxed either (see capFor).
+    if (account && this._steers?.size && WEEKLY_BUCKET_KEYS.includes(bucket) && this._redeemSteered(account)) return 1;
     return resolveSwitchThreshold(account?.switchThreshold, bucket, this._fleetThresholdFor(bucket));
   }
 
@@ -1567,8 +1594,19 @@ export class AccountManager {
     // enabled, only for a request that named one, and only outside a manual
     // route pin (which must still win). Falls through to the normal walk if
     // nothing eligible is found (e.g. the whole tier is exhausted).
+    //
+    // A steer turns affinity on for its provider whatever the mode. With
+    // distribution off a conversation follows the cursor, and a steer leaves
+    // the cursor where it is; so without affinity the only ways to put new
+    // conversations on the target were to move the cursor (taking every running
+    // conversation along, and every prompt cache with it) or to leave them on
+    // the cursor (no steer at all). Affinity holds each running conversation on
+    // the account its pin already names — recordSession keeps pins in every
+    // mode — and leaves placement free to go to the target. When the steer
+    // ends, the conversations are handed to the drain rather than snapped back
+    // onto the cursor (see _handBackSteered).
     if (sessionId && !this._pinnedAccountForModel(model, advisorModel)) {
-      if (this.distributeSessions) {
+      if (this.distributeSessions || this._liveSteer(this._selectingProvider ?? DEFAULT_PROVIDER, { act: true })) {
         const acc = this._selectForSession(sessionId, exclude, model, advisorModel);
         if (acc) return acc;
       } else if (this._isDrainingSession(sessionId)) {
@@ -1581,8 +1619,12 @@ export class AccountManager {
     }
     // An untagged request has no session to pin, so the walk below rests every
     // one of them on the current account. Spread them too, on their own cursor.
-    if (!sessionId && this.distributeSessions && !this._pinnedAccountForModel(model, advisorModel)) {
-      const acc = this._selectUntagged(exclude, model, advisorModel);
+    // A steer takes them in every mode: there is no cache an untagged request
+    // could lose, and "new work goes to the target" covers it as plainly as it
+    // covers a new conversation.
+    if (!sessionId && !this._pinnedAccountForModel(model, advisorModel)) {
+      const acc = this._steerPlacement(exclude, model, advisorModel)
+        ?? (this.distributeSessions ? this._selectUntagged(exclude, model, advisorModel) : null);
       if (acc) return acc;
     }
     if (advisorModel) {
@@ -1772,7 +1814,9 @@ export class AccountManager {
       // that pressure picks the destination.
       if (this.expiryRouting.enabled && this.expiryRouting.preempt
           && this._pinRolledOver(sessionId, pinned, model)) {
-        const next = this._pickLeastLoaded(exclude, model, advisorModel);
+        // A placement like any other: the conversation is leaving its pin, so
+        // a steer gets it first.
+        const next = this._placeNew(exclude, model, advisorModel);
         if (next && next.index !== idx) {
           // A fleet-wide rollover moves every session pinned to that account at
           // once, so the destination gets the same failover burst any other
@@ -1781,6 +1825,10 @@ export class AccountManager {
           console.log(`[TeamClaude] Session pin on "${pinned.name}" released — its weekly window rolled over; re-routing to "${next.name}"`);
           return next;
         }
+        // Under a steer with distribution off, when the steer cannot take the
+        // conversation: the cursor walk owns this rollover, exactly as it
+        // would for the same conversation unsteered.
+        if (!next && !this.distributeSessions) return null;
         // The traffic did not move, so the observation is left where it is and
         // the next request asks again.
         this._noteHeldRollover(pinned, model, advisorModel, exclude);
@@ -1794,7 +1842,26 @@ export class AccountManager {
     }
     // No pin was usable, so this is a placement. Placing is aiming: it takes no
     // reading, and the next request to find the pin here takes it.
-    return this._pickLeastLoaded(exclude, model, advisorModel);
+    return this._placeNew(exclude, model, advisorModel);
+  }
+
+  /**
+   * Where a conversation with no usable pin goes: the steer's target when the
+   * steer may take it, else the distribution mode's pick.
+   *
+   * With distribution off this is reached only under a steer (see
+   * _pickActiveAccount), and a placement the steer cannot take answers null:
+   * the request then falls to the cursor walk, which is where an unsteered
+   * conversation would have gone. The even picker is a distribution feature,
+   * and a steer does not switch distribution on.
+   *
+   * @param {*} exclude  the request's tried set, or null; loosely typed, like the pickers it feeds
+   * @param {*} model
+   * @param {*} advisorModel
+   */
+  _placeNew(exclude, model, advisorModel) {
+    return this._steerPlacement(exclude, model, advisorModel)
+      ?? (this.distributeSessions ? this._pickLeastLoaded(exclude, model, advisorModel) : null);
   }
 
   /** Where a new session goes, per the configured distribution mode. Adaptive
@@ -2848,6 +2915,378 @@ export class AccountManager {
   drainingCount() {
     this._pruneDrain();
     return this._drainingSessions?.size || 0;
+  }
+
+  // ── Steer ──────────────────────────────────────────────────────────────
+  //
+  // `teamclaude steer <account>`: new conversations of one provider go to one
+  // account until the steer ends. A steer is placement and nothing else, so it
+  // touches no pin, no priority and no cursor; see steer.js for why the
+  // existing controls could not do this without breaking prompt caches.
+
+  /**
+   * Steer new placements of the account's provider onto it, until `until`
+   * (epoch ms) or the longest a steer may run. Replaces that provider's steer,
+   * if there is one; another provider's is left alone.
+   *
+   * `redeem` asks for the target's week to be spent to upstream's own wall and
+   * its banked reset then spent once (see thresholdFor, _redeemOnSteer). That
+   * is the operator's consent for this one account, which is why it is a flag
+   * on a steer and not a fleet setting.
+   *
+   * @param {number} index
+   * @param {{ until?: number|null, redeem?: boolean }} [opts]
+   * @returns {{ steer: SteerView, replaced: SteerView|null }}
+   */
+  setSteer(index, { until = null, redeem = false } = {}) {
+    const account = this.accounts[index];
+    if (!account) throw new SteerError('no such account');
+    const name = safeLine(account.name, 64);
+    if (redeem && !canRedeemOn(account)) {
+      throw new SteerError(`"${name}" holds no banked reset to redeem: only a Claude or Codex subscription login does`);
+    }
+    const now = Date.now();
+    // Clamped here as well as by the caller: the hard limit is the manager's
+    // to keep, not each control surface's.
+    const end = Math.min(until ?? now + STEER_MAX_MS, now + STEER_MAX_MS);
+    if (!(end > now)) throw new SteerError('that end time has already passed');
+    this._clearExpiredQuotas(account);
+    // Refused rather than started: it would end on the next request, and the
+    // operator would be told it was set. A --redeem steer gates at upstream's
+    // own wall, so the same reading leaves it room — and an account already at
+    // that wall gets its redemption from the first selection that looks.
+    if (!redeem && account.quota.unified7d != null && account.quota.unified7d >= this.thresholdFor('unified7d', account)) {
+      throw new SteerError(`"${name}" is already at its weekly switch threshold, so a steer would end at once`);
+    }
+    const provider = providerOf(account);
+    const previous = this._steers.get(provider) ?? null;
+    /** @type {Steer} */
+    const steer = {
+      account, provider, startedAt: now, until: end, redeem: redeem === true,
+      weekEnds: account.quota.unified7dReset ?? null, phase: 'active', attempt: null,
+    };
+    // A replacement, not an ending: affinity carries straight on under the
+    // new steer, so nothing is handed back to the drain. A --redeem attempt
+    // still in flight on the old one finishes on its own and ends nothing.
+    this._steers.set(provider, steer);
+    const was = previous && previous.account !== account ? ` (replaces the steer to "${safeLine(previous.account.name, 64)}")` : '';
+    console.log(`[TeamClaude] Steering new conversations to "${name}" for ${formatSteerLeft(end - now)}`
+      + `${steer.redeem ? ' — at its weekly wall it redeems its banked reset' : ''}${was}`);
+    this._onSteersChanged?.();
+    return { steer: this._steerView(steer), replaced: previous ? this._steerView(previous) : null };
+  }
+
+  /**
+   * End the steer of one provider, or every steer when `provider` is null.
+   * Returns what was ended, as it stood.
+   * @param {string|null} [provider]
+   * @returns {SteerView[]}
+   */
+  clearSteer(provider = null) {
+    const ended = [];
+    for (const steer of [...this._steers.values()]) {
+      if (provider != null && steer.provider !== provider) continue;
+      ended.push(this._steerView(steer));
+      this._endSteer(steer, 'cleared by the operator');
+    }
+    return ended;
+  }
+
+  /**
+   * The steers in force, for status, the TUI and the dashboards. Ends any
+   * whose end has come first, so a read never reports one that is over. It
+   * never starts a --redeem attempt: a status read or a paint must not send an
+   * irreversible POST upstream, so that is left to the next selection.
+   * @returns {SteerView[]}
+   */
+  steerList() {
+    return [...this._steers.keys()]
+      .map(provider => this._liveSteer(provider))
+      .filter(steer => steer != null)
+      .map(steer => this._steerView(/** @type {Steer} */ (steer)));
+  }
+
+  /**
+   * Whether the steer's target would take a placement right now, and why not
+   * when it would not: eligibility()'s reasons minus priority, which a steer
+   * outranks, plus the rate-limit pause, which a steer yields to.
+   * @param {number} index
+   * @returns {{ eligible: boolean, reason?: string }}
+   */
+  steerEligibility(index) {
+    const account = this.accounts[index];
+    if (!account) return { eligible: false, reason: 'no such account' };
+    if (!this._isAvailable(account)) return { eligible: false, reason: this.eligibility(index).reason };
+    if (this.isPaused(index)) return { eligible: false, reason: 'paused after a rate limit' };
+    return { eligible: true };
+  }
+
+  /** Install what spends a --redeem steer's reset (index.js wires the two redeemers).
+   * @param {((account: Record<string, any>) => Promise<{ redeemed: boolean, reason: string }>)|null} fn */
+  setSteerRedeemer(fn) {
+    this._steerRedeemer = fn;
+  }
+
+  /** Set a callback told whenever a steer starts or ends.
+   * @param {(() => void)|null} fn */
+  onSteersChanged(fn) {
+    this._onSteersChanged = fn;
+  }
+
+  /**
+   * A banked reset or reset credit was redeemed on `account` — by the dry-pool
+   * redeemer, or anything else that calls this. A steer on it ends: its week
+   * was just renewed, so "spend this week first" no longer names anything. The
+   * steer whose OWN attempt this is ends from that attempt instead, with the
+   * outcome in its line (see _redeemOnSteer).
+   * @param {Record<string, any>} account
+   */
+  noteResetRedeemed(account) {
+    for (const steer of [...this._steers.values()]) {
+      if (steer.account === account && steer.phase !== 'redeeming') this._endSteer(steer, 'a reset was redeemed on it');
+    }
+  }
+
+  /**
+   * The steer target, when this placement is the steer's to make; null when
+   * the request falls to the normal placement.
+   *
+   * The target loses to everything that makes it unable to serve THIS request
+   * — every reason unavailableReason names, the exclusive routes among them,
+   * the request's own tried set, a rate-limit pause — and the steer stays
+   * armed through all of them, so a 5-hour wall or a pause only lends the new
+   * conversations to the rest of the fleet until it lifts. It wins over
+   * priority, the distribution mode and the expiry band, which only order the
+   * accounts a placement could have used. A manual route pin, TC_ACCT and a
+   * session pin never get here: they resolve before placement does.
+   *
+   * @param {Set<number>|null} exclude
+   * @param {*} model  loosely typed, like the availability checks it feeds
+   * @param {*} advisorModel
+   * @returns {Record<string, any>|null}
+   */
+  _steerPlacement(exclude, model, advisorModel) {
+    const steer = this._liveSteer(this._selectingProvider ?? DEFAULT_PROVIDER, { act: true });
+    if (!steer || steer.phase !== 'active') return null;
+    const target = steer.account;
+    if (exclude?.has(target.index)) return null;
+    if (!this._isAvailable(target, model, advisorModel) || this.isPaused(target.index)) return null;
+    // For the activity view's [steer] mark: the caller hands the walk a
+    // decision record, which outlives this synchronous walk.
+    if (this._selectionDecision) this._selectionDecision.steered = true;
+    return target;
+  }
+
+  /**
+   * The steer in force for `provider`, or null — ending it first when one of
+   * its end conditions has come, and saying so once. Checked here, lazily, by
+   * every selection and status read that asks, rather than on a timer that
+   * would keep the process awake to look at a clock.
+   *
+   * `act` is set by a selection, which alone may start the --redeem attempt a
+   * steer at its wall is owed.
+   *
+   * @param {string} provider
+   * @param {{ act?: boolean }} [opts]
+   * @returns {Steer|null}
+   */
+  _liveSteer(provider, { act = false } = {}) {
+    const steer = this._steers.get(provider);
+    if (!steer) return null;
+    // The --redeem attempt owns the ending while it runs: see _redeemOnSteer.
+    if (steer.phase === 'redeeming') return steer;
+    const account = steer.account;
+    if (this.accounts[account.index] !== account) return this._endSteer(steer, 'the account was removed');
+    const now = Date.now();
+    if (now >= steer.until) return this._endSteer(steer, 'its end time was reached');
+    // The rollover before the wall: a week that rolled over is a fresh one, and
+    // the steer was about spending the one that has now gone. A window that
+    // moved forward before its own end can only have been renewed early — a
+    // reset redeemed on it, from here or from anywhere else (the claude.ai
+    // usage page, `/limit-reset`, the Codex CLI) — and ends it the same way.
+    this._clearExpiredQuotas(account);
+    const ends = account.quota.unified7dReset ?? null;
+    if (steer.weekEnds != null) {
+      if (now >= steer.weekEnds) return this._endSteer(steer, 'its weekly window rolled over');
+      if (ends != null && ends - steer.weekEnds >= ROLLOVER_MIN_JUMP_MS) {
+        return this._endSteer(steer, 'its weekly window was renewed ahead of its reset, so a reset was redeemed on it');
+      }
+    }
+    // Follows the reading within the jump floor (the two writers of a reset
+    // disagree by up to a second), and learns it when the steer began before
+    // anything had read the account's week.
+    if (ends != null) steer.weekEnds = ends;
+    if (this._steerAtWall(steer)) {
+      if (!steer.redeem) {
+        return this._endSteer(steer, `its weekly quota reached the switch threshold (${(this.thresholdFor('unified7d', account) * 100).toFixed(1)}%)`);
+      }
+      if (act) this._redeemOnSteer(steer);
+      // At its wall the target takes no placement whichever way this goes, so
+      // returning the steer changes no request; it keeps affinity on while the
+      // attempt runs, so nothing moves under the conversations meanwhile.
+    }
+    return steer;
+  }
+
+  /**
+   * Whether the steer's target has reached its weekly wall: its shared weekly
+   * at its switch threshold, which for a --redeem steer is 1, upstream's own
+   * wall (see thresholdFor). The shared bucket only. A spent family bucket
+   * (Fable, Sonnet) diverts that family and nothing else, so it does not end a
+   * steer every other model can still use.
+   * @param {Steer} steer
+   */
+  _steerAtWall(steer) {
+    const q = steer.account.quota;
+    return q.unified7d != null && q.unified7d >= this.thresholdFor('unified7d', steer.account);
+  }
+
+  /**
+   * Whether `account` is the target of a --redeem steer still inside its end
+   * time: thresholdFor's question, asked per candidate on every selection, so
+   * it reads the map and changes nothing. The end time is checked here rather
+   * than left to _liveSteer, so the relaxed threshold cannot outlive the steer
+   * by the one request it takes a selection to notice.
+   * @param {Record<string, any>} account
+   */
+  _redeemSteered(account) {
+    const now = Date.now();
+    for (const steer of this._steers.values()) {
+      if (steer.redeem && steer.account === account && now < steer.until) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Spend the target's banked reset, once, without holding anything up: the
+   * request that found the wall fails over as any refused request does, and
+   * the steer ends when the attempt settles, whatever it found. Deferred to a
+   * microtask so the redeemer is never entered from inside a selection walk.
+   * @param {Steer} steer
+   */
+  _redeemOnSteer(steer) {
+    steer.phase = 'redeeming';
+    const name = safeLine(steer.account.name, 64);
+    console.log(`[TeamClaude] Steer to "${name}": its week is spent — redeeming its banked reset, as --redeem asked`);
+    const redeemer = this._steerRedeemer;
+    steer.attempt = Promise.resolve()
+      .then(() => (redeemer ? redeemer(steer.account) : { redeemed: false, reason: 'this server has no redeemer' }))
+      .then(r => r, (/** @type {any} */ err) => ({ redeemed: false, reason: err?.message || String(err) }))
+      .then(r => {
+        this._endSteer(steer, r?.redeemed
+          ? 'its week was spent and its banked reset was redeemed'
+          : `its week was spent, but no reset was redeemed: ${safeLine(r?.reason || 'no reason given', 120)}`);
+      });
+  }
+
+  /**
+   * End a steer and say why, once. A no-op for a steer that is no longer the
+   * one in force (replaced or cleared while a --redeem attempt ran).
+   * @param {Steer} steer
+   * @param {string} reason
+   * @returns {null}
+   */
+  _endSteer(steer, reason) {
+    if (this._steers.get(steer.provider) !== steer) return null;
+    this._steers.delete(steer.provider);
+    console.log(`[TeamClaude] Steer to "${safeLine(steer.account.name, 64)}" ended — ${reason}`);
+    this._handBackSteered(steer.provider);
+    this._onSteersChanged?.();
+    return null;
+  }
+
+  /**
+   * With distribution off, a steer was the only thing holding that provider's
+   * conversations to their pins. Its end hands them to the drain, the
+   * mechanism that turning distribution off already uses (setDistributeSessions):
+   * each keeps its account until it finishes, idles out or can no longer be
+   * served there, rather than every one of them moving to the cursor on its
+   * next request with a cold cache. Added to a drain already running, so one
+   * started by a reload is not cut short. With distribution on there is nothing
+   * to hand back: the pins were being honoured before the steer and still are.
+   * @param {string} provider
+   */
+  _handBackSteered(provider) {
+    if (this.distributeSessions) return;
+    const ids = this.sessionTracker.pinnedSessionIds().filter(id =>
+      this.sessionTracker.pinnedAccounts(id).some(i => this.accounts[i] && canServeProvider(this.accounts[i], provider)));
+    if (!ids.length) return;
+    this._drainingSessions ??= new Set();
+    for (const id of ids) this._drainingSessions.add(id);
+  }
+
+  /** @param {Steer} steer @returns {SteerView} */
+  _steerView(steer) {
+    return {
+      provider: steer.provider,
+      target: steer.account.name,
+      index: steer.account.index,
+      startedAt: steer.startedAt,
+      until: steer.until,
+      redeem: steer.redeem,
+      redeeming: steer.phase === 'redeeming',
+    };
+  }
+
+  /**
+   * The steers for the state file. The account is named by the identity
+   * fields the quota rows carry and matched back with sameIdentity, the
+   * convention every durable reference in that file already uses: the uuid
+   * (Claude) or account id (Codex) follows a rename, and an API key falls back
+   * to its name. Not the session-pin convention of a bare name, which is
+   * runtime-only and never written down.
+   */
+  exportSteers() {
+    return [...this._steers.values()].map(steer => {
+      const a = steer.account;
+      return {
+        provider: steer.provider,
+        account: { accountUuid: a.accountUuid, accountId: a.accountId, userId: a.userId, provider: providerOf(a), orgUuid: a.orgUuid, orgName: a.orgName, name: a.name },
+        startedAt: steer.startedAt,
+        until: steer.until,
+        redeem: steer.redeem,
+        weekEnds: steer.weekEnds,
+      };
+    });
+  }
+
+  /**
+   * Bring back steers saved by a previous run. One that ended while the server
+   * was down, or whose account is no longer in the fleet, is dropped and said
+   * so. A --redeem attempt that was running is not carried over: if the steer
+   * is still at its wall, the first selection asks again, and the redeemers'
+   * own saved holds decide whether a claim that may have landed is followed by
+   * another.
+   * @param {unknown} saved
+   */
+  restoreSteers(saved) {
+    if (!Array.isArray(saved)) return;
+    const now = Date.now();
+    for (const row of saved) {
+      if (!row || typeof row !== 'object' || !row.account || typeof row.account !== 'object') continue;
+      const shown = safeLine(row.account.name, 64) || '(unnamed)';
+      if (!Number.isFinite(row.until) || row.until <= now) {
+        console.log(`[TeamClaude] Steer to "${shown}" not restored — it ended while the server was down`);
+        continue;
+      }
+      const account = this.accounts.find(a => sameIdentity(row.account, a));
+      if (!account) {
+        console.log(`[TeamClaude] Steer to "${shown}" not restored — no account in the fleet matches it any more`);
+        continue;
+      }
+      const provider = providerOf(account);
+      if (this._steers.has(provider)) continue;
+      // Clamped again: a state file is no more trusted than a request.
+      const until = Math.min(row.until, now + STEER_MAX_MS);
+      const redeem = row.redeem === true && canRedeemOn(account);
+      this._steers.set(provider, {
+        account, provider, until, redeem,
+        startedAt: Number.isFinite(row.startedAt) ? row.startedAt : now,
+        weekEnds: Number.isFinite(row.weekEnds) ? row.weekEnds : null,
+        phase: 'active', attempt: null,
+      });
+      console.log(`[TeamClaude] Restored the steer to "${safeLine(account.name, 64)}" (${formatSteerLeft(until - now)} left${redeem ? ', redeems at its weekly wall' : ''})`);
+    }
   }
 
   /**
@@ -5306,6 +5745,12 @@ export class AccountManager {
     // entry at a different account. Not worth renumbering: the entries expire in
     // a minute and dropping them can only make the next held event report sooner.
     this._rolloverHeldLogAt.clear();
+    // A steer holds its account by reference, so a removal ends it now rather
+    // than at whichever request next asks. Last, so the hand-back reads pins
+    // that have already been renumbered.
+    for (const steer of [...this._steers.values()]) {
+      if (steer.account === removed) this._endSteer(steer, 'the account was removed');
+    }
   }
 
   /**
@@ -5421,6 +5866,9 @@ export class AccountManager {
       // mystery. Session ids are shortened unless sessionDetail is on, as the
       // rest of the session readout withholds them.
       sessionPins: this.sessionPins.list({ detail: sessionDetail }),
+      // Operator steers, one per provider at most: where new conversations go
+      // and until when (epoch ms). Empty when none is set.
+      steers: this.steerList(),
       // Empty outside adaptive mode, so the renderer needs no mode check of its
       // own and an older client simply sees nothing extra.
       adaptive: this._adaptiveStatsCached(),

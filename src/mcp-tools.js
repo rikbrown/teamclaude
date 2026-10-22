@@ -24,6 +24,8 @@ import { currentVersion } from './updater.js';
 import { upstreamPoolStatus } from './upstream-fetch.js';
 import { parseRoutingUrl, routingToUrl, describeRouting, maskRoutingUrl } from './account-routing.js';
 import { isSelfProxy, localListener } from './upstream-proxy.js';
+import { resolveSteerUntil, SteerError } from './steer.js';
+import { PROVIDERS } from './provider.js';
 
 /**
  * The management tools served at /teamclaude/mcp, and the `proxy.mcp` gate in
@@ -104,6 +106,8 @@ function fleetStatus({ accountManager, hooks }) {
       draining: status.sessions.draining,
       mode: status.sessions.mode,
     },
+    // Where new conversations are being steered, if anywhere (set_steer).
+    steers: status.steers,
     accounts: status.accounts.map((a, index) => {
       const quota = Object.fromEntries(Object.entries(a.quota)
         .filter(([, value]) => value != null && !(typeof value === 'object' && Object.keys(value).length === 0)));
@@ -257,6 +261,37 @@ const WRITE_TOOLS = [
       const index = accountIndexFor(ctx, args);
       ctx.accountManager.setCurrentAccount(index);
       return { account: ctx.accountManager.accounts[index].name, ...ctx.accountManager.eligibility(index) };
+    },
+  },
+  {
+    name: 'set_steer',
+    title: 'Steer new conversations',
+    description: 'Send NEW conversations of the account\'s provider to one account for a while, as the TUI\'s steer key does; running conversations keep their accounts. `hours` is how long (7 days at most, and the default); `redeem` runs the account to its weekly wall and then spends its banked reset once, which cannot be undone. Give `clear: true` instead of an account to end a steer (`provider` narrows which). The answer says whether the account can take new conversations right now.',
+    properties: {
+      ...ACCOUNT_ARGS,
+      hours: { type: 'number', description: 'How long the steer runs, in hours; at most 168' },
+      redeem: { type: 'boolean', description: 'At the weekly wall, spend the account\'s banked reset once' },
+      clear: { type: 'boolean', description: 'End the steer instead of setting one' },
+      provider: { type: 'string', enum: Object.keys(PROVIDERS), description: 'With clear: which provider\'s steer to end (both when absent)' },
+    },
+    write: true,
+    run: (args, ctx) => {
+      const am = ctx.accountManager;
+      if (args.clear === true) {
+        if (args.account !== undefined) throw new ToolFailure('give "account" or "clear", not both');
+        return { cleared: am.clearSteer(args.provider ?? null) };
+      }
+      if (args.account === undefined) throw new ToolFailure('set_steer needs "account", or "clear": true');
+      const index = accountIndexFor(ctx, args);
+      const end = resolveSteerUntil({ for: args.hours == null ? undefined : args.hours * 3600 });
+      if ('error' in end) throw new ToolFailure(end.error.replace('"for"', '"hours"'));
+      try {
+        const result = am.setSteer(index, { until: end.until, redeem: args.redeem === true });
+        return { ...result, clamped: end.clamped, ...am.steerEligibility(index) };
+      } catch (err) {
+        if (err instanceof SteerError) throw new ToolFailure(err.message);
+        throw err;
+      }
     },
   },
   {

@@ -119,7 +119,7 @@ curl -X POST http://localhost:3456/teamclaude/priority \
 | Key | Action |
 | --- | --- |
 | `s` | Switch active account (`←`/`→` picks the default account or a specific [route](routing.md#model-routes)) |
-| `t` | [Steer](routing.md#steer-new-conversations-to-one-account) new conversations to an account: `←`/`→` choose how long (until the wall, 1h, 6h, 24h), `r` redeems its banked reset at the weekly wall (on a row with an `RC` badge), `Enter` on the steered account clears it. Running conversations keep their accounts. Also in attach mode |
+| `t` | [Steer](routing.md#steer-new-conversations-to-one-account) new conversations to an account: `←`/`→` choose how long (until the wall, 1h, 6h, 24h), `r` redeems its banked reset at the weekly wall (on a Claude or Codex subscription row), `Enter` on the steered account clears it. Running conversations keep their accounts. Also in attach mode |
 | `d` | Enable/disable an account |
 | `l` | Sign an account in again (opens on the first account in `error`; not in attach mode). A panel shows the sign-in link, clickable and copied to the clipboard, and takes the pasted answer back, so it works over SSH — see [Signing in again from the TUI](accounts.md#signing-in-again-from-the-tui) |
 | `p` | Refresh quota on all accounts (one-shot probe of the zero-spend usage endpoint) |

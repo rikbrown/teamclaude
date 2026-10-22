@@ -115,7 +115,7 @@ test('set_steer steers new conversations for the hours given, and clear ends it'
   try {
     const result = await ok(tools, 'set_steer', { account: 'bob@example.com', org: 'Acme', hours: 6 });
     assert.equal(result.steer.target, 'bob@example.com (Acme)');
-    assert.ok(Math.abs(result.steer.until - (Date.now() + 6 * 3600_000)) < 60_000);
+    assert.equal(result.steer.until - result.steer.startedAt, 6 * 3600_000);
     // A steer outranks priority, so the account a switch would call outranked
     // is eligible for one.
     assert.equal(result.eligible, true);

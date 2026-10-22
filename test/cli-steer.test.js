@@ -79,7 +79,8 @@ test('steer NAME --for sets the steer, says when it ends, and leaves the cursor 
     assert.match(res.stdout, /Running conversations stay where they are/);
     const [steer] = am.steerList();
     assert.equal(steer.target, 'bob@example.com (Acme)');
-    assert.ok(Math.abs(steer.until - (Date.now() + 6 * H)) < 60_000);
+    assert.equal(steer.until - steer.startedAt, 6 * H, 'six hours from when it was set, to the millisecond');
+    assert.match(res.stdout, new RegExp(`\\(until ${new Date(steer.until).toISOString().replace(/\.\d{3}Z$/, 'Z')}\\)`));
     assert.equal(am.currentIndex, 0);
   });
 });
@@ -90,10 +91,14 @@ test('bare steer lists the steers in force, and --clear ends them', async () => 
     assert.equal(none.code, 0, none.stderr);
     assert.match(none.stdout, /No steer is set/);
 
-    am.setSteer(1, { until: Date.now() + 5 * H });
+    // The time left is the CLI's own clock against this end, so it is the
+    // format that is checked; the end itself is exact.
+    const until = Date.now() + 5 * H;
+    am.setSteer(1, { until });
+    const iso = new Date(until).toISOString().replace(/\.\d{3}Z$/, 'Z');
     const listed = /** @type {any} */ (await runCli(configPath, ['steer']));
     assert.equal(listed.code, 0, listed.stderr);
-    assert.match(listed.stdout, /Anthropic: new conversations go to "bob@example\.com \(Acme\)" — 5h left/);
+    assert.match(listed.stdout, new RegExp(`Anthropic: new conversations go to "bob@example\\.com \\(Acme\\)" — \\d+h(\\d+m)? left \\(until ${iso}\\)`));
 
     const cleared = /** @type {any} */ (await runCli(configPath, ['steer', '--clear']));
     assert.equal(cleared.code, 0, cleared.stderr);

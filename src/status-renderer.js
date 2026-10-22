@@ -4,6 +4,7 @@ import { safeLine, sanitizeText } from './safe-text.js';
 import { isRefused } from './account-refusal.js';
 import { ROUTE_COLORS } from './config-ops.js';
 import { describeRouting } from './account-routing.js';
+import { formatSteerLeft } from './steer.js';
 
 const ESC = '\x1b[';
 const RESET = `${ESC}0m`;
@@ -694,9 +695,12 @@ export function formatSessionPins(pins, paint) {
 export function formatSteers(steers, paint, now = Date.now(), named = false) {
   return steers.map((/** @type {any} */ s) => {
     const who = named ? `${nameText(String(s?.provider ?? ''))} ` : '';
-    const left = Number.isFinite(s?.until) ? ` ${paint.dim('·')} ${formatDuration(s.until - now)} left` : '';
+    const left = Number.isFinite(s?.until) ? ` ${paint.dim('·')} ${formatSteerLeft(s.until - now)} left` : '';
+    // After an attempt that spent nothing, the steer waits out the redeemer's
+    // back-off; saying so explains a wall with no redemption behind it.
+    const retry = Number.isFinite(s?.redeemRetryAt) && s.redeemRetryAt > now ? ` (next try in ${formatSteerLeft(s.redeemRetryAt - now)})` : '';
     const redeem = s?.redeeming ? ` ${paint.dim('·')} ${paint.yellow('redeeming its reset now')}`
-      : s?.redeem ? ` ${paint.dim('·')} redeems its reset at the weekly wall` : '';
+      : s?.redeem ? ` ${paint.dim('·')} redeems its reset at the weekly wall${retry}` : '';
     return `${who}→ ${paint.magenta(nameText(String(s?.target ?? '')))}${left}${redeem}`;
   }).join(', ');
 }

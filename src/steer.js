@@ -36,7 +36,23 @@ import { providerOf, DEFAULT_PROVIDER } from './provider.js';
  * @property {boolean} redeem  run the target to upstream's own weekly wall, then spend its banked reset once
  * @property {number|null} weekEnds  when the target's shared weekly window ends, as last read; a rollover past it ends the steer
  * @property {'active'|'redeeming'} phase  'redeeming' while the --redeem attempt is in flight, which owns the ending
- * @property {Promise<void>|null} [attempt]  that attempt, settled once the steer has ended
+ * @property {Promise<null>|null} [attempt]  that attempt, settled once the steer has ended or backed off
+ * @property {number|null} [retryAt]  epoch ms before which no new --redeem attempt starts, after one that spent nothing
+ * @property {string|null} [redeemRequestId]  the claim's request id once its irreversible request is about to go out; saved, so a restart knows a spend may have landed
+ */
+
+/**
+ * What a redeemer's `redeemForSteer` answers. `outcome` is the steer's to act
+ * on: 'redeemed' (spent), 'unknown' (no verdict read over a request that may
+ * have spent), 'nothing-held' (nothing to spend, so asking again cannot help),
+ * 'not-now' (nothing spent, and `retryAt` says when asking again could change
+ * that), 'cancelled' (the steer ended before the spend).
+ *
+ * @typedef {Object} SteerRedeemResult
+ * @property {boolean} redeemed
+ * @property {string} reason
+ * @property {'redeemed'|'unknown'|'nothing-held'|'not-now'|'cancelled'} [outcome]
+ * @property {number} [retryAt]
  */
 
 /**
@@ -50,10 +66,18 @@ import { providerOf, DEFAULT_PROVIDER } from './provider.js';
  * @property {number} until
  * @property {boolean} redeem
  * @property {boolean} redeeming
+ * @property {number|null} redeemRetryAt  after a --redeem attempt that spent nothing, when it asks again
  */
 
 /** The longest a steer may run, however it is asked for: one weekly window. */
 export const STEER_MAX_MS = 7 * 24 * 3600_000;
+
+/**
+ * How long a --redeem steer waits to ask again after an attempt that spent
+ * nothing, when the redeemer named no back-off of its own: the redeemers'
+ * own decline cooldown.
+ */
+export const STEER_REDEEM_RETRY_MS = 30 * 60_000;
 
 /**
  * A steer refused for something the caller asked, safe to echo back to it:

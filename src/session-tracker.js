@@ -194,13 +194,19 @@ export class SessionTracker {
   // key from operator-supplied routing config and does not validate it, and a
   // key that is not a string names no quota field there either: the session
   // simply keeps re-routing rather than the request path throwing.
-  touch(sessionId, accountIndex = null, bucket = null, now = this._now()) {
+  //
+  // `steered` says a steer placed this request (AccountManager._steerPlacement).
+  // The pin keeps saying so for as long as the conversation stays on that
+  // account, and stops the moment it moves: see steeredOn.
+  touch(sessionId, accountIndex = null, bucket = null, now = this._now(), { steered = false } = {}) {
     if (!sessionId) return null;
     const s = this._ensure(sessionId, now);
     s.lastSeen = now;
     s.count += 1;
     if (accountIndex != null && typeof bucket === 'string' && bucket) {
-      s.pins.set(bucket, { idx: accountIndex, at: now });
+      const prev = s.pins.get(bucket);
+      const keep = steered || (prev?.steered === true && prev.idx === accountIndex);
+      s.pins.set(bucket, keep ? { idx: accountIndex, at: now, steered: true } : { idx: accountIndex, at: now });
     }
     if (now - this._lastSweep > SWEEP_INTERVAL_MS) this.sweep(now);
     return s;
@@ -580,6 +586,21 @@ export class SessionTracker {
   // preemption off creates (AccountManager.setExpiryRouting).
   clearObservations() {
     for (const s of this.sessions.values()) s.refs.clear();
+  }
+
+  // Whether a steer placed this conversation on `accountIndex`, in any bucket,
+  // and it has stayed there since. Such a pin is exempt from the priority
+  // preemption (AccountManager._selectForSession): the steer put it on an
+  // account priority would not have chosen, and without the exemption every
+  // conversation it placed would move at once the moment the steer ended,
+  // each with a cold cache. False for an unknown or expired session.
+  /** @param {string|null} sessionId @param {number} accountIndex @param {number} [now] */
+  steeredOn(sessionId, accountIndex, now = this._now()) {
+    sessionId = keyOf(sessionId);
+    const s = sessionId && this.sessions.get(sessionId);
+    if (!s || this._isExpired(s, now)) return false;
+    for (const pin of s.pins.values()) if (pin.steered === true && pin.idx === accountIndex) return true;
+    return false;
   }
 
   // Every account a known session is pinned to across its buckets, most recent

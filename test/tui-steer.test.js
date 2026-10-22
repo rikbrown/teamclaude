@@ -80,26 +80,41 @@ test('←→ choose how long, and Enter sets the steer for that long', () => {
   assert.equal(tui.mode, 'normal');
   const [steer] = am.steerList();
   assert.equal(steer.target, 'bravo');
-  assert.ok(Math.abs(steer.until - (Date.now() + 24 * H)) < 60_000);
+  assert.equal(steer.until - steer.startedAt, 24 * H);
   assert.equal(steer.redeem, false);
   assert.equal(am.currentIndex, 0, 'the current account did not move');
 });
 
-test('r is offered, and toggles, only on a row that holds a reset', () => {
+test('r is offered on every subscription row, saying when no reset has been seen, and never on an API key', () => {
   const { tui, am } = makeTUI();
   tui._key('t');
-  tui._key('r');
-  assert.equal(tui.steerRedeem, false, 'alpha holds no reset');
-  assert.doesNotMatch(stripAnsi(tui._renderFooter()), /redeem/);
+  // alpha: a subscription with no reading at all, which with the probe off
+  // is most of them. The server's guards decide; the footer says what is known.
+  assert.match(stripAnsi(tui._renderFooter()), /r redeem at wall: off \(no reset seen\)/);
   tui._key('down');
   tui._key('down'); // charlie, RC1
   assert.match(stripAnsi(tui._renderFooter()), /r redeem at wall: off/);
+  assert.doesNotMatch(stripAnsi(tui._renderFooter()), /no reset seen/);
   tui._key('r');
   assert.match(stripAnsi(tui._renderFooter()), /r redeem at wall: on/);
   quietly(() => tui._key('enter'));
-  const [steer] = am.steerList();
-  assert.equal(steer.target, 'charlie');
-  assert.equal(steer.redeem, true);
+  assert.deepEqual(am.steerList().map(s => [s.target, s.redeem]), [['charlie', true]]);
+
+  quietly(() => am.clearSteer());
+  tui._key('t');
+  tui._key('up');
+  tui._key('up'); // alpha
+  tui._key('r');
+  quietly(() => tui._key('enter'));
+  assert.deepEqual(am.steerList().map(s => [s.target, s.redeem]), [['alpha', true]], 'no RC badge needed');
+
+  const keyed = new AccountManager([{ name: 'key', type: 'apikey', apiKey: 'k' }], 0.98);
+  const t2 = new TUI({ accountManager: keyed, config: { proxy: { port: 1 }, accounts: [], routes: [] }, saveConfig: async () => {}, syncAccounts: async () => 0, onQuit: () => {} });
+  t2.render = () => {};
+  t2._key('t');
+  t2._key('r');
+  assert.equal(t2.steerRedeem, false);
+  assert.doesNotMatch(stripAnsi(t2._renderFooter()), /redeem/);
 });
 
 test('t starts on the steered account, and Enter there clears the steer', () => {

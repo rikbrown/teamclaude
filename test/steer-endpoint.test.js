@@ -84,7 +84,7 @@ test('a steer sends new conversations to its target and leaves a running one whe
       assert.equal(set.body.steer.target, 't');
       assert.equal(set.body.steer.provider, 'anthropic');
       assert.equal(set.body.steer.redeem, false);
-      assert.ok(Math.abs(set.body.steer.until - (Date.now() + 6 * H)) < 60_000, 'the end it settled on is echoed');
+      assert.equal(set.body.steer.until - set.body.steer.startedAt, 6 * H, 'the end it settled on is echoed');
       assert.equal(set.body.eligible, true);
       assert.equal(set.body.clamped, false);
 
@@ -106,6 +106,51 @@ test('a steer sends new conversations to its target and leaves a running one whe
       assert.deepEqual((await steer(ctx.port, { account: null })).body.cleared, []);
     } finally {
       ctx.close();
+    }
+  });
+});
+
+test('a weekly 429 at 0.999 is the --redeem wall: the request fails over and one redemption starts', async () => {
+  /** @type {string[]} */
+  const seen = [];
+  const upstream = http.createServer((req, res) => {
+    const who = String(req.headers.authorization || '').replace('Bearer t-', '');
+    seen.push(who);
+    req.resume();
+    req.on('end', () => {
+      if (who === 't') {
+        res.writeHead(429, {
+          'content-type': 'application/json', 'retry-after': '600',
+          'anthropic-ratelimit-unified-status': 'rejected',
+          'anthropic-ratelimit-unified-7d-status': 'rejected',
+          'anthropic-ratelimit-unified-7d-utilization': '0.999',
+        });
+        res.end('{"type":"error","error":{"type":"rate_limit_error","message":"weekly"}}');
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ id: 'msg', type: 'message', content: [], usage: { input_tokens: 1, output_tokens: 1 } }));
+    });
+  });
+  const upstreamPort = await listen(upstream);
+  const oauthAcct = (/** @type {string} */ name) => ({ name, type: 'oauth', accessToken: `t-${name}`, refreshToken: 'r', expiresAt: Date.now() + 24 * H, accountUuid: `u-${name}`, orgUuid: `o-${name}` });
+  const am = new AccountManager([oauthAcct('a'), oauthAcct('t')], 0.98, { distributeSessions: true });
+  let asked = 0;
+  am.setSteerRedeemer(async () => { asked++; return { redeemed: true, reason: 'x', outcome: 'redeemed' }; });
+  const proxy = createProxyServer(am, { proxy: { apiKey: 'k' }, upstream: `http://127.0.0.1:${upstreamPort}` }, {});
+  const port = await listen(proxy);
+  await quietly(async () => {
+    try {
+      assert.equal((await steer(port, { account: 't', redeem: true })).status, 200);
+      const steered = am._steers.get('anthropic');
+      assert.equal(await message(port, S1), 200);
+      assert.deepEqual(seen, ['t', 'a'], 'refused on the target, served by the failover');
+      await steered?.attempt;
+      assert.equal(asked, 1);
+      assert.deepEqual(am.steerList(), [], 'and the steer ended with the redemption, rather than going round');
+    } finally {
+      proxy.closeAllConnections?.(); proxy.close();
+      upstream.closeAllConnections?.(); upstream.close();
     }
   });
 });
@@ -220,10 +265,13 @@ test('status carries the steers, and the status line and dashboard summary name 
   const am = new AccountManager([apikey('a'), apikey('t')], 0.98);
   await quietly(async () => { am.setSteer(1, { until: Date.now() + 5 * H }); });
   const [row] = am.getStatus().steers;
-  assert.deepEqual({ ...row, startedAt: 0, until: 0 }, { provider: 'anthropic', target: 't', index: 1, startedAt: 0, until: 0, redeem: false, redeeming: false });
+  assert.deepEqual({ ...row, startedAt: 0, until: 0 }, { provider: 'anthropic', target: 't', index: 1, startedAt: 0, until: 0, redeem: false, redeeming: false, redeemRetryAt: null });
   const text = renderStatus(am.getStatus(), { color: false });
   assert.match(text, /Steer\s+→ t · 5h left/);
   assert.doesNotMatch(renderStatus(new AccountManager([apikey('a')], 0.98).getStatus(), { color: false }), /Steer/);
+  const now = Date.now();
+  const waiting = renderStatus({ accounts: [], steers: [{ provider: 'anthropic', target: 't', index: 1, until: now + 5 * H, redeem: true, redeeming: false, redeemRetryAt: now + 25 * 60_000 }] }, { color: false, now });
+  assert.match(waiting, /Steer\s+→ t · 5h left · redeems its reset at the weekly wall \(next try in 25m\)/);
   assert.equal(steersText(am.getStatus().steers, row.until - 5 * H), 'steer → t (5h left)');
   assert.equal(steersText([], Date.now()), '');
 });

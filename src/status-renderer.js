@@ -48,6 +48,14 @@ export function renderStatus(status, { color = process.stdout.isTTY, now = Date.
   if (sessionPins.length) {
     lines.push(`${paint.dim('Pinned'.padEnd(12))} ${formatSessionPins(sessionPins, paint)}`);
   }
+  // Where new conversations are being sent, and until when. Absent when no
+  // steer is set: placement is then the distribution mode's, as the Sessions
+  // line already says.
+  const steers = Array.isArray(status.steers) ? status.steers : [];
+  if (steers.length) {
+    const providers = new Set(accounts.map(a => a?.provider ?? 'anthropic'));
+    lines.push(`${paint.dim('Steer'.padEnd(12))} ${formatSteers(steers, paint, now, providers.size > 1)}`);
+  }
   lines.push(`${paint.dim('Probe'.padEnd(12))} ${formatProbeSummary(probe, now, paint)}`);
   if (warm.enabled) {
     lines.push(`${paint.dim('Keep-warm'.padEnd(12))} ${formatProbeSummary(warm, now, paint)}`);
@@ -592,6 +600,21 @@ function renderAccountHeader(account, currentAccount, paint, now, followSessions
 /** @param {any[]} pins @param {any} paint */
 export function formatSessionPins(pins, paint) {
   return pins.map((/** @type {any} */ p) => `${nameText(String(p?.session ?? ''))} → ${paint.cyan(nameText(String(p?.account ?? '')))}`).join(', ');
+}
+
+// "→ api-1 · 5h12m left · redeems its reset at the weekly wall" — each steer:
+// the account new conversations go to, how long it has left, and whether it
+// ends by redeeming. The provider leads only in a mixed fleet, where a Claude
+// and a Codex steer can stand side by side.
+/** @param {any[]} steers @param {any} paint @param {number} now @param {boolean} [named] */
+export function formatSteers(steers, paint, now = Date.now(), named = false) {
+  return steers.map((/** @type {any} */ s) => {
+    const who = named ? `${nameText(String(s?.provider ?? ''))} ` : '';
+    const left = Number.isFinite(s?.until) ? ` ${paint.dim('·')} ${formatDuration(s.until - now)} left` : '';
+    const redeem = s?.redeeming ? ` ${paint.dim('·')} ${paint.yellow('redeeming its reset now')}`
+      : s?.redeem ? ` ${paint.dim('·')} redeems its reset at the weekly wall` : '';
+    return `${who}→ ${paint.magenta(nameText(String(s?.target ?? '')))}${left}${redeem}`;
+  }).join(', ');
 }
 
 // "2 active / 3 known · distributing" — the running-sessions readout. While a

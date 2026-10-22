@@ -263,6 +263,45 @@ export class ClaudeResetRedeemer {
     return attempt;
   }
 
+  /**
+   * The `steer --redeem` entry point: the steer's target has spent its week,
+   * and the operator asked for its banked reset to be spent then. That flag is
+   * consent for this one account, so the two switches that stand for consent
+   * are not consulted — the fleet's `autoRedeemResets` and the account's own
+   * `autoRedeemReset: false` — and neither is the dry pool, which is the
+   * policy's reason to spend and not a safeguard. Every safeguard still holds:
+   * the fleet hold after a claim that landed or may have, the account's own
+   * cooldown, a last reading of zero held, and everything _redeem checks with
+   * upstream before it claims (at a limit, a weekly one among them, a grant
+   * that clears every limit it is at, only `next_grant_id`, no cooldown, the
+   * request-id replay, the token refresh and the budget).
+   *
+   * Serialised with the dry-pool attempts on the same slot, so the two can
+   * never claim at once: this one waits out a pool attempt in flight, and a
+   * dry-pool refusal arriving meanwhile joins this one.
+   *
+   * @param {Record<string, any>} account
+   * @returns {Promise<ClaudeRedeemResult>}
+   */
+  async redeemForSteer(account) {
+    while (this.inFlight) await this.inFlight.catch(() => {});
+    const attempt = this._attemptForSteer(account).finally(() => { if (this.inFlight === attempt) this.inFlight = null; });
+    this.inFlight = attempt;
+    return attempt;
+  }
+
+  /** @param {Record<string, any>} account @returns {Promise<ClaudeRedeemResult>} */
+  async _attemptForSteer(account) {
+    const name = safeLine(account?.name, 64);
+    const now = this.now();
+    if (!this._isClaude(account) || !account.orgUuid) return { redeemed: false, account: name, reason: 'not a Claude subscription account with an organization' };
+    if (account.disabled) return { redeemed: false, account: name, reason: 'the account is disabled' };
+    if (now < this.fleetHoldUntil) return { redeemed: false, account: name, reason: 'holding off after a recent Claude reset attempt' };
+    if (account.quota?.resetCredits?.available === 0) return { redeemed: false, account: name, reason: 'its last reading holds no reset' };
+    if (now < this._stateFor(account).cooldownUntil) return { redeemed: false, account: name, reason: 'cooling down after a recent attempt on it' };
+    return this._redeem(account, now + this.timeoutMs, 'its steer has spent its week (--redeem)');
+  }
+
   /** @param {Record<string, any>[]} accounts */
   async _attempt(accounts) {
     const now = this.now();
@@ -287,9 +326,10 @@ export class ClaudeResetRedeemer {
   /**
    * @param {Record<string, any>} account
    * @param {number} deadline
+   * @param {string} [why]  what asked, for the log line and the result
    * @returns {Promise<ClaudeRedeemResult>}
    */
-  async _redeem(account, deadline) {
+  async _redeem(account, deadline, why = 'no Claude account can serve the request') {
     const name = safeLine(account.name, 64);
     const state = this._stateFor(account);
     const now = this.now();
@@ -339,7 +379,7 @@ export class ClaudeResetRedeemer {
     }
     if (state.grantId !== grant.id) { state.grantId = grant.id; state.requestId = null; }
     state.requestId ||= randomUUID();
-    this.log(`[TeamClaude] Redeeming a banked Claude usage-limit reset on "${name}" — no Claude account can serve the request`);
+    this.log(`[TeamClaude] Redeeming a banked Claude usage-limit reset on "${name}" — ${why}`);
     const r = await this.claimFn(account, { grantId: grant.id, requestId: state.requestId }, { timeoutMs: left() });
 
     if (r?.error) {
@@ -357,7 +397,9 @@ export class ClaudeResetRedeemer {
       this._holdFleet(account, now + SUCCESS_HOLD_MS);
       this.log(`[TeamClaude] Redeemed a Claude usage-limit reset on "${name}" — cleared ${(r.cleared || []).join(', ') || 'its limits'}, ${r.resetsLeft ?? '?'} left`);
       await this._reapply(account, deadline);
-      return { redeemed: true, account: name, reason: 'no Claude account could serve the request', result: r.result, resetsLeft: r.resetsLeft, cleared: r.cleared };
+      // A steer on this account was about spending the week that just went.
+      this.am.noteResetRedeemed?.(account);
+      return { redeemed: true, account: name, reason: why, result: r.result, resetsLeft: r.resetsLeft, cleared: r.cleared };
     }
     state.cooldownUntil = r.result === 'cooldown' && r.cooldownUntil ? r.cooldownUntil : now + DECLINED_COOLDOWN_MS;
     this.log(`[TeamClaude] Claude reset on "${name}" declined upstream (${r.result || 'no result'}${r.reason ? `: ${r.reason}` : ''}); nothing was spent`);

@@ -496,6 +496,14 @@ held to a 10-second budget, because the waiting client's patience for the
 response head is finite and the retry needs the rest of it. Every attempt and outcome is
 logged.
 
+To spend one account's week before its credit, rather than waiting for the
+whole pool to run dry, [steer](routing.md#steer-new-conversations-to-one-account)
+new conversations to it with `teamclaude steer <account> --redeem`: it serves
+until its weekly window is spent, and then one credit is redeemed on it. That
+flag is consent for that one account, so it works with `autoRedeemResets` off
+and with the account exempt; the other conditions above still apply, except
+that the rest of the pool does not have to be dry.
+
 ## Claude banked usage-limit resets
 
 Claude sometimes grants an account a **banked usage-limit reset**, shown under
@@ -556,6 +564,19 @@ time it fires. A fleet that already turned `autoRedeemResets` on for Codex
 credits now spends Claude resets too; exempt an account with
 `autoRedeemReset: false` if that is not wanted. With the switch off — the default — a Claude reset is still
 yours to spend, on the claude.ai usage page or with `/limit-reset`.
+
+### Spending one account's week, then its reset
+
+A reset that expires soon is worth more after its account's current week has
+been used up. `teamclaude steer <account> --redeem`
+[steers](routing.md#steer-new-conversations-to-one-account) new conversations
+to that account, keeps it serving until upstream itself reports its week spent
+(the switch threshold is lifted to 100% for its weekly windows while the steer
+stands), and then redeems one reset on it. Running conversations elsewhere stay
+where they are. The flag is consent for that one account: it needs neither
+`autoRedeemResets` nor a dry pool, and it sets `autoRedeemReset: false` aside.
+Every check in the list above still applies, as do both holds. A redemption
+cannot be undone.
 
 ## Third-party backend accounts
 

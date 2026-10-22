@@ -283,10 +283,11 @@ const WRITE_TOOLS = [
       }
       if (args.account === undefined) throw new ToolFailure('set_steer needs "account", or "clear": true');
       const index = accountIndexFor(ctx, args);
-      const end = resolveSteerUntil({ for: args.hours == null ? undefined : args.hours * 3600 });
+      const now = Date.now();
+      const end = resolveSteerUntil({ for: args.hours == null ? undefined : args.hours * 3600 }, now);
       if ('error' in end) throw new ToolFailure(end.error.replace('"for"', '"hours"'));
       try {
-        const result = am.setSteer(index, { until: end.until, redeem: args.redeem === true });
+        const result = am.setSteer(index, { until: end.until, redeem: args.redeem === true, now });
         return { ...result, clamped: end.clamped, ...am.steerEligibility(index) };
       } catch (err) {
         if (err instanceof SteerError) throw new ToolFailure(err.message);

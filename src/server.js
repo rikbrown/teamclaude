@@ -10,7 +10,7 @@ import { patchAccountUuid } from './account-uuid-rewrite.js';
 import { sanitizeToolPairs } from './tool-pair-sanitize.js';
 import { sanitizeCacheControl, cacheControlSubfieldsToStrip } from './cache-control-sanitize.js';
 import { sanitizeContentBlocks, contentBlockTypesToStrip } from './content-block-sanitize.js';
-import { parseRequestModel, parseAdvisorModel } from './account-manager.js';
+import { parseRequestModel, parseAdvisorModel, resetClears } from './account-manager.js';
 import { isTokenExpired } from './oauth.js';
 import { TopLevelFieldFinder, modelGlobMatches, parseRequestEffort, parseRequestStream } from './model.js';
 import { conversationDigest, pinKeyFor } from './conversation.js';
@@ -237,17 +237,6 @@ export function formatRateLimitDiagnostic({ reqId, sessionId, account, model, at
 // the one to close. headersTimeout bounds an in-progress request's headers, not
 // the idle gap between them (measured), so it is deliberately left alone.
 export const KEEP_ALIVE_TIMEOUT_MS = 120_000;
-
-// The `unavailableReason` verdicts a redeemed Codex reset credit actually
-// clears, and therefore the only ones worth spending one over. A redemption
-// re-reads the account's quota and drops its rate-limit hold, which answers
-// exactly these two; every other reason survives it untouched — an operator's
-// own decision (disabled, capped), a credential or policy problem (error,
-// entitlement), or an eligibility rule (route) that no quota window governs.
-const RESET_CLEARS = new Set(['quota', 'throttled']);
-// The same for a banked Claude usage-limit reset, which also clears the windows
-// behind upstream's own `rejected` verdict.
-const CLAUDE_RESET_CLEARS = new Set(['quota', 'throttled', 'upstream-rejected']);
 
 /** Classify only the structured organization-policy denial observed upstream.
  * Message text and generic permission errors are deliberately not enough. */
@@ -1059,7 +1048,9 @@ export function createProxyServer(accountManager, config, hooks = {}, sx = null,
           reply(400, { ok: false, error: '"redeem" must be true or false' });
           return;
         }
-        const end = resolveSteerUntil({ for: body.for, until: body.until });
+        // One clock for the end and the start, so "6h" is six hours to the ms.
+        const now = Date.now();
+        const end = resolveSteerUntil({ for: body.for, until: body.until }, now);
         if ('error' in end) {
           reply(400, { ok: false, error: end.error });
           return;
@@ -1071,7 +1062,7 @@ export function createProxyServer(accountManager, config, hooks = {}, sx = null,
         }
         let result;
         try {
-          result = accountManager.setSteer(index, { until: end.until, redeem: body.redeem === true });
+          result = accountManager.setSteer(index, { until: end.until, redeem: body.redeem === true, now });
         } catch (/** @type {any} */ err) {
           // A SteerError is the caller's own request (a --redeem on an API
           // key, a target already at its wall) and safe to echo; anything else
@@ -3586,14 +3577,14 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
     const resetProvider = ctx.provider || DEFAULT_PROVIDER;
     const redeemHook = resetProvider === 'codex' ? hooks.redeemCodexResetForPool
       : resetProvider === DEFAULT_PROVIDER ? hooks.redeemClaudeResetForPool : null;
-    const clears = resetProvider === 'codex' ? RESET_CLEARS : CLAUDE_RESET_CLEARS;
+    // resetClears is the same test a steer's --redeem applies (resetBlockedBy).
     const resettable = redeemHook && !ctx.resetRedeemTried
       ? accountManager.accounts.filter((/** @type {Record<string, any>} */ a) =>
         providerOf(a) === resetProvider && !ctx.tried.has(a.index)
         // A third-party backend is an Anthropic-shaped account with no Anthropic
         // reset to spend; Codex rows never carry one, so the test is Claude's alone.
         && !(resetProvider === DEFAULT_PROVIDER && a.upstream)
-        && clears.has(accountManager.unavailableReason(a, ctx.model) ?? ''))
+        && resetClears(a).has(accountManager.unavailableReason(a, ctx.model) ?? ''))
       : [];
     if (resettable.length) {
       // Once per request, whatever it decides: a redemption that reports success
@@ -3670,7 +3661,7 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
   // Pin this conversation to the serving account for the model's weekly bucket
   // (for affinity) and keep it "active" in the running-sessions readout. Passive
   // when distribution is off.
-  accountManager.recordSession(ctx.pinKey, account.index, ctx.model);
+  accountManager.recordSession(ctx.pinKey, account.index, ctx.model, { steered: ctx.steered === true });
   hooks.onRequestRouted?.(reqId, { account: account.name, viaSx: ctx.viaSx, steered: ctx.steered === true });
 
   // Refresh OAuth token if needed

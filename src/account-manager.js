@@ -17,10 +17,11 @@ import { safeLine } from './safe-text.js';
 import { parseRoutingUrl, describeRouting, routingToUrl, isRoutingFailure } from './account-routing.js';
 import { isSelfProxy } from './upstream-proxy.js';
 import { envVar } from './brand.js';
-import { STEER_MAX_MS, SteerError, canRedeemOn, formatSteerLeft } from './steer.js';
+import { STEER_MAX_MS, STEER_REDEEM_RETRY_MS, SteerError, canRedeemOn, formatSteerLeft } from './steer.js';
 /** @typedef {import('./session-tracker.js').Observation} Observation */
 /** @typedef {import('./steer.js').Steer} Steer */
 /** @typedef {import('./steer.js').SteerView} SteerView */
+/** @typedef {import('./steer.js').SteerRedeemResult} SteerRedeemResult */
 
 // Re-exported for callers that import these model helpers from here.
 export { isFableModel, parseRequestModel, parseAdvisorModel } from './model.js';
@@ -127,6 +128,28 @@ function resetTimestamp(value) {
 // Fallback when a per-bucket threshold table names neither the bucket nor a
 // `default` — the same value the single-number form has always used.
 export const DEFAULT_SWITCH_THRESHOLD = 0.98;
+
+// The `unavailableReason` verdicts a redeemed Codex reset credit actually
+// clears, and therefore the only ones worth spending one over. A redemption
+// re-reads the account's quota and drops its rate-limit hold, which answers
+// exactly these two; every other reason survives it untouched — an operator's
+// own decision (disabled, capped), a credential or policy problem (error,
+// entitlement), or an eligibility rule (route) that no quota window governs.
+const CODEX_RESET_CLEARS = new Set(['quota', 'throttled']);
+// The same for a banked Claude usage-limit reset, which also clears the windows
+// behind upstream's own `rejected` verdict.
+const CLAUDE_RESET_CLEARS = new Set(['quota', 'throttled', 'upstream-rejected']);
+
+/**
+ * The reasons a reset redeemed on `account` would clear: the one test both the
+ * dry-pool redemption (server.js) and a steer's --redeem (resetBlockedBy) put
+ * an account through before spending anything on it.
+ * @param {Record<string, any>} account
+ * @returns {Set<string>}
+ */
+export function resetClears(account) {
+  return providerOf(account) === 'codex' ? CODEX_RESET_CLEARS : CLAUDE_RESET_CLEARS;
+}
 
 // Quota fields that survive a restart: utilization levels and their reset
 // windows, learned passively from upstream responses. Transient/derived state
@@ -242,6 +265,14 @@ function emptyQuota() {
     unified7dSonnetSeenAt: null,
     unified7dFableSeenAt: null,
     unifiedStatus: null,        // allowed | allowed_warning | rejected
+    // When upstream last refused a request saying the shared WEEK is spent
+    // (`unified-7d-status: rejected`), ms timestamp; null once a later response
+    // says otherwise or the window resets. Apart from unified7d because a
+    // weekly 429 can carry a utilization under 1, or none at all, and the
+    // steer's wall has to be upstream's word rather than our arithmetic (see
+    // _weeklyRejected). Not persisted: a restart re-learns it from the next
+    // refusal.
+    unified7dRejectedAt: /** @type {number|null} */ (null),
     // false: the plan meters no shared weekly window (a Team seat).
     weeklyWindowStated: /** @type {boolean|null} */ (null),
     // Normalized reading from a third-party backend (see backend-quota.js).
@@ -606,11 +637,12 @@ export class AccountManager {
     // What spends a `--redeem` steer's reset once its target's week is spent:
     // index.js wires the two redeemers here. Null spends nothing, which is what
     // every manager built without a server is.
-    /** @type {((account: Record<string, any>) => Promise<{ redeemed: boolean, reason: string }>)|null} */
+    /** @type {((account: Record<string, any>, opts: { beforeSpend: (claim: { requestId: string }) => Promise<boolean> }) => Promise<SteerRedeemResult>)|null} */
     this._steerRedeemer = null;
-    // Told when a steer starts or ends, so the state file holds it at once
-    // rather than at the next minute's save.
-    /** @type {(() => void)|null} */
+    // Told when a steer starts, ends or changes phase, so the state file holds
+    // it at once rather than at the next minute's save. It answers with the
+    // write, which the --redeem path awaits before its irreversible request.
+    /** @type {(() => (void|Promise<void>))|null} */
     this._onSteersChanged = null;
     // Injectable for tests (mirrors Prober's probeFn); defaults to the real
     // OAuth token refresh.
@@ -1873,10 +1905,14 @@ export class AccountManager {
         return pinned;
       }
       // Mirror _select's priority preemption so an operator's priority order
-      // still wins over a session's stickiness.
+      // still wins over a session's stickiness. Except over a pin a steer
+      // placed: the steer chose that account over priority, and preempting the
+      // pin once the steer is gone would move every conversation it placed at
+      // the same moment. Such a pin still moves for everything above — an
+      // account that cannot serve, a rollover — as every pin does.
       const betterExists = this.accounts.some(a =>
         this._isAvailable(a, model, advisorModel) && !exclude?.has(a.index) && (a.priority || 0) < (pinned.priority || 0));
-      if (!betterExists) return pinned;
+      if (!betterExists || this.sessionTracker.steeredOn(sessionId, idx)) return pinned;
     }
     // No pin was usable, so this is a placement. Placing is aiming: it takes no
     // reading, and the next request to find the pin here takes it.
@@ -2123,7 +2159,7 @@ export class AccountManager {
    * that was degraded would pin a family to an account that never served it,
    * quite possibly one that cannot. Unclaimed means the session routes that
    * family afresh next request, which is what it did before it had a pin. */
-  recordSession(sessionId, accountIndex, model = null) {
+  recordSession(sessionId, accountIndex, model = null, { steered = false } = {}) {
     if (!sessionId) return;
     const bucket = this._weeklyBucketFor(model);
     // The pin alone: this runs before the destination's token is refreshed and
@@ -2131,7 +2167,9 @@ export class AccountManager {
     // SENT, and being sent somewhere is not arriving there. The observation is
     // taken where the evidence is, at the start of the NEXT request from
     // wherever this one left the pin (see _restOn).
-    this.sessionTracker.touch(sessionId, accountIndex, bucket);
+    // `steered`: a steer placed this request, and the pin remembers it (see
+    // SessionTracker.steeredOn).
+    this.sessionTracker.touch(sessionId, accountIndex, bucket, undefined, { steered });
     // The load mode's input: one entry per routed request that carries a
     // session id, in every mode, so switching to load starts from a warm picture.
     this.sessionTracker.noteRouted(accountIndex);
@@ -2973,10 +3011,13 @@ export class AccountManager {
       // window. Breaking hands the session to the ordinary walk, which aims.
       if (this.expiryRouting.enabled && this.expiryRouting.preempt
           && this._pinRolledOver(sessionId, pinned, model)) break;
-      // Mirror _select's priority preemption, as _selectForSession does.
+      // Mirror _select's priority preemption, as _selectForSession does, with
+      // its exemption for a pin a steer placed: a steer ending hands its
+      // conversations here, and preempting them would be the snap the drain
+      // exists to prevent.
       const betterExists = this.accounts.some(a =>
         this._isAvailable(a, model, advisorModel) && !exclude?.has(a.index) && (a.priority || 0) < (pinned.priority || 0));
-      if (!betterExists) return pinned;
+      if (!betterExists || this.sessionTracker.steeredOn(sessionId, idx)) return pinned;
     }
     // The pin is gone or no longer usable: this session has to move anyway, so
     // let it out of the drain now instead of re-checking a dead pin every request.
@@ -3007,28 +3048,36 @@ export class AccountManager {
    * is the operator's consent for this one account, which is why it is a flag
    * on a steer and not a fleet setting.
    *
+   * `now` is the instant the caller measured `until` from, so a steer asked
+   * for six hours runs six hours from when it was set, to the millisecond.
+   *
    * @param {number} index
-   * @param {{ until?: number|null, redeem?: boolean }} [opts]
+   * @param {{ until?: number|null, redeem?: boolean, now?: number }} [opts]
    * @returns {{ steer: SteerView, replaced: SteerView|null }}
    */
-  setSteer(index, { until = null, redeem = false } = {}) {
+  setSteer(index, { until = null, redeem = false, now = Date.now() } = {}) {
     const account = this.accounts[index];
     if (!account) throw new SteerError('no such account');
     const name = safeLine(account.name, 64);
     if (redeem && !canRedeemOn(account)) {
       throw new SteerError(`"${name}" holds no banked reset to redeem: only a Claude or Codex subscription login does`);
     }
-    const now = Date.now();
     // Clamped here as well as by the caller: the hard limit is the manager's
     // to keep, not each control surface's.
     const end = Math.min(until ?? now + STEER_MAX_MS, now + STEER_MAX_MS);
-    if (!(end > now)) throw new SteerError('that end time has already passed');
+    if (!(end > Date.now())) throw new SteerError('that end time has already passed');
     this._clearExpiredQuotas(account);
     // Refused rather than started: it would end on the next request, and the
     // operator would be told it was set. A --redeem steer gates at upstream's
     // own wall, so the same reading leaves it room — and an account already at
     // that wall gets its redemption from the first selection that looks.
-    if (!redeem && account.quota.unified7d != null && account.quota.unified7d >= this.thresholdFor('unified7d', account)) {
+    //
+    // Judged against the threshold the NEW steer will have, not thresholdFor:
+    // a --redeem steer being replaced still lifts this account's weekly
+    // threshold to 1, and a plain steer measured against that would start on
+    // an account it then ends at once.
+    if (!redeem && (this._weeklyRejected(account) || (account.quota.unified7d != null
+        && account.quota.unified7d >= resolveSwitchThreshold(account.switchThreshold, 'unified7d', this._fleetThresholdFor('unified7d'))))) {
       throw new SteerError(`"${name}" is already at its weekly switch threshold, so a steer would end at once`);
     }
     const provider = providerOf(account);
@@ -3037,6 +3086,7 @@ export class AccountManager {
     const steer = {
       account, provider, startedAt: now, until: end, redeem: redeem === true,
       weekEnds: account.quota.unified7dReset ?? null, phase: 'active', attempt: null,
+      retryAt: null, redeemRequestId: null,
     };
     // A replacement, not an ending: affinity carries straight on under the
     // new steer, so nothing is handed back to the drain. A --redeem attempt
@@ -3094,14 +3144,36 @@ export class AccountManager {
     return { eligible: true };
   }
 
+  /**
+   * Why a reset redeemed on `account` would NOT put it back in service, or
+   * null when it would, or when nothing keeps it out of service now.
+   *
+   * The dry pool asks the same of every candidate (resetClears): an operator's
+   * own decision (disabled, a cap), a structural refusal (an error state, an
+   * OAuth denial, a route) survives a cleared window, so a reset spent there
+   * buys nothing and is gone. A steer's --redeem is consent for one account,
+   * which settles whether to spend; it is not a reason to spend where spending
+   * cannot help. In service already is not this method's to refuse: the
+   * redeemers' own checks with upstream decide that.
+   * @param {Record<string, any>} account
+   * @param {*} [model]  loosely typed, like the availability check it feeds
+   * @returns {string|null}
+   */
+  resetBlockedBy(account, model = null) {
+    const reason = this.unavailableReason(account, model);
+    if (reason == null || resetClears(account).has(reason)) return null;
+    return reason;
+  }
+
   /** Install what spends a --redeem steer's reset (index.js wires the two redeemers).
-   * @param {((account: Record<string, any>) => Promise<{ redeemed: boolean, reason: string }>)|null} fn */
+   * @param {((account: Record<string, any>, opts: { beforeSpend: (claim: { requestId: string }) => Promise<boolean> }) => Promise<SteerRedeemResult>)|null} fn */
   setSteerRedeemer(fn) {
     this._steerRedeemer = fn;
   }
 
-  /** Set a callback told whenever a steer starts or ends.
-   * @param {(() => void)|null} fn */
+  /** Set a callback told whenever a steer starts, ends or changes phase; it
+   * may answer with a promise that settles once the change is on disk.
+   * @param {(() => (void|Promise<void>))|null} fn */
   onSteersChanged(fn) {
     this._onSteersChanged = fn;
   }
@@ -3191,9 +3263,12 @@ export class AccountManager {
     if (ends != null) steer.weekEnds = ends;
     if (this._steerAtWall(steer)) {
       if (!steer.redeem) {
-        return this._endSteer(steer, `its weekly quota reached the switch threshold (${(this.thresholdFor('unified7d', account) * 100).toFixed(1)}%)`);
+        return this._endSteer(steer, this._weeklyRejected(account)
+          ? 'upstream refused it on its weekly limit'
+          : `its weekly quota reached the switch threshold (${(this.thresholdFor('unified7d', account) * 100).toFixed(1)}%)`);
       }
-      if (act) this._redeemOnSteer(steer);
+      // Not again while the last attempt's back-off runs: see _afterSteerAttempt.
+      if (act && !(steer.retryAt != null && now < steer.retryAt)) this._redeemOnSteer(steer);
       // At its wall the target takes no placement whichever way this goes, so
       // returning the steer changes no request; it keeps affinity on while the
       // attempt runs, so nothing moves under the conversations meanwhile.
@@ -3211,7 +3286,34 @@ export class AccountManager {
    */
   _steerAtWall(steer) {
     const q = steer.account.quota;
-    return q.unified7d != null && q.unified7d >= this.thresholdFor('unified7d', steer.account);
+    return (q.unified7d != null && q.unified7d >= this.thresholdFor('unified7d', steer.account))
+      || this._weeklyRejected(steer.account);
+  }
+
+  /**
+   * Whether upstream has said, on a request it refused, that this account's
+   * shared week is spent — and that is still about the current week.
+   *
+   * The wall a --redeem steer waits for is upstream's, not a number we hold:
+   * a weekly 429 can carry a utilization of 0.999, or none, and a steer
+   * reading only the number would never see its wall. The account is held
+   * after that 429, selection walks past it, and the hold lapses into another
+   * refusal, round and round. A Codex account needs nothing of its own here:
+   * Codex states a spent window as its utilization at the limit, which the
+   * reading above already is.
+   *
+   * Trusted for as long as upstream's `unified-status` verdict is (the same
+   * staleness floor), and never past the end of the window it was about.
+   * @param {Record<string, any>} account
+   * @param {number} [now]
+   */
+  _weeklyRejected(account, now = Date.now()) {
+    const q = account.quota;
+    const at = q.unified7dRejectedAt;
+    if (!Number.isFinite(at)) return false;
+    if (now - at <= this.statusStaleMs && !(q.unified7dReset != null && now >= q.unified7dReset)) return true;
+    q.unified7dRejectedAt = null;
+    return false;
   }
 
   /**
@@ -3231,25 +3333,73 @@ export class AccountManager {
   }
 
   /**
-   * Spend the target's banked reset, once, without holding anything up: the
-   * request that found the wall fails over as any refused request does, and
-   * the steer ends when the attempt settles, whatever it found. Deferred to a
-   * microtask so the redeemer is never entered from inside a selection walk.
+   * Spend the target's banked reset, without holding anything up: the request
+   * that found the wall fails over as any refused request does, and the
+   * attempt runs on its own. Deferred to a microtask so the redeemer is never
+   * entered from inside a selection walk.
+   *
+   * The redeemer calls `beforeSpend` with the claim's request id right before
+   * the one irreversible request. That is when the steer is written to the
+   * state file as mid-spend, and the write is awaited: a restart from then on
+   * finds a steer whose spend may have landed and does not start another (see
+   * restoreSteers). It is also the last moment a steer cleared or replaced
+   * during the attempt can stop the spend, which it does by answering false.
    * @param {Steer} steer
    */
   _redeemOnSteer(steer) {
     steer.phase = 'redeeming';
+    steer.retryAt = null;
     const name = safeLine(steer.account.name, 64);
     console.log(`[TeamClaude] Steer to "${name}": its week is spent — redeeming its banked reset, as --redeem asked`);
     const redeemer = this._steerRedeemer;
+    const current = () => this._steers.get(steer.provider) === steer;
+    const beforeSpend = async (/** @type {{ requestId: string }} */ { requestId }) => {
+      if (!current()) return false;
+      steer.redeemRequestId = requestId;
+      await this._onSteersChanged?.();
+      return current();
+    };
     steer.attempt = Promise.resolve()
-      .then(() => (redeemer ? redeemer(steer.account) : { redeemed: false, reason: 'this server has no redeemer' }))
-      .then(r => r, (/** @type {any} */ err) => ({ redeemed: false, reason: err?.message || String(err) }))
-      .then(r => {
-        this._endSteer(steer, r?.redeemed
-          ? 'its week was spent and its banked reset was redeemed'
-          : `its week was spent, but no reset was redeemed: ${safeLine(r?.reason || 'no reason given', 120)}`);
-      });
+      .then(() => (redeemer ? redeemer(steer.account, { beforeSpend })
+        : /** @type {SteerRedeemResult} */ ({ redeemed: false, reason: 'this server has no redeemer', outcome: 'nothing-held' })))
+      // A throw tells us nothing about whether the claim went out, so it is
+      // read the way an unanswered claim is.
+      .then(r => r, (/** @type {any} */ err) => ({ redeemed: false, reason: err?.message || String(err), outcome: 'unknown' }))
+      .then(r => this._afterSteerAttempt(steer, /** @type {SteerRedeemResult} */ (r)));
+  }
+
+  /**
+   * Settle a --redeem steer from its attempt's outcome.
+   *
+   * It ends when a reset was spent, when one may have been (an answer that
+   * never arrived), and when there is nothing to spend, since asking again
+   * cannot help. Anything else spent nothing and can change — upstream not yet
+   * reporting the limit our reading already shows, a cooldown, a hold after a
+   * recent attempt — so the steer stays armed and asks again once the
+   * redeemer's own back-off is over. Ending there would strand the account:
+   * a local reading at 100% keeps traffic off it, and only traffic reaches the
+   * wall upstream is waiting for.
+   * @param {Steer} steer
+   * @param {SteerRedeemResult} r
+   */
+  _afterSteerAttempt(steer, r) {
+    const outcome = r?.redeemed ? 'redeemed' : (r?.outcome ?? 'unknown');
+    const why = safeLine(r?.reason || 'no reason given', 120);
+    const id = steer.redeemRequestId ? ` (request id ${safeLine(steer.redeemRequestId, 64)})` : '';
+    if (outcome === 'redeemed') return this._endSteer(steer, 'its week was spent and its banked reset was redeemed');
+    if (outcome === 'unknown') {
+      return this._endSteer(steer, `its week was spent, but the redemption got no answer (${why}), so a reset may have been spent — check the account${id}`);
+    }
+    if (outcome === 'nothing-held') return this._endSteer(steer, `its week was spent, but it holds nothing to redeem: ${why}`);
+    // 'not-now', and 'cancelled', whose steer is no longer the one in force.
+    if (this._steers.get(steer.provider) !== steer) return null;
+    const now = Date.now();
+    steer.phase = 'active';
+    steer.redeemRequestId = null;
+    steer.retryAt = Number.isFinite(r?.retryAt) && /** @type {number} */ (r.retryAt) > now ? /** @type {number} */ (r.retryAt) : now + STEER_REDEEM_RETRY_MS;
+    console.log(`[TeamClaude] Steer to "${safeLine(steer.account.name, 64)}": no reset was redeemed yet — ${why}; the steer stays, and asks again in ${formatSteerLeft(steer.retryAt - now)}`);
+    this._onSteersChanged?.();
+    return null;
   }
 
   /**
@@ -3298,6 +3448,7 @@ export class AccountManager {
       until: steer.until,
       redeem: steer.redeem,
       redeeming: steer.phase === 'redeeming',
+      redeemRetryAt: steer.retryAt ?? null,
     };
   }
 
@@ -3319,6 +3470,12 @@ export class AccountManager {
         until: steer.until,
         redeem: steer.redeem,
         weekEnds: steer.weekEnds,
+        // A --redeem attempt about to send, or sending, its irreversible
+        // request: written before the request goes out (see _redeemOnSteer),
+        // so a restart can tell a spend that may have landed from none.
+        phase: steer.phase,
+        redeemRequestId: steer.redeemRequestId ?? null,
+        retryAt: steer.retryAt ?? null,
       };
     });
   }
@@ -3326,10 +3483,17 @@ export class AccountManager {
   /**
    * Bring back steers saved by a previous run. One that ended while the server
    * was down, or whose account is no longer in the fleet, is dropped and said
-   * so. A --redeem attempt that was running is not carried over: if the steer
-   * is still at its wall, the first selection asks again, and the redeemers'
-   * own saved holds decide whether a claim that may have landed is followed by
-   * another.
+   * so.
+   *
+   * So is one saved mid-spend: its --redeem attempt had written its claim's
+   * request id, and was about to send, or had sent, the request that spends
+   * the reset when the server stopped. Whether that landed is unknown, and
+   * nothing else answers it after a restart. A Claude reset's holds are saved
+   * with the account's quota (claudeResetHoldUntil), but only once the claim
+   * has answered; a Codex credit's holds, cooldowns and idempotency key live
+   * in the redeemer's memory alone. Resuming such a steer could spend a second
+   * reset over a first that landed, so it ends, and the line says what to
+   * check. A steer saved between attempts resumes, with its back-off.
    * @param {unknown} saved
    */
   restoreSteers(saved) {
@@ -3347,6 +3511,10 @@ export class AccountManager {
         console.log(`[TeamClaude] Steer to "${shown}" not restored — no account in the fleet matches it any more`);
         continue;
       }
+      if (typeof row.redeemRequestId === 'string' && row.redeemRequestId) {
+        console.log(`[TeamClaude] Steer to "${safeLine(account.name, 64)}" not restored — it was redeeming its banked reset when the server stopped, and the outcome of the redemption before the restart is unknown — check the account (request id ${safeLine(row.redeemRequestId, 64)})`);
+        continue;
+      }
       const provider = providerOf(account);
       if (this._steers.has(provider)) continue;
       // Clamped again: a state file is no more trusted than a request.
@@ -3357,6 +3525,8 @@ export class AccountManager {
         startedAt: Number.isFinite(row.startedAt) ? row.startedAt : now,
         weekEnds: Number.isFinite(row.weekEnds) ? row.weekEnds : null,
         phase: 'active', attempt: null,
+        retryAt: Number.isFinite(row.retryAt) && row.retryAt > now ? row.retryAt : null,
+        redeemRequestId: null,
       });
       console.log(`[TeamClaude] Restored the steer to "${safeLine(account.name, 64)}" (${formatSteerLeft(until - now)} left${redeem ? ', redeems at its weekly wall' : ''})`);
     }
@@ -4426,6 +4596,7 @@ export class AccountManager {
       q.unified7dSeenAt = null;
       q.unifiedStatus = null;
       q.unifiedStatusSeenAt = null;
+      q.unified7dRejectedAt = null;
       changed = true;
     }
     if (q.unified7dSonnet != null && q.unified7dSonnetReset && now >= q.unified7dSonnetReset) {
@@ -5049,6 +5220,13 @@ export class AccountManager {
     // and Opus requests failed over as well. When the response says which
     // shared buckets allowed, believe them: a rejection none of them signed is
     // the family's, and the family bucket is its signal.
+    // The shared week's own verdict, kept on its own. Only the `7d` status
+    // counts: a 5-hour rejection lifts within hours, and a family's (`7d_oi`)
+    // bars that family alone, so neither is the account's weekly wall.
+    const s7dStatus = headers['anthropic-ratelimit-unified-7d-status'];
+    if (s7dStatus === 'rejected') account.quota.unified7dRejectedAt = Date.now();
+    else if (s7dStatus) account.quota.unified7dRejectedAt = null;
+
     const uStatus = headers['anthropic-ratelimit-unified-status'];
     if (uStatus) {
       const s5h = headers['anthropic-ratelimit-unified-5h-status'];
@@ -5692,6 +5870,8 @@ export class AccountManager {
    */
   clearUpstreamRejected(accountIndex) {
     const account = this.accounts[accountIndex];
+    // The week's own refusal goes with it: a reset that landed cleared the week.
+    if (account) account.quota.unified7dRejectedAt = null;
     if (!account || account.quota.unifiedStatus !== 'rejected') return;
     account.quota.unifiedStatus = null;
     account.quota.unifiedStatusSeenAt = null;

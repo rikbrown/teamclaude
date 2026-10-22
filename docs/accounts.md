@@ -502,7 +502,10 @@ new conversations to it with `teamclaude steer <account> --redeem`: it serves
 until its weekly window is spent, and then one credit is redeemed on it. That
 flag is consent for that one account, so it works with `autoRedeemResets` off
 and with the account exempt; the other conditions above still apply, except
-that the rest of the pool does not have to be dry.
+that the rest of the pool does not have to be dry. The holds above are kept in
+memory only, so a steer that was in the middle of spending a credit when the
+server stopped is not resumed after the restart: see
+[`--redeem`](routing.md#--redeem).
 
 ## Claude banked usage-limit resets
 

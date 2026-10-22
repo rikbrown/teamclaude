@@ -141,7 +141,10 @@ test('and the footer the paint loop writes is exactly the width too', () => {
 });
 
 test('the build is flush against the right edge, one column of margin', () => {
-  for (const W of [80, 100, 120, 200]) {
+  // From the narrowest line that still names the build (its last four
+  // columns), measured off the hints rather than written down.
+  const hints = displayWidth(composed(makeTUI({ onRestart: () => {} }), 200));
+  for (const W of [hints + GAP + 1 + 4, 100, 120, 200]) {
     const line = painted(makeTUI({ versionLabel: LABEL, onRestart: () => {} }), W);
     assert.ok(labelOf(line), `W=${W}: nothing in the corner at all`);
     // One trailing column and no more: the margin the rule above this line and
@@ -207,7 +210,11 @@ test('the label spends its sha, then its head, then goes', () => {
 
 test('the same ladder, run by narrowing a real terminal', () => {
   const at = W => labelOf(painted(makeTUI({ versionLabel: LABEL, onRestart: () => {} }), W));
-  const seen = [120, 100, 84, 80, 76, 72, 66, 60, 44].map(at);
+  // The steps of the ladder, measured off the hints like the test above. Not
+  // a width where the hints themselves are cut, but for the last: there the
+  // corner reader would take a cut hint that ends on a space for a label.
+  const edge = displayWidth(composed(makeTUI({ onRestart: () => {} }), 200)) + GAP + 1;
+  const seen = [120, edge + 21, edge + 20, edge + 13, edge + 12, edge + 4, edge + 3, edge, 44].map(at);
 
   assert.equal(seen[0], LABEL);
   assert.equal(seen.at(-1), '', 'and at the bottom the corner is simply empty');

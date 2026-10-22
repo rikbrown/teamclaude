@@ -64,6 +64,7 @@ Already logged into Claude Code? `teamclaude import` takes its credentials inste
 - Opt-in MCP endpoint that hands the same control plane to Claude Code as tools, so an agent can read the fleet's quota or switch accounts from inside a session.
 - Catches hardcoded `api.anthropic.com` endpoints (the Claude Design MCP, for one) through a local MITM forward proxy, not only what `ANTHROPIC_BASE_URL` covers.
 - Holds the request open until quota resets instead of returning 429 when every account is spent, so an unattended run finishes on its own (`holdSeconds`, off by default).
+- Steers new conversations to one account for a while (`teamclaude steer`, or `t` in the TUI) and leaves the running ones where their prompt caches are, so one account's week can be spent first. With `--redeem` it then spends that account's banked reset, once.
 - Optionally leans on accounts with Anthropic's paid extra usage once every account is out of free quota, instead of returning 429 (`allowExtraUsage`, off by default — it bills real money). Quota between the switch threshold and 100% is used first, on any account; billing starts only when none is left, and stops as soon as a window resets.
 - Refreshes OAuth tokens before they expire and writes them back to config. Client refreshes pass through untouched.
 - Pools OpenAI Codex subscriptions alongside Claude accounts (experimental): the Codex CLI is routed through the same proxy, by config or transparently through the MITM proxy, and rotates on its own quota.

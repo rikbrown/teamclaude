@@ -253,3 +253,66 @@ test('without the hook nothing changes', async () => {
   assert.notEqual(r.status, 200);
   assert.equal(r.hits, 0);
 });
+
+// ── a steer's --redeem ──────────────────────────────────────────────────────
+//
+// `teamclaude steer <account> --redeem` spends the target's reset once its week
+// is spent. The flag is consent for that one account, so what stands for
+// consent on the dry-pool path is skipped; every safeguard is not.
+
+test('a steer\'s --redeem needs neither the fleet switch nor the account\'s consent', async () => {
+  for (const [label, config, extra] of [
+    ['fleet switch off', { autoRedeemResets: false }, {}],
+    ['account exempt', { ...ARMED }, { autoRedeemReset: false }],
+  ]) {
+    const { am, redeemer, calls } = harness({ config, accounts: [oauth('t', extra)] });
+    assert.equal((await redeemer.maybeRedeemForPool(am.accounts)).redeemed, false, `${label}: the dry-pool path refuses`);
+    /** @type {any} */
+    let noted = null;
+    am.noteResetRedeemed = (/** @type {any} */ a) => { noted = a; };
+    const r = await redeemer.redeemForSteer(am.accounts[0]);
+    assert.equal(r.redeemed, true, label);
+    assert.match(r.reason, /steer/, label);
+    assert.deepEqual(calls.claim, ['t'], label);
+    assert.equal(noted, am.accounts[0], `${label}: the manager is told, so a steer on it ends`);
+  }
+});
+
+test('every other guard still holds for a steer\'s --redeem', async () => {
+  for (const [label, status, want] of /** @type {Array<[string, () => any, RegExp]>} */ ([
+    ['not at a limit', () => block({ at_limit: false }), /not at a usage limit/],
+    ['only the 5-hour', () => block({ exhausted: ['five_hour'] }), /no weekly limit is exhausted/],
+    ['grant leaves it walled', () => block({}, { clears: ['five_hour'] }), /does not clear seven_day_overage_included/],
+    ['upstream cooldown', () => block({ cooldown_until: new Date(Date.now() + H).toISOString() }), /cooldown/],
+    ['nothing next', () => block({ next_grant_id: null }), /holds no usable reset/],
+  ])) {
+    const { am, redeemer, calls } = harness({ config: {}, status });
+    const r = await redeemer.redeemForSteer(am.accounts[0]);
+    assert.equal(r.redeemed, false, label);
+    assert.match(r.reason, want, label);
+    assert.equal(calls.claim.length, 0, label);
+  }
+  const zero = harness({ config: {} });
+  zero.am.accounts[0].quota.resetCredits = { available: 0, applicable: null, seenAt: Date.now() };
+  assert.match((await zero.redeemer.redeemForSteer(zero.am.accounts[0])).reason, /holds no reset/);
+  assert.equal(zero.calls.status, 0, 'a known zero costs no request');
+});
+
+test('a steer attempt and a dry-pool attempt never claim at once, and the fleet hold binds both', async () => {
+  const { am, redeemer, calls } = harness({ accounts: [oauth('a'), oauth('b')] });
+  const [pool, steer] = await Promise.all([redeemer.maybeRedeemForPool(am.accounts), redeemer.redeemForSteer(am.accounts[0])]);
+  assert.equal(pool.redeemed, true);
+  assert.equal(steer.redeemed, false);
+  assert.match(steer.reason, /holding off/);
+  assert.equal(calls.claim.length, 1);
+});
+
+test('a steer\'s claim that gets no verdict holds the fleet, as a dry-pool one does', async () => {
+  const { am, redeemer, calls } = harness({ config: {}, accounts: [oauth('a'), oauth('b')], claim: () => ({ error: 'socket hang up' }) });
+  const r = await redeemer.redeemForSteer(am.accounts[0]);
+  assert.equal(r.redeemed, false);
+  assert.match(r.reason, /may still have gone through/);
+  assert.ok(redeemer.fleetHoldUntil > Date.now());
+  assert.match((await redeemer.redeemForSteer(am.accounts[1])).reason, /holding off/);
+  assert.equal(calls.claim.length, 1);
+});

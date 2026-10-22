@@ -239,21 +239,27 @@ export function weeklyExhausted(account, now = Date.now()) {
  * the config: a caller that forgets to pass it redeems nothing, which is the
  * only safe direction for a decision that spends something unrecoverable.
  *
- * @param {{account: Record<string, any>, autoRedeemResets?: boolean, now?: number}} args
+ * `consented` is the one other way in: a `steer --redeem` names this account,
+ * and that flag is the operator's consent for it, so the two switches that
+ * stand for consent are skipped. The weekly window still has to be spent.
+ *
+ * @param {{account: Record<string, any>, autoRedeemResets?: boolean, now?: number, consented?: boolean}} args
  * @returns {{ok: boolean, reason: string}}
  */
-export function redeemPreconditions({ account, autoRedeemResets = false, now = Date.now() }) {
+export function redeemPreconditions({ account, autoRedeemResets = false, now = Date.now(), consented = false }) {
   if (!account) return { ok: false, reason: 'no account' };
   if (providerOf(account) !== 'codex') return { ok: false, reason: 'not a Codex account' };
-  // Off unless the fleet switch says otherwise: the absent key is the common
-  // case, and it means the operator has not armed this at all.
-  if (autoRedeemResets !== true) return { ok: false, reason: 'auto-redeem is switched off' };
-  // Negative-only override, and this polarity is easy to read backwards: an
-  // account may say `false` to exempt itself, but an account saying `true`
-  // arms NOTHING on its own — only the fleet switch above does. Written as
-  // `=== false` so it reads the same on a raw config entry (absent =
-  // undefined) as on a running account (absent = normalised to true).
-  if (account.autoRedeemReset === false) return { ok: false, reason: 'auto-redeem is switched off for this account' };
+  if (!consented) {
+    // Off unless the fleet switch says otherwise: the absent key is the common
+    // case, and it means the operator has not armed this at all.
+    if (autoRedeemResets !== true) return { ok: false, reason: 'auto-redeem is switched off' };
+    // Negative-only override, and this polarity is easy to read backwards: an
+    // account may say `false` to exempt itself, but an account saying `true`
+    // arms NOTHING on its own — only the fleet switch above does. Written as
+    // `=== false` so it reads the same on a raw config entry (absent =
+    // undefined) as on a running account (absent = normalised to true).
+    if (account.autoRedeemReset === false) return { ok: false, reason: 'auto-redeem is switched off for this account' };
+  }
   if (!weeklyExhausted(account, now)) return { ok: false, reason: 'weekly window is not exhausted' };
   return { ok: true, reason: 'weekly window is exhausted' };
 }
@@ -562,6 +568,52 @@ export class ResetCreditRedeemer {
   }
 
   /**
+   * The `steer --redeem` entry point: the steer's target has spent its week,
+   * and the operator asked for one of its credits to be spent then. Consent for
+   * this one account, so the fleet switch and the account's exemption are not
+   * consulted (see redeemPreconditions), and neither is the policy's reason to
+   * spend — the rest of the pool being dry, or the credit expiring. Every
+   * safeguard still holds: the fleet hold after a consume that landed or may
+   * have, the account's cooldown, a spent weekly window, a credit that is
+   * available AND supported by the plan, the idempotency key, the token refresh
+   * and the budget.
+   *
+   * Serialised with the dry-pool attempts on the same slot, so the two never
+   * consume at once: this one waits out a pool attempt in flight, and a dry-pool
+   * refusal arriving meanwhile joins this one.
+   *
+   * @param {Record<string, any>} account
+   * @returns {Promise<RedeemResult>}
+   */
+  async redeemForSteer(account) {
+    while (this.inFlight) await this.inFlight.catch(() => {});
+    const attempt = this._attemptForSteer(account).finally(() => { if (this.inFlight === attempt) this.inFlight = null; });
+    this.inFlight = attempt;
+    return attempt;
+  }
+
+  /**
+   * @param {Record<string, any>} account
+   * @returns {Promise<RedeemResult>}
+   */
+  async _attemptForSteer(account) {
+    const now = this.now();
+    if (now < this.fleetCooldownUntil) {
+      return { redeemed: false, reason: 'the pool is cooling down after a recent redemption attempt' };
+    }
+    const deadline = now + this.timeoutMs;
+    const state = this._stateFor(account);
+    const ready = await this._ready(account, state, now, deadline, true);
+    if (!ready.credits) return { redeemed: false, reason: ready.reason ?? 'holds no credit worth spending' };
+    // Plan support is read off the fresh detail rows here, not off the
+    // probe's `applicable` count: that count was taken while the window still
+    // had room, when no credit had anything to reset.
+    const credit = redeemableCredit(ready.credits);
+    if (!credit) return { redeemed: false, reason: 'holds no redeemable credit' };
+    return this._consume(account, state, { redeem: true, reason: 'its steer has spent its week (--redeem)', creditId: credit.id }, now, deadline);
+  }
+
+  /**
    * The checks and the credit rows that come before any decision, for one
    * account.
    *
@@ -573,11 +625,12 @@ export class ResetCreditRedeemer {
    * @param {RedeemState} state
    * @param {number} now
    * @param {number} deadline
+   * @param {boolean} [consented]  a steer's --redeem names this account (see redeemPreconditions)
    * @returns {Promise<{credits?: ResetCredit[], reason?: string}>}
    */
-  async _ready(account, state, now, deadline) {
+  async _ready(account, state, now, deadline, consented = false) {
     const autoRedeemResets = this.config?.autoRedeemResets === true;
-    const pre = redeemPreconditions({ account, autoRedeemResets, now });
+    const pre = redeemPreconditions({ account, autoRedeemResets, now, consented });
     if (!pre.ok) return { reason: pre.reason };
     if (now < state.cooldownUntil) return { reason: 'cooling down after a recent attempt' };
 
@@ -786,6 +839,8 @@ export class ResetCreditRedeemer {
       const windows = result.windowsReset || 0;
       this.log(`[TeamClaude] Redeemed a free Codex rate-limit reset on "${name}" — ${windows} window(s) reset (${result.code})`);
       await this._refresh(account, name, deadline);
+      // A steer on this account was about spending the week that just went.
+      this.am.noteResetRedeemed?.(account);
       return { redeemed: true, reason: verdict.reason, code: result.code, windowsReset: windows };
     }
 

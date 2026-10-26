@@ -65,8 +65,8 @@ at the moment it picks an agent, and they say more than this table does.
 
 | Model | Agents | Shape of the work |
 | --- | --- | --- |
-| `claude-opus-5-5[1m]` | `opus-high`, `opus-xhigh` | The coding: well-defined work at `high`, larger or ambiguous work at `xhigh`. Also fact-finding, research, and prose review of docs Opus did not write |
-| `claude-sonnet-5-5[1m]` | `sonnet-high`, `sonnet-xhigh` | Exploration without deep fact-finding, `xhigh` when it spans many files. Throwaway code at `high`; committed internal tooling only developers run (dev CLIs, CI and build config, evals) at `xhigh`. Never code a user runs or reads |
+| `claude-opus-5-5[1m]` | `opus-medium`, `opus-high`, `opus-xhigh` | The coding. `high` when the brief settles the design: planned work goes there whatever its size. `xhigh` only when the brief leaves real design decisions open, or for a hard bug with no known cause. `medium` for committed internal tooling only developers run (dev CLIs, CI and build config, evals), exploration that spans many files, and research by default. Research that must reason through how code behaves, and prose review of docs Opus did not write, at `high` |
+| `claude-sonnet-5-5[1m]` | `sonnet-high`, `sonnet-xhigh` | Exploration without deep fact-finding, and throwaway code that is not committed, at `high`. Never committed code. `xhigh` by name only |
 | `fable[1m]` | `fable-medium`, `fable-high`, `fable-xhigh` | Research and design at `medium`. At `high` (`xhigh` for the hardest), the Fable half of the review tag-team. Not code |
 | `gpt-6-astra` | `gpt-6-astra-medium`, `gpt-6-astra-high` | `medium` is the Astra half of the review tag-team, never dispatched alone. `high` by name only |
 | `claude-haiku-5-5[1m]` | `haiku-medium` | Quick, cheap tasks, on par with Luna |

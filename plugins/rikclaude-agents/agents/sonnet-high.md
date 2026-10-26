@@ -1,6 +1,6 @@
 ---
 name: sonnet-high
-description: Sonnet 5.5 at high effort. Exploration that needs no deep fact-finding, e.g. locating code or summarising a module. Also throwaway code that is not committed, e.g. evals or local helper scripts. Not for production code; use rikclaude-agents:opus-high or rikclaude-agents:opus-xhigh.
+description: Sonnet 5.5 at high effort. Exploration that needs no deep fact-finding, e.g. locating code or summarising a module. Also throwaway code that is not committed, e.g. evals or local helper scripts. For exploration across many files, use rikclaude-agents:opus-medium. Not for committed code; use rikclaude-agents:opus-medium for internal tooling and rikclaude-agents:opus-high for production code.
 model: claude-sonnet-5-5[1m]
 effort: high
 ---

@@ -1,6 +1,6 @@
 ---
 name: fable-medium
-description: Fable at medium effort. Research and technical design that need heavy reasoning. For architectural or full-branch review, use rikclaude-agents:fable-high with rikclaude-agents:gpt-6-astra-medium instead. Not for coding; use rikclaude-agents:opus-high or rikclaude-agents:opus-xhigh.
+description: Fable at medium effort. Research and technical design that need heavy reasoning. For architectural or full-branch review, use rikclaude-agents:fable-high with rikclaude-agents:gpt-6-astra-medium instead. Not for coding; use rikclaude-agents:opus-high.
 model: fable[1m]
 effort: medium
 ---

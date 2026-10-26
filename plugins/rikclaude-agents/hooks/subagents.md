@@ -13,15 +13,19 @@ From the `rikclaude-agents` plugin. Its agents are namespaced, so a dispatch alw
 - Never pass the Agent tool's `model` parameter alongside an effort-named agent type. It overrides
   the agent's pinned model but keeps the agent's effort, silently, so you get the wrong model at
   the right effort with no warning. The agent type alone picks both.
-- Delegate liberally. Opus does the coding: `rikclaude-agents:opus-high` for well-defined work,
-  `rikclaude-agents:opus-xhigh` for larger or ambiguous work. Fable does not code. Sonnet may
-  write code that only developers run: `rikclaude-agents:sonnet-high` for throwaway code that is
-  not committed, `rikclaude-agents:sonnet-xhigh` for committed internal tooling such as dev CLIs,
-  CI and build config, or evals. If a bug in it can reach a user, it goes to Opus.
+- Delegate liberally. Opus does the coding: `rikclaude-agents:opus-high` when the brief settles
+  the design. Work that is already planned goes there, whatever its size; split a large plan
+  into parts. `rikclaude-agents:opus-xhigh` only when the brief leaves real design decisions
+  open, or for a hard bug with no known cause. If you planned the work, its thinking is done; do
+  not pay for it again at `xhigh`. Fable does not code. `rikclaude-agents:opus-medium` writes
+  committed internal tooling that only developers run, such as dev CLIs, CI and build config, or
+  evals. `rikclaude-agents:sonnet-high` writes throwaway code that is not committed. If a bug in
+  it can reach a user, it goes to `rikclaude-agents:opus-high`.
 - Architectural and full-branch reviews are a tag-team. Dispatch `rikclaude-agents:gpt-6-astra-medium`
   together with `rikclaude-agents:fable-high` (`rikclaude-agents:fable-xhigh` for the hardest) in
   one message. Never dispatch Astra alone. They bring different opinions; merge their findings.
-- Research: `rikclaude-agents:opus-high` by default. Use `rikclaude-agents:opus-xhigh` or a
+- Research: `rikclaude-agents:opus-medium` by default. Use `rikclaude-agents:opus-high` when it
+  must reason through how code behaves, and `rikclaude-agents:opus-xhigh` or a
   `rikclaude-agents:fable-*` agent when the scope or the reasoning is large.
 - Prose: `rikclaude-agents:opus-high` reviews a doc's prose only if Opus did not write it.
   Otherwise skip it.
@@ -29,5 +33,5 @@ From the `rikclaude-agents` plugin. Its agents are namespaced, so a dispatch alw
 - Batch reviews. Eight tasks, simple ones included, are a few logical review rounds — not eight
   reviews.
 - Exploration: `rikclaude-agents:sonnet-high` or the built-in `Explore` agent;
-  `rikclaude-agents:sonnet-xhigh` when it spans many files. Quick, cheap tasks:
+  `rikclaude-agents:opus-medium` when it spans many files. Quick, cheap tasks:
   `rikclaude-agents:haiku-medium` or `rikclaude-agents:gpt-6-luna-medium`.

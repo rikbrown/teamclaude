@@ -1,0 +1,14 @@
+{
+  "name": "self-compact",
+  "displayName": "Self Compact",
+  "version": "0.1.0",
+  "description": "A tool that lets Claude run /compact on its own session, then resume with a prompt it writes",
+  "author": {
+    "name": "Rik Brown",
+    "url": "https://github.com/rikbrown"
+  },
+  "homepage": "https://github.com/rikbrown/teamclaude/blob/rik/main/plugins/self-compact/README.md",
+  "repository": "https://github.com/rikbrown/teamclaude",
+  "license": "MIT",
+  "keywords": ["compact", "context", "tool", "mod"]
+}

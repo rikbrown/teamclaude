@@ -33,6 +33,13 @@
       "description": "Retry with exponential backoff when a response dies on \"Connection lost mid-response\".",
       "category": "productivity",
       "keywords": ["retry", "backoff", "api-error", "mod"]
+    },
+    {
+      "name": "self-compact",
+      "source": "./plugins/self-compact",
+      "description": "A tool that lets Claude run /compact on its own session, then resume with a prompt it writes.",
+      "category": "productivity",
+      "keywords": ["compact", "context", "tool", "mod"]
     }
   ]
 }

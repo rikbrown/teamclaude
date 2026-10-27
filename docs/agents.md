@@ -6,7 +6,7 @@ plus the routing policy that goes with them. Install it and a session can say "d
 time.
 
 The models it names are the ones a TeamClaude fleet serves — `fable[1m]`, `claude-opus-5-5[1m]`, `claude-sonnet-5-5[1m]` and `claude-haiku-5-5[1m]` for Claude,
-`gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna` and `gpt-5.6-terra` through the [Codex sidecar](openai.md). On a plain Claude
+`gpt-6-astra`, `gpt-6.1-sol`, `gpt-6-luna` and `gpt-6.1-terra` through the [Codex sidecar](openai.md). On a plain Claude
 Code install, with no fleet behind it, the GPT agents resolve to model ids nothing can answer.
 
 ## Why an agent definition and not the `model` parameter
@@ -71,8 +71,8 @@ at the moment it picks an agent, and they say more than this table does.
 | `gpt-6-astra` | `gpt-6-astra-medium`, `gpt-6-astra-high` | `medium` is the Astra half of the review tag-team, never dispatched alone. `high` by name only |
 | `claude-haiku-5-5[1m]` | `haiku-medium` | Quick, cheap tasks, on par with Luna |
 | `gpt-6-luna` | `gpt-6-luna-medium` | Quick, cheap tasks, on par with Haiku |
-| `gpt-6-sol` | `gpt-6-sol-medium`, `gpt-6-sol-xhigh` | By name only. Prose refinement of docs; light or interim code review |
-| `gpt-5.6-terra` | `gpt-5.6-terra-medium` | By name only. Prose refinement of comments and messages |
+| `gpt-6.1-sol` | `gpt-6.1-sol-xhigh` | By name only. Light or interim code review |
+| `gpt-6.1-terra` | `gpt-6.1-terra-medium` | By name only. Prose refinement of docs, comments and messages. On trial for exploration against `sonnet-high` |
 
 "By name only" agents open their description with "Use only when the user names it.", set by the
 roster's `byName` flag, so the orchestrator never picks them on its own judgement.

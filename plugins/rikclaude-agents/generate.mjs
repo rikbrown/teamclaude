@@ -82,10 +82,9 @@ const AGENTS = [
   // { name: 'gpt-6-astra-xhigh', label: 'GPT-6 Astra', nesting: 'own', byName: true, when: `Otherwise use ${AGENT_PREFIX}gpt-6-astra-medium in the review tag-team.` },
   { name: 'haiku-medium', label: 'Haiku 5.5', model: 'claude-haiku-5-5[1m]', nesting: 'none', when: `Quick, cheap tasks. On par with ${AGENT_PREFIX}gpt-6-luna-medium. Not for production code.` },
   { name: 'gpt-6-luna-medium', label: 'GPT-6 Luna', nesting: 'none', when: `Quick, cheap tasks. On par with ${AGENT_PREFIX}haiku-medium. Weak at coding.` },
-  { name: 'gpt-6-sol-medium', label: 'GPT-6 Sol', nesting: 'none', byName: true, when: 'Prose refinement of docs. Weak at coding.' },
-  { name: 'gpt-6-sol-xhigh', label: 'GPT-6 Sol', nesting: 'none', byName: true, when: 'Light or interim code review. Weak at coding.' },
-  // { name: 'gpt-6-sol-high', label: 'GPT-6 Sol', nesting: 'none', byName: true, when: 'Prose refinement of docs. Weak at coding.' },
-  { name: 'gpt-5.6-terra-medium', label: 'GPT-5.6 Terra', nesting: 'none', byName: true, when: 'Prose refinement of comments and messages. Weak at coding.' },
+  { name: 'gpt-6.1-sol-xhigh', label: 'GPT-6.1 Sol', nesting: 'none', byName: true, when: 'Light or interim code review. Weak at coding.' },
+  // { name: 'gpt-6.1-sol-high', label: 'GPT-6.1 Sol', nesting: 'none', byName: true, when: 'Light or interim code review. Weak at coding.' },
+  { name: 'gpt-6.1-terra-medium', label: 'GPT-6.1 Terra', nesting: 'none', byName: true, when: `Prose refinement of docs, comments and messages. Also on trial for exploration that needs no deep fact-finding, against ${AGENT_PREFIX}sonnet-high. Weak at hard coding.` },
 ];
 
 // Named once so an agent prompt and the policy block cannot drift apart on the

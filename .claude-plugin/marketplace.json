@@ -40,6 +40,13 @@
       "description": "A tool that lets Claude run /compact on its own session, then resume with a prompt it writes.",
       "category": "productivity",
       "keywords": ["compact", "context", "tool", "mod"]
+    },
+    {
+      "name": "copy-quote",
+      "source": "./plugins/copy-quote",
+      "description": "A [Copy] button under each reply that quotes a draft, which copies the draft without the quote bars.",
+      "category": "productivity",
+      "keywords": ["transcript", "clipboard", "copy", "mod"]
     }
   ]
 }

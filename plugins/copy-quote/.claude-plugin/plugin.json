@@ -1,0 +1,14 @@
+{
+  "name": "copy-quote",
+  "displayName": "Copy Quote",
+  "version": "0.1.0",
+  "description": "Adds a [Copy] button under each reply that quotes a draft, which copies the draft without the quote bars",
+  "author": {
+    "name": "Rik Brown",
+    "url": "https://github.com/rikbrown"
+  },
+  "homepage": "https://github.com/rikbrown/teamclaude/blob/rik/main/plugins/copy-quote/README.md",
+  "repository": "https://github.com/rikbrown/teamclaude",
+  "license": "MIT",
+  "keywords": ["transcript", "clipboard", "copy", "mod"]
+}

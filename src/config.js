@@ -144,6 +144,7 @@ export function createDefaultConfig() {
     distributeSessions: false,
     sessionTitles: { enabled: false, width: 18 },
     quotaBarPercent: false,
+    probeDisabledAccounts: false,
     accountSort: 'arranged',
     // Tokens-per-second readouts in the TUI. Off unless asked for: with it off
     // the proxy does no throughput work at all (see OutputTracker).

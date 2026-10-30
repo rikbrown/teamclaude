@@ -191,6 +191,57 @@ const CALLBACK_USAGE = [
   '       teamclaude callback logout                            Revoke the session and forget it',
 ].join('\n');
 
+const SWITCH_USAGE = 'Usage: teamclaude switch <account> --session [<id>]   (or: teamclaude switch --session [<id>] --clear)';
+const API_USAGE = 'Usage: teamclaude api <path> [--account NAME] [--method POST] [--data JSON]';
+const SERVICE_USAGE = 'Usage: teamclaude service <install|uninstall|status|print>';
+const PROBE_USAGE = 'Usage: teamclaude probe <off|seconds>';
+const REMOVE_USAGE = 'Usage: teamclaude remove <account-name|email> [--org <name|uuid>]';
+const PRIORITY_USAGE = 'Usage: teamclaude priority <account-name|email> <n> [--org <name|uuid>]';
+const RENAME_USAGE = 'Usage: teamclaude rename <account-name|email> <new-name> [--org <name|uuid>]';
+
+const IMPORT_USAGE = [
+  'Usage: teamclaude import [--from <path>] [--name <name>] [--routing <url>]',
+  '       teamclaude import --json \'{"accessToken":"...","refreshToken":"...","expiresAt":1234}\'',
+  '',
+  'Imports the Claude Code credentials: ~/.claude/.credentials.json by default, the',
+  'Keychain on macOS when that file is absent.',
+].join('\n');
+
+const LOGIN_USAGE = [
+  'Usage: teamclaude login                          Claude subscription via browser (a menu on a terminal)',
+  '       teamclaude login --oauth                  The same, without the menu',
+  '       teamclaude login --token                  Claude subscription via copy/paste (no local callback; for SSH)',
+  '       teamclaude login --codex [--no-browser]   Codex (ChatGPT) subscription via browser; --no-browser prints',
+  '                                                the address to open and takes the one the browser lands on',
+  '       teamclaude login --api [--priority <n>]   Anthropic API key (a last resort by default; 0 = level with the rest)',
+  '',
+  '--name NAME     The account\'s name. A Codex login takes its email, prefixed "codex:" when',
+  '                that name already belongs to an account on another provider.',
+  '--routing URL   Egress proxy for this account only, e.g. socks5h://alice:s3cret@host:1080;',
+  '                the sign-in goes through it too. --no-check skips the proxy test.',
+].join('\n');
+
+// `<command> --help` prints the command's own usage; a command absent here gets
+// the full help.
+const COMMAND_USAGE = {
+  login: LOGIN_USAGE,
+  import: IMPORT_USAGE,
+  route: ROUTE_USAGE,
+  routes: ROUTE_USAGE,
+  routing: ROUTING_USAGE,
+  threshold: THRESHOLD_USAGE,
+  distribute: DISTRIBUTE_USAGE,
+  steer: STEER_USAGE,
+  switch: SWITCH_USAGE,
+  callback: CALLBACK_USAGE,
+  api: API_USAGE,
+  service: SERVICE_USAGE,
+  probe: PROBE_USAGE,
+  remove: REMOVE_USAGE,
+  priority: PRIORITY_USAGE,
+  rename: RENAME_USAGE,
+};
+
 const args = process.argv.slice(2);
 const command = args[0];
 
@@ -200,7 +251,9 @@ const command = args[0];
 // claude (`run -- --help`).
 const ownArgs = args.includes('--') ? args.slice(0, args.indexOf('--')) : args;
 if (ownArgs.some(a => a === '--help' || a === '-h')) {
-  showHelp();
+  const own = Object.hasOwn(COMMAND_USAGE, command);
+  if (own) console.log(COMMAND_USAGE[/** @type {keyof typeof COMMAND_USAGE} */ (command)]);
+  else showHelp();
   process.exit(0);
 }
 
@@ -2217,7 +2270,7 @@ async function switchSessionCommand(port, headers, name) {
     process.exit(1);
   }
   if (!clear && !name) {
-    console.error('Usage: teamclaude switch <account> --session [<id>]   (or: teamclaude switch --session [<id>] --clear)');
+    console.error(SWITCH_USAGE);
     process.exit(1);
   }
   const shown = sessionId.slice(0, 8);
@@ -2530,7 +2583,7 @@ async function apiCommand() {
   const path = args[1];
 
   if (!path) {
-    console.error('Usage: teamclaude api <path> [--account NAME] [--method POST] [--data JSON]');
+    console.error(API_USAGE);
     console.error('Example: teamclaude api /api/oauth/claude_cli/roles');
     process.exit(1);
   }
@@ -2640,7 +2693,7 @@ async function serviceCommand() {
       break;
     }
     default:
-      console.error('Usage: teamclaude service <install|uninstall|status|print>');
+      console.error(SERVICE_USAGE);
       process.exit(1);
   }
 }
@@ -2664,7 +2717,7 @@ async function probeCommand() {
   } else {
     seconds = parseInt(arg, 10);
     if (Number.isNaN(seconds) || seconds < 0) {
-      console.error('Usage: teamclaude probe <off|seconds>');
+      console.error(PROBE_USAGE);
       process.exit(1);
     }
   }
@@ -3017,7 +3070,7 @@ async function removeCommand() {
   const name = args[1];
 
   if (!name) {
-    console.error('Usage: teamclaude remove <account-name|email> [--org <name|uuid>]');
+    console.error(REMOVE_USAGE);
     process.exit(1);
   }
 
@@ -3097,7 +3150,7 @@ async function priorityCommand() {
   const name = args[1];
 
   if (!name) {
-    console.error('Usage: teamclaude priority <account-name|email> <n> [--org <name|uuid>]');
+    console.error(PRIORITY_USAGE);
     console.error('       teamclaude priority <account-name|email> --first | --last');
     console.error('Lower priority is preferred for rotation (default 0).');
     process.exit(1);
@@ -3139,7 +3192,7 @@ async function renameCommand() {
   const newName = args[2];
 
   if (!name || !newName || newName.startsWith('--')) {
-    console.error('Usage: teamclaude rename <account-name|email> <new-name> [--org <name|uuid>]');
+    console.error(RENAME_USAGE);
     process.exit(1);
   }
 
@@ -3336,7 +3389,7 @@ Commands:
   callback logout     Revoke that session and forget it
   update              Check npm for a newer teamclaude and install it
   version             Print the installed version
-  help                Show this help (also: any command with --help)
+  help                Show this help; <command> --help shows that command's usage
 
 Options:
   --name NAME         Set account name (import/login)

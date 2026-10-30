@@ -43,21 +43,39 @@ function runCli(configPath, cliArgs) {
   });
 }
 
-for (const cliArgs of [['login', '--help'], ['login', '--codex', '-h'], ['remove', 'a@example.com', '--help']]) {
-  test(`${cliArgs.join(' ')} prints the help and runs nothing`, async () => {
+const fullHelp = /Usage: teamclaude \[command\] \[options\]/;
+
+const cases = [
+  { cliArgs: ['login', '--help'], usage: /^Usage: teamclaude login /, forms: ['--oauth', '--token', '--codex', '--api', '--name', '--routing'] },
+  { cliArgs: ['login', '--codex', '-h'], usage: /^Usage: teamclaude login / },
+  { cliArgs: ['remove', 'a@example.com', '--help'], usage: /^Usage: teamclaude remove / },
+  { cliArgs: ['import', '-h'], usage: /^Usage: teamclaude import / },
+];
+for (const { cliArgs, usage, forms = [] } of cases) {
+  test(`${cliArgs.join(' ')} prints the command's usage and runs nothing`, async () => {
     const configPath = await writeConfig();
     const before = await readFile(configPath, 'utf8');
     const res = await runCli(configPath, cliArgs);
     assert.equal(res.code, 0, res.stderr);
-    assert.match(res.stdout, /Usage: teamclaude \[command\] \[options\]/);
+    assert.match(res.stdout, usage);
+    assert.doesNotMatch(res.stdout, fullHelp);
+    for (const form of forms) assert.ok(res.stdout.includes(form), `${form} missing from:\n${res.stdout}`);
     assert.doesNotMatch(res.stdout + res.stderr, /Starting OAuth login|Removed/);
     assert.equal(await readFile(configPath, 'utf8'), before);
   });
 }
 
+test('server --help prints the full help, since server has no usage of its own', async () => {
+  const configPath = await writeConfig();
+  const res = await runCli(configPath, ['server', '--help']);
+  assert.equal(res.code, 0, res.stderr);
+  assert.match(res.stdout, fullHelp);
+  assert.doesNotMatch(res.stdout + res.stderr, /Starting on account|already in use/);
+});
+
 test('run -- --help passes --help to claude instead of printing the help', async () => {
   const configPath = await writeConfig();
   const res = await runCli(configPath, ['run', '--', '--help']);
-  assert.doesNotMatch(res.stdout, /Usage: teamclaude \[command\] \[options\]/);
+  assert.doesNotMatch(res.stdout, fullHelp);
   assert.notEqual(res.code, 0, 'no proxy listens on the configured port, so run refuses');
 });

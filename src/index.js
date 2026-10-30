@@ -194,6 +194,16 @@ const CALLBACK_USAGE = [
 const args = process.argv.slice(2);
 const command = args[0];
 
+// `--help` or `-h` before a `--` separator prints the help, whatever the
+// command. The commands read only the flags they know and ignore the rest, so
+// without this guard `login --help` is a login. Arguments after `--` go to
+// claude (`run -- --help`).
+const ownArgs = args.includes('--') ? args.slice(0, args.indexOf('--')) : args;
+if (ownArgs.some(a => a === '--help' || a === '-h')) {
+  showHelp();
+  process.exit(0);
+}
+
 switch (command) {
   case 'server':
     await serverCommand();
@@ -3326,7 +3336,7 @@ Commands:
   callback logout     Revoke that session and forget it
   update              Check npm for a newer teamclaude and install it
   version             Print the installed version
-  help                Show this help
+  help                Show this help (also: any command with --help)
 
 Options:
   --name NAME         Set account name (import/login)

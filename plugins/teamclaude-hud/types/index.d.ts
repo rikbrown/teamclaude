@@ -8,6 +8,11 @@ export type Fleet = {
   weekly: Bucket | null
   fable: Bucket | null
   knownAccounts: number
+  // The fleet seats the 5h figure leaves out because their plan meters no
+  // 5-hour window (the server's `exemptAccounts`).
+  fiveHourExempt: number
+  // False when no fleet seat meters a 5-hour window at all.
+  hasSessionWindow: boolean
 }
 
 export type Seat = {
@@ -17,6 +22,9 @@ export type Seat = {
   // Counted in the server's tier-weighted fleet; the Codex seats are not.
   isFleet: boolean
   fiveHour: Bucket | null
+  // False when the plan meters no 5-hour window (an Ultra plan once the limit
+  // is lifted) and no reading from before that is left.
+  hasSessionWindow: boolean
   weekly: Bucket | null
   fable: Bucket | null
   // An API-key seat's buckets, drawn where it has no subscription windows.

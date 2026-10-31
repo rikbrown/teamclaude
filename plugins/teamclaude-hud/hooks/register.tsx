@@ -127,7 +127,9 @@ function bar(
   return parts
 }
 
-type BarSpec = { label: string; bucket: Bucket | null; windowMs: number | null }
+// `isAbsent`: a window the plan does not meter, drawn as blank cells so the
+// bars after it stay in line with the other seats'.
+type BarSpec = { label: string; bucket: Bucket | null; windowMs: number | null; isAbsent?: boolean }
 
 // A label's width in the pane: `5h`, `7d`, `F7`, `Tok` and `Req` line up.
 const LABEL_WIDTH = 3
@@ -144,14 +146,16 @@ function seatBars(seat: Seat): BarSpec[] {
   }
 
   return [
-    { label: '5h', bucket: seat.fiveHour, windowMs: FIVE_HOUR_MS },
+    { label: '5h', bucket: seat.fiveHour, windowMs: FIVE_HOUR_MS, isAbsent: !seat.hasSessionWindow },
     { label: '7d', bucket: seat.weekly, windowMs: SEVEN_DAY_MS },
     ...(seat.fable ? [{ label: 'F7', bucket: seat.fable, windowMs: SEVEN_DAY_MS }] : []),
   ]
 }
 
 function bars(Text: TextElement, specs: BarSpec[], width: number, now: number): RenderElement[] {
-  return specs.flatMap((spec, index) => [
+  return specs.flatMap((spec, index) => spec.isAbsent ? [
+    <Text>{`${index > 0 ? '  ' : ''}${' '.repeat(LABEL_WIDTH + 1 + width)}`}</Text>,
+  ] : [
     <Text dimColor>
       {index > 0 ? '  ' : ''}
       {spec.label.padEnd(LABEL_WIDTH)}{' '}
@@ -204,9 +208,20 @@ function footerSegments(
     return [{ text: ' offline', color: null, isDim: true }]
   }
 
+  // The server's 5h figure covers only the seats that meter the window, so the
+  // footer names the ones it leaves out; a fleet where none meters it has no
+  // 5h figure to show.
+  const exempt = fleet.fiveHourExempt
+  const fiveHour: Segment[] = fleet.hasSessionWindow
+    ? [
+        ...footerReading('5h', fleet.fiveHour, hasBars, now),
+        ...(exempt > 0 ? [{ text: ` (${exempt} no 5h)`, color: null, isDim: true }] : []),
+        { text: ' ', color: null, isDim: true },
+      ]
+    : []
+
   return [
-    ...footerReading('5h', fleet.fiveHour, hasBars, now),
-    { text: ' ', color: null, isDim: true },
+    ...fiveHour,
     ...footerReading('7d', fleet.weekly, hasBars, now),
     ...(fleet.fable
       ? [{ text: ' ', color: null, isDim: true }, ...footerReading('F7', fleet.fable, hasBars, now)]

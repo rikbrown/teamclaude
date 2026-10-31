@@ -167,25 +167,19 @@ export function parseQuota(body: string, at: number): Reading | null {
   }
 
   const aggregate = isRecord(payload.aggregate) ? payload.aggregate : null
-  const fleet: Fleet | null = aggregate && {
-    fiveHour: bucket(aggregate.fiveHour),
-    weekly: bucket(aggregate.weeklyShared),
-    // The aggregate carries no source; a fleet with no Fable figures reports
-    // the shared bucket's numbers here, which is still the right ceiling.
-    fable: bucket(aggregate.weeklyFable),
-    knownAccounts: isRecord(aggregate.fiveHour)
-      ? (num(aggregate.fiveHour.knownAccounts) ?? 0)
-      : 0,
-  }
 
   const seats: Seat[] = payload.accounts.filter(isRecord).flatMap(account => {
     const buckets = isRecord(account.buckets) ? account.buckets : {}
+    const fiveHour = bucket(buckets.fiveHour)
     const seat: Seat = {
       name: typeof account.name === 'string' ? account.name.slice(0, 64) : '?',
       status: typeof account.status === 'string' ? account.status.slice(0, 16) : '',
       isDisabled: account.disabled === true,
       isFleet: isRecord(account.tier) && num(account.tier.weight) !== null,
-      fiveHour: bucket(buckets.fiveHour),
+      fiveHour,
+      // TeamClaude's showSessionRow: a plan that states no 5-hour window draws
+      // none, unless a reading from before the change is left.
+      hasSessionWindow: account.sessionWindow !== false || fiveHour?.utilization != null,
       weekly: bucket(buckets.weeklyShared),
       fable: fableBucket(buckets.weeklyFable),
       tokens: bucket(buckets.tokens),
@@ -198,6 +192,23 @@ export function parseQuota(body: string, at: number): Reading | null {
 
     return hasReading || seat.isFleet ? [seat] : []
   })
+
+  const fleetSeats = seats.filter(seat => seat.isFleet)
+  const fiveHour = aggregate && bucket(aggregate.fiveHour)
+  const fleet: Fleet | null = aggregate && {
+    fiveHour,
+    weekly: bucket(aggregate.weeklyShared),
+    // The aggregate carries no source; a fleet with no Fable figures reports
+    // the shared bucket's numbers here, which is still the right ceiling.
+    fable: bucket(aggregate.weeklyFable),
+    knownAccounts: isRecord(aggregate.fiveHour)
+      ? (num(aggregate.fiveHour.knownAccounts) ?? 0)
+      : 0,
+    fiveHourExempt: isRecord(aggregate.fiveHour)
+      ? (num(aggregate.fiveHour.exemptAccounts) ?? 0)
+      : 0,
+    hasSessionWindow: fiveHour != null || fleetSeats.length === 0 || fleetSeats.some(seat => seat.hasSessionWindow),
+  }
 
   return { fleet, seats: sortSeats(seats, at), at }
 }

@@ -3903,12 +3903,17 @@ export class TUI {
         const est = estimateBurn(value, now);
         // No bucket label: this line already starts with it.
         const tag = formatEstimate(est);
+        // The session bar covers only the seats that meter a 5-hour window
+        // (see aggregateHeadroom). The note names the rest, first, because it
+        // says what the bar is a share of.
+        const exempt = value.exemptAccounts || 0;
+        const note = exempt ? gray(`${exempt} seat${exempt === 1 ? '' : 's'} no 5h`) : '';
         entries.push({
           bucket,
           value,
           // The colour carries what the text no longer says: yellow when the
           // pool runs dry before it resets, gray when it lasts past it.
-          tag: tag ? (est?.dry ? yellow(tag) : gray(tag)) : '',
+          tag: [note, tag ? (est?.dry ? yellow(tag) : gray(tag)) : ''].filter(Boolean).join(gray(' · ')),
         });
       }
       return { group, entries };

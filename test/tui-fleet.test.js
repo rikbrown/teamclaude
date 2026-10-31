@@ -457,6 +457,23 @@ test('the bar reports the weighted pool, not any one seat', () => {
   assert.match(weekly, /48%/);
 });
 
+test('the session line says how many seats meter no 5-hour window', () => {
+  // Two Ultra seats with the limit lifted, one Pro seat at 95%. The bar is the
+  // Pro seat's; without the note it reads as the pool's session quota spent.
+  const am = new AccountManager([
+    oauth('ultra1@example.com', { rateLimitTier: 'default_claude_max_20x' }),
+    oauth('ultra2@example.com', { rateLimitTier: 'default_claude_max_20x' }),
+    oauth('pro@example.com', { rateLimitTier: 'default_claude_ai' }),
+  ], 0.98);
+  for (const a of am.accounts.slice(0, 2)) Object.assign(a.quota, { sessionWindowStated: false, unified5h: null });
+  Object.assign(am.accounts[2].quota, { sessionWindowStated: true, unified5h: 0.95, unified5hReset: Date.now() + 2 * HOUR });
+
+  const tui = tuiFor(am);
+  tui.fleetMode = 'full';
+  const ses = renderFleet(tui, 120).fleet.find(l => l.trimStart().startsWith('Ses'));
+  assert.match(ses, /2 seats no 5h/);
+});
+
 test('a pool with no seat it can weigh says so instead of drawing empty bars', () => {
   const am = new AccountManager([
     oauth('future@example.com', { rateLimitTier: 'default_heron' }),

@@ -521,6 +521,26 @@ test('a bucket nothing reports is null rather than an empty bar', () => {
   assert.equal(anthropic.buckets.unified7dFable, null);
 });
 
+test('the session aggregate names the seats that meter no 5-hour window', () => {
+  // Two Ultra seats with the 5-hour limit lifted and one Pro seat at 95%. The
+  // aggregate is the Pro seat's alone, so it must say what it leaves out, or it
+  // reads as 95% of the pool's session quota spent.
+  const anthropic = pool(fleetAggregate([
+    seat('ultra1', { rateLimitTier: 'default_claude_max_20x', quota: { unified5h: null, sessionWindowStated: false } }),
+    seat('ultra2', { rateLimitTier: 'default_claude_max_20x', quota: { unified5h: null, sessionWindowStated: false } }),
+    seat('pro', { rateLimitTier: 'default_claude_ai', quota: { unified5h: 0.95, sessionWindowStated: true } }),
+    // A reading from before the plan change still gates its seat, so that seat
+    // is in the aggregate, not set aside.
+    seat('ultra3', { rateLimitTier: 'default_claude_max_20x', quota: { unified5h: 0, sessionWindowStated: false } }),
+  ], { thresholdFor: () => 1, now: NOW }), 'anthropic');
+
+  const ses = anthropic.buckets.unified5h;
+  assert.equal(ses.knownAccounts, 2);
+  assert.equal(ses.capacityWeight, 21);
+  assert.equal(ses.exemptAccounts, 2);
+  assert.equal(ses.exemptWeight, 40);
+});
+
 test('the reset reported is the soonest one still ahead', () => {
   const anthropic = pool(fleetAggregate([
     seat('a', { rateLimitTier: 'default_claude_ai', quota: { unified5h: 0.2, unified5hReset: NOW + 4 * HOUR } }),
@@ -681,6 +701,19 @@ test('the session window binds when it is the one running out', () => {
 
   assert.equal(entry.bucket, 'unified5h');
   assert.equal(entry.value.utilization, 0.95);
+});
+
+test('the session window cannot stop a route that holds a seat without one', () => {
+  // The Pro seat's session is nearly spent, but the two Ultra seats meter no
+  // 5-hour window and keep serving the route when it is. Their weekly is what
+  // stops the route.
+  const [entry] = routeHeadroom([
+    seat('ultra1', { rateLimitTier: 'default_claude_max_20x', quota: { unified7d: 0.5, unified5h: null, sessionWindowStated: false } }),
+    seat('ultra2', { rateLimitTier: 'default_claude_max_20x', quota: { unified7d: 0.5, unified5h: null, sessionWindowStated: false } }),
+    seat('pro', { rateLimitTier: 'default_claude_ai', quota: { unified7d: 0.3, unified5h: 0.95, sessionWindowStated: true } }),
+  ], [route('bulk', ['ultra1', 'ultra2', 'pro'])], { thresholdFor: () => 1, now: NOW });
+
+  assert.equal(entry.bucket, 'unified7d');
 });
 
 test('a family route watches its own weekly bucket', () => {

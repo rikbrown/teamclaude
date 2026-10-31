@@ -237,6 +237,8 @@ export function buildQuotaSummary(accounts, now = Date.now()) {
  * @property {number|null} ratePerMs Pool burn, Σ(weight × seat rate) / capacityWeight, or null when no seat has a measurable one.
  * @property {number} ratedAccounts Counted seats contributing a measured rate.
  * @property {number|null} nextResetAt Soonest still-future reset among them.
+ * @property {number} [exemptAccounts] unified5h only: counted seats whose plan meters no 5-hour window and that hold no reading.
+ * @property {number} [exemptWeight] unified5h only: the weight of those seats.
  */
 
 /**
@@ -333,10 +335,25 @@ function aggregateHeadroom(members, bucket, thresholdFor, now, rateFor = null) {
   let knownAccounts = 0;
   /** @type {number|null} */
   let nextResetAt = null;
+  let exemptAccounts = 0;
+  let exemptWeight = 0;
   for (const { account, weight } of members) {
     const quota = account.quota || {};
     const reading = quota[bucket];
-    if (reading == null || !Number.isFinite(Number(reading))) continue;
+    if (reading == null || !Number.isFinite(Number(reading))) {
+      // A plan that meters no 5-hour window (an Ultra plan once Anthropic lifts
+      // it, a Codex plan with only a weekly window) is not in the session
+      // figures, and the aggregate says how many such seats it set aside, the
+      // rule /teamclaude/quota applies to its fiveHour bucket. Without that
+      // count a pool of two such seats and one Pro seat at 95% reads as 95% of
+      // its session quota spent. A seat still holding a reading from before
+      // the change is counted above instead, since that reading still gates it.
+      if (bucket === 'unified5h' && reading == null && quota.sessionWindowStated === false) {
+        exemptAccounts++;
+        exemptWeight += weight;
+      }
+      continue;
+    }
     const limit = usableLimit(account, bucket, thresholdFor);
     // Spend is capped at the limit as well as weighted. Upstream keeps counting
     // past a spent window (104% arrives as 1.04) and an account may sit above a
@@ -390,6 +407,7 @@ function aggregateHeadroom(members, bucket, thresholdFor, now, rateFor = null) {
     ratePerMs: ratedAccounts && capacityWeight > 0 ? rateWeight / capacityWeight : null,
     ratedAccounts,
     nextResetAt,
+    ...(bucket === 'unified5h' ? { exemptAccounts, exemptWeight: clean(exemptWeight) } : {}),
   };
 }
 
@@ -652,7 +670,11 @@ export function routeHeadroom(accounts, routes, { thresholdFor = null, now = Dat
       // A bucket no counted member reports is not a constraint that has been
       // measured, so it cannot be the one that binds. Strict `>` keeps the tie
       // with the earlier, more specific candidate.
-      if (value && (!binding || value.utilization > binding.value.utilization)) binding = { bucket, value };
+      if (!value) continue;
+      // Nor can the session window, once a member meters none: that member
+      // keeps serving the route when the metered members' sessions are spent.
+      if (value.exemptAccounts) continue;
+      if (!binding || value.utilization > binding.value.utilization) binding = { bucket, value };
     }
     return {
       name: route?.name ?? '',

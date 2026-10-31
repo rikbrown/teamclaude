@@ -25,8 +25,8 @@ starts with a TeamClaude proxy in its environment.
 
 | Where | What |
 | --- | --- |
-| Footer, right | The fleet's five-hour, weekly and Fable-weekly use: the server's tier-weighted figures from `GET /teamclaude/quota`. Below 110 terminal columns the bars drop out and the percentages stay. `offline` when the proxy does not answer or refuses the key |
-| `/teamclaude` pane | One row per seat: 5h, 7d and (where the seat reports one) F7 bars with the reset countdown, or Tok and Req bars for an API-key seat, plus a tag for a throttled, exhausted or disabled seat. A seat that has not reported yet shows empty bars. Sorted as the TUI's `weekly-reset` sort: the week that ends soonest first, Codex and API-key seats after the Claude ones, ties in the proxy's own order |
+| Footer, right | The fleet's five-hour, weekly and Fable-weekly use: the server's tier-weighted figures from `GET /teamclaude/quota`. Below 110 terminal columns the bars drop out and the percentages stay. The five-hour figure covers only the seats that meter a [5-hour window](../../docs/quota.md#accounts-without-a-5-hour-window), and names the seats it leaves out (`5h 95% (2 no 5h)`); with no such seat in the fleet it is not shown. `offline` when the proxy does not answer or refuses the key |
+| `/teamclaude` pane | One row per seat: 5h, 7d and (where the seat reports one) F7 bars with the reset countdown, or Tok and Req bars for an API-key seat, plus a tag for a throttled, exhausted or disabled seat. A seat that has not reported yet shows empty bars. A seat whose plan meters no 5-hour window shows no 5h bar, and its 7d bar stays in line with the others. Sorted as the TUI's `weekly-reset` sort: the week that ends soonest first, Codex and API-key seats after the Claude ones, ties in the proxy's own order |
 
 The colours follow the TUI's. A seat's bar is green while its window is on pace, then yellow,
 orange and red as use runs ahead of the time elapsed. The footer's fleet figures go by fill alone

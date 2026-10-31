@@ -420,3 +420,67 @@ test('the pane draws a row a seat, padded, and leaves out a backend with no read
     await ui.unmount()
   }
 })
+
+// Two Ultra seats with the 5-hour limit lifted (`sessionWindow: false`, no 5h
+// reading) and one Pro seat at 95%, as /teamclaude/quota reports them.
+const PRO = { rateLimitTier: 'default_claude_ai', seatTier: null, weight: 1 }
+const ultra = (name: string) => ({
+  name,
+  disabled: false,
+  status: 'active',
+  tier: TIER,
+  sessionWindow: false,
+  buckets: { fiveHour: null, weeklyShared: weekly(0.4, 50) },
+})
+const MIXED = {
+  accounts: [
+    ultra('ultra1@example.com'),
+    ultra('ultra2@example.com'),
+    {
+      name: 'pro@example.com',
+      disabled: false,
+      status: 'active',
+      tier: PRO,
+      sessionWindow: true,
+      buckets: { fiveHour: { utilization: 0.95, resetAt: NOW + HOUR, source: 'unified5h' }, weeklyShared: weekly(0.4, 50) },
+    },
+  ],
+  aggregate: {
+    fiveHour: { utilization: 0.95, nextResetAt: NOW + HOUR, knownAccounts: 1, exemptAccounts: 2, exemptWeight: 40 },
+    weeklyShared: { utilization: 0.4, nextResetAt: NOW + 50 * HOUR, knownAccounts: 3 },
+    weeklyFable: null,
+  },
+}
+
+test('the footer says how many seats its 5h figure leaves out', async ($, on) => {
+  const { clock } = world(on, { status: 200, text: JSON.stringify(MIXED) })
+  await started($, clock)
+
+  const ui = await $.ui.mount(footer(140))
+  expect(await shown(ui, 'readout')).toEqual([' 5h ▰▰▰▰▰ 95% (2 no 5h)  7d ▰▰▱▱▱ 40%'])
+})
+
+test('a fleet with no 5-hour window anywhere drops the 5h figure', async ($, on) => {
+  const quota = {
+    accounts: [ultra('ultra1@example.com'), ultra('ultra2@example.com')],
+    aggregate: { fiveHour: null, weeklyShared: { utilization: 0.4, nextResetAt: NOW + 50 * HOUR, knownAccounts: 2 }, weeklyFable: null },
+  }
+  const { clock } = world(on, { status: 200, text: JSON.stringify(quota) })
+  await started($, clock)
+
+  const ui = await $.ui.mount(footer(140))
+  expect(await shown(ui, 'readout')).toEqual([' 7d ▰▰▱▱▱ 40%'])
+})
+
+test('a seat with no 5-hour window draws no 5h bar, and its 7d bar stays in line', async ($, on) => {
+  const { clock } = world(on, { status: 200, text: JSON.stringify(MIXED) })
+  await started($, clock)
+
+  const ui = await $.ui.mount(pane(120))
+  const rows = await shown(ui)
+  const ultraRow = rows.find(row => row.startsWith('ultra1@example.com')) ?? ''
+  const proRow = rows.find(row => row.startsWith('pro@example.com')) ?? ''
+  expect(ultraRow).not.toMatch(/5h/)
+  expect(proRow).toMatch(/5h/)
+  expect(ultraRow.indexOf('7d')).toBe(proRow.indexOf('7d'))
+})

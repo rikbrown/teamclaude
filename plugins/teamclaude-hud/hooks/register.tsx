@@ -134,11 +134,15 @@ type BarSpec = { label: string; bucket: Bucket | null; windowMs: number | null; 
 // A label's width in the pane: `5h`, `7d`, `F7`, `Tok` and `Req` line up.
 const LABEL_WIDTH = 3
 
+const isApiKey = (seat: Seat) =>
+  !seat.fiveHour && !seat.weekly && !seat.fable && Boolean(seat.tokens || seat.requests)
+
 // A seat's bars: its subscription windows, or for an API-key seat (no window
 // at all, but token or request buckets) those, as the dashboard draws it.
-function seatBars(seat: Seat): BarSpec[] {
-  const isApiKey = !seat.fiveHour && !seat.weekly && !seat.fable && Boolean(seat.tokens || seat.requests)
-  if (isApiKey) {
+// `hasFiveHour`: some seat in the pane meters a 5-hour window, so the column
+// stays, blank on the seats that do not; with none left it goes.
+function seatBars(seat: Seat, hasFiveHour: boolean): BarSpec[] {
+  if (isApiKey(seat)) {
     return [
       { label: 'Tok', bucket: seat.tokens, windowMs: null },
       { label: 'Req', bucket: seat.requests, windowMs: null },
@@ -146,7 +150,9 @@ function seatBars(seat: Seat): BarSpec[] {
   }
 
   return [
-    { label: '5h', bucket: seat.fiveHour, windowMs: FIVE_HOUR_MS, isAbsent: !seat.hasSessionWindow },
+    ...(hasFiveHour
+      ? [{ label: '5h', bucket: seat.fiveHour, windowMs: FIVE_HOUR_MS, isAbsent: !seat.hasSessionWindow }]
+      : []),
     { label: '7d', bucket: seat.weekly, windowMs: SEVEN_DAY_MS },
     ...(seat.fable ? [{ label: 'F7', bucket: seat.fable, windowMs: SEVEN_DAY_MS }] : []),
   ]
@@ -234,13 +240,18 @@ function footerSegments(
 // docked sidebar) puts the name on a line of its own above them.
 function seatRows(Text: TextElement, value: Reading, columns: number, now: number) {
   const nameWidth = clamp(Math.max(...value.seats.map(seat => seat.name.length)), 8, 28)
-  // Three bars, each after its label and a space, two gaps between them.
-  const labels = 3 * (LABEL_WIDTH + 1) + 2 * 2
-  const lineWidth = (columns - nameWidth - 2 - labels) / 3
+  const hasFiveHour = value.seats.some(seat => seat.hasSessionWindow && !isApiKey(seat))
+  const specs = new Map(value.seats.map(seat => [seat, seatBars(seat, hasFiveHour)]))
+  // The most bars a seat draws, each after its label and a space, with a gap
+  // between each two.
+  const count = Math.max(2, ...[...specs.values()].map(spec => spec.length))
+  const labels = count * (LABEL_WIDTH + 1) + (count - 1) * 2
+  const lineWidth = (columns - nameWidth - 2 - labels) / count
   const isWide = lineWidth >= 11
-  const width = Math.floor(clamp(isWide ? lineWidth : (columns - labels) / 3, 5, 16))
+  const width = Math.floor(clamp(isWide ? lineWidth : (columns - labels) / count, 5, 16))
 
   return value.seats.flatMap(seat => {
+    const seatSpecs = specs.get(seat) ?? []
     const name = seat.name.length > nameWidth ? `${seat.name.slice(0, nameWidth - 1)}…` : seat.name
     const tag = statusTag(Text, seat)
     if (isWide) {
@@ -250,7 +261,7 @@ function seatRows(Text: TextElement, value: Reading, columns: number, now: numbe
             {name.padEnd(nameWidth)}
           </Text>
           {'  '}
-          {bars(Text, seatBars(seat), width, now)}
+          {bars(Text, seatSpecs, width, now)}
           {tag}
         </Text>,
       ]
@@ -263,7 +274,7 @@ function seatRows(Text: TextElement, value: Reading, columns: number, now: numbe
         </Text>
         {tag}
       </Text>,
-      <Text wrap="truncate">{bars(Text, seatBars(seat), width, now)}</Text>,
+      <Text wrap="truncate">{bars(Text, seatSpecs, width, now)}</Text>,
     ]
   })
 }

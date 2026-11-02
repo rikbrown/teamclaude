@@ -484,3 +484,19 @@ test('a seat with no 5-hour window draws no 5h bar, and its 7d bar stays in line
   expect(proRow).toMatch(/5h/)
   expect(ultraRow.indexOf('7d')).toBe(proRow.indexOf('7d'))
 })
+
+test('a pane with no 5-hour window on any seat has no 5h column, and its bars widen', async ($, on) => {
+  const quota = {
+    accounts: [ultra('ultra1@example.com'), ultra('ultra2@example.com')],
+    aggregate: { fiveHour: null, weeklyShared: { utilization: 0.4, nextResetAt: NOW + 50 * HOUR, knownAccounts: 2 }, weeklyFable: null },
+  }
+  const { clock } = world(on, { status: 200, text: JSON.stringify(quota) })
+  await started($, clock)
+
+  const ui = await $.ui.mount(pane(80))
+  const row = (await shown(ui)).find(found => found.startsWith('ultra1@example.com')) ?? ''
+  // Name, its gap, then the 7d bar at once: no blank 5h cells before it.
+  expect(row.indexOf('7d')).toBe('ultra1@example.com'.length + 2)
+  // Two bars share the room three did, so 80 columns hold `40% · 2d2h`.
+  expect(row).toMatch(/7d .*40% · 2d2h/)
+})

@@ -1,2 +1,5 @@
 # Laid by Claude Code each time it loads the mod from a folder you own.
 .claude-plugin/types/
+# tsc output. The sources are .ts/.tsx; Claude Code loads those, not these.
+hooks/*.js
+tests/*.js

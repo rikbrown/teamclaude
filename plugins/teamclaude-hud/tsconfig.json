@@ -1,3 +1,6 @@
 {
-  "extends": "./.claude-plugin/types/tsconfig.json"
+  "extends": "./.claude-plugin/types/tsconfig.json",
+  // Type-check only. Claude Code loads the .ts/.tsx sources itself, and an
+  // emitted .js beside them keeps its JSX, which the repo's lint cannot parse.
+  "compilerOptions": { "noEmit": true }
 }

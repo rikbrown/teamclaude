@@ -42,6 +42,13 @@
       "keywords": ["compact", "context", "tool", "mod"]
     },
     {
+      "name": "decisions",
+      "source": "./plugins/decisions",
+      "description": "A ledger of the decisions Claude asks you to make, and its answers to you drawn as replies: a pane, a band of open IDs and unread replies, and a chord to jump to each.",
+      "category": "productivity",
+      "keywords": ["decisions", "questions", "replies", "pane", "transcript", "mod"]
+    },
+    {
       "name": "copy-quote",
       "source": "./plugins/copy-quote",
       "description": "A [Copy] button under each reply that quotes a draft, which copies the draft without the quote bars.",

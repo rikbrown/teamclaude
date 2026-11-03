@@ -1,0 +1,15 @@
+{
+  "name": "decisions",
+  "displayName": "Decisions",
+  "version": "0.2.0",
+  "description": "A ledger of the decisions Claude asks you to make, and its answers to you drawn as replies: a pane, a band of open IDs and unread replies, and a chord to jump to each",
+  "author": {
+    "name": "Rik Brown",
+    "url": "https://github.com/rikbrown"
+  },
+  "homepage": "https://github.com/rikbrown/teamclaude/blob/rik/main/plugins/decisions/README.md",
+  "repository": "https://github.com/rikbrown/teamclaude",
+  "license": "MIT",
+  "keywords": ["decisions", "questions", "replies", "pane", "transcript", "mod"],
+  "types": "./types/index.d.ts"
+}

@@ -17,7 +17,7 @@ function oauth(name) {
 
 /** Render the dashboard at `width` and return the account rows, ANSI stripped,
  * exactly as _renderAcct produced them (before fitLine pads or truncates). */
-function renderRows(width, { fable = [], sonnet = [], accounts = 6, routes = [], apikey = [], switchThreshold = [], resetCredits = [], fableResets = [], weekly = [] } = {}) {
+function renderRows(width, { fable = [], sonnet = [], accounts = 6, routes = [], apikey = [], switchThreshold = [], resetCredits = [], fableResets = [], weekly = [], projections = [] } = {}) {
   const names = Array.from({ length: accounts }, (_, i) => `acct${i}@example.com`);
   const entries = names.map((name, i) => apikey.includes(i)
     ? { name, type: 'apikey', apiKey: `k-${i}` }
@@ -53,6 +53,10 @@ function renderRows(width, { fable = [], sonnet = [], accounts = 6, routes = [],
       a.quota.resetCredits = { available: resetCredits[i], applicable: resetCredits[i], expiresAt: Date.now() + 19 * 24 * h, seenAt: Date.now(), fable: fableResets[i] ?? 0 };
     }
   });
+
+  // Burn-rate projections by index, in place of the samples the manager would
+  // otherwise need minutes of polls to fit a rate from.
+  if (projections.length) am.projectionsFor = i => projections[i] || {};
 
   const tui = new TUI({
     accountManager: am, config: { proxy: { port: 1 }, accounts: [], routes }, sx: null,
@@ -378,4 +382,19 @@ test('a subscription account with no reading yet draws its own bars, empty', () 
   assert.doesNotMatch(fresh, /Tok|Req/);
   assert.equal(fresh.indexOf('Wk '), probed.indexOf('Wk '), 'lined up with the probed subscription row');
   assert.match(key, /Tok .*Req /, 'an API key keeps the metered pair');
+});
+
+test('burn-rate tags keep their duration rather than being cut to a bare `Wk TTL`', () => {
+  const d = 24 * 3600_000;
+  const deficit = (bucket, ms) => ({ bucket, kind: 'deficit', exhaustsInMs: ms, resetInMs: 4 * d });
+  const projections = [
+    { unified7d: deficit('unified7d', 3 * d + 2 * 3600_000) },
+    { unified7dFable: deficit('unified7dFable', 2 * d), unified7d: deficit('unified7d', 3 * d) },
+  ];
+  for (const w of [86, 100, 120, 160]) {
+    const rows = renderRows(w, { fable: [0.5, 0.57, 0.1, 0.1, 0.1, 0.1], projections });
+    assert.ok(widest(rows) <= w, `W=${w}: widest row is ${widest(rows)} columns`);
+    assert.match(rows[0], /Wk TTL 3d2h/, `W=${w}: the first row keeps its whole tag`);
+    assert.match(rows[1], /F7 TTL 2d0h · Wk TTL 3d0h/, `W=${w}: the second row keeps both tags`);
+  }
 });

@@ -3532,6 +3532,12 @@ export class TUI {
         const tag = routingTag(a);
         return tag ? Math.max(w, 2 + vw(tag)) : w;
       }, 0);
+      // And for the burn-rate tags (`Wk TTL 3d2h · F7 41% unspent`). Unbudgeted,
+      // they ran past the edge and fitLine cut them to a bare `Wk TTL`.
+      const projW = members.reduce((/** @type {number} */ w, /** @type {any} */ a) => {
+        const tags = this._projectionTags(this.am.accounts.indexOf(a));
+        return tags.length ? Math.max(w, 2 + vw(tags.map(t => t.text).join(' · '))) : w;
+      }, 0);
       // And for the prepaid-credit tag (`$176.55 left`), drawn on every width:
       // the bar may yield, the amount left may not.
       const prepaidW = credits.reduce((/** @type {number} */ w, /** @type {any} */ c) => {
@@ -3543,7 +3549,7 @@ export class TUI {
       // that, a routed credit account reserved 82 columns at W=80 before any bar and fitLine cut the address off
       // (Copilot's review of #649).
       const layout = (/** @type {number} */ tagW) => {
-        const fixedWithRoute = 20 + typeCell + NAME_MIN + routeCells + tagW + spendW + creditW + switchW + routeW + prepaidW;
+        const fixedWithRoute = 20 + typeCell + NAME_MIN + routeCells + tagW + spendW + creditW + switchW + routeW + prepaidW + projW;
         const routeTags = routeW === 0 || fixedWithRoute + BAR_MIN <= W;
         return { fixed: routeTags ? fixedWithRoute : fixedWithRoute - routeW, routeTags };
       };
@@ -4450,14 +4456,9 @@ export class TUI {
     // deficit will stop this account, so it is colored; a surplus is a note and
     // stays gray. Optional on the manager so a stand-in without projection
     // support still renders.
-    const buckets = this.am.projectionsFor?.(idx) || {};
-    const ranked = this.am.projection?.rank(Object.values(buckets)) || [];
-    if (ranked.length) {
-      const tags = ranked.map(p => {
-        const text = formatProjection(p);
-        return p.kind === 'deficit' ? yellow(text) : gray(text);
-      });
-      line += `  ${tags.join(gray(' · '))}`;
+    const projTags = this._projectionTags(idx);
+    if (projTags.length) {
+      line += `  ${projTags.map(t => (t.deficit ? yellow : gray)(t.text)).join(gray(' · '))}`;
     }
     // What is left of the prepaid credit, beside its bar.
     const prepaid = creditTag(credit);
@@ -4495,6 +4496,17 @@ export class TUI {
    * @param {any} a */
   _credit(a) {
     return typeof this.am.creditStatus === 'function' ? this.am.creditStatus(a) : (a.credit ?? null);
+  }
+
+  /** The burn-rate tags one account row draws, most urgent first. One source
+   * for the row and its width budget, so the budget reserves exactly what the
+   * row draws.
+   * @param {number} idx
+   * @returns {{ text: string, deficit: boolean }[]} */
+  _projectionTags(idx) {
+    const buckets = this.am.projectionsFor?.(idx) || {};
+    const ranked = this.am.projection?.rank(Object.values(buckets)) || [];
+    return ranked.map((/** @type {any} */ p) => ({ text: formatProjection(p), deficit: p.kind === 'deficit' }));
   }
 
   /** Whether the account behind this row is serving on extra usage. Asked of

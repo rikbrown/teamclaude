@@ -466,6 +466,10 @@ export function extraUsageTag(allowed, serving) {
 
 export function blockedFamilies(quota, threshold) {
   const at = typeof threshold === 'function' ? threshold : () => threshold;
+  // A spent shared weekly bars every model, not one family: the router gates
+  // all traffic on it. Naming a family here blamed the wrong bucket (a row at
+  // Wk 100% / F7 83% read `⊘ Fable`), so the tag names the bucket instead.
+  if (quota.unified7d != null && quota.unified7d >= at('unified7d')) return ['Wk'];
   const out = [];
   for (const [label, key] of [['Sonnet', 'unified7dSonnet'], ['Fable', 'unified7dFable']]) {
     if (quota[key] == null) continue;      // family not metered separately here
@@ -3454,7 +3458,13 @@ export class TUI {
         const tag = routingTag(a);
         return tag ? Math.max(w, 2 + vw(tag)) : w;
       }, 0);
-      const fixed = 20 + typeCell + NAME_MIN + routeCells + tagW + spendW + creditW + switchW + routeW;
+      // And for the burn-rate tags (`Wk TTL 3d2h · F7 41% unspent`). Unbudgeted,
+      // they ran past the edge and fitLine cut them to a bare `Wk TTL`.
+      const projW = members.reduce((/** @type {number} */ w, /** @type {any} */ a) => {
+        const tags = this._projectionTags(this.am.accounts.indexOf(a));
+        return tags.length ? Math.max(w, 2 + vw(tags.map(t => t.text).join(' · '))) : w;
+      }, 0);
+      const fixed = 20 + typeCell + NAME_MIN + routeCells + tagW + spendW + creditW + switchW + routeW + projW;
       const span = (/** @type {number} */ n, /** @type {number} */ bar) => fixed + 6 * (n - 1) + n * bar;
       const roomFor = (/** @type {number} */ n) => span(n, BAR_MIN) <= W;
       // No Ses bar once every account here has said it meters no 5h window
@@ -4332,14 +4342,9 @@ export class TUI {
     // deficit will stop this account, so it is colored; a surplus is a note and
     // stays gray. Optional on the manager so a stand-in without projection
     // support still renders.
-    const buckets = this.am.projectionsFor?.(idx) || {};
-    const ranked = this.am.projection?.rank(Object.values(buckets)) || [];
-    if (ranked.length) {
-      const tags = ranked.map(p => {
-        const text = formatProjection(p);
-        return p.kind === 'deficit' ? yellow(text) : gray(text);
-      });
-      line += `  ${tags.join(gray(' · '))}`;
+    const projTags = this._projectionTags(idx);
+    if (projTags.length) {
+      line += `  ${projTags.map(t => (t.deficit ? yellow : gray)(t.text)).join(gray(' · '))}`;
     }
     // Money tag last, so it sits at the end of the row where the eye lands after
     // the bars. Red once real money has moved, yellow while it only could.
@@ -4366,6 +4371,17 @@ export class TUI {
     const routeTag = routingTag(a);
     if (routeTag) line += `  ${cyan(routeTag)}`;
     return line;
+  }
+
+  /** The burn-rate tags one account row draws, most urgent first. One source
+   * for the row and its width budget, so the budget reserves exactly what the
+   * row draws.
+   * @param {number} idx
+   * @returns {{ text: string, deficit: boolean }[]} */
+  _projectionTags(idx) {
+    const buckets = this.am.projectionsFor?.(idx) || {};
+    const ranked = this.am.projection?.rank(Object.values(buckets)) || [];
+    return ranked.map((/** @type {any} */ p) => ({ text: formatProjection(p), deficit: p.kind === 'deficit' }));
   }
 
   /** Whether the account behind this row is serving on extra usage. Asked of

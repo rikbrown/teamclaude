@@ -17,7 +17,7 @@ function oauth(name) {
 
 /** Render the dashboard at `width` and return the account rows, ANSI stripped,
  * exactly as _renderAcct produced them (before fitLine pads or truncates). */
-function renderRows(width, { fable = [], sonnet = [], accounts = 6, routes = [], apikey = [], switchThreshold = [], resetCredits = [], projections = [] } = {}) {
+function renderRows(width, { fable = [], sonnet = [], accounts = 6, routes = [], apikey = [], switchThreshold = [], resetCredits = [] } = {}) {
   const names = Array.from({ length: accounts }, (_, i) => `acct${i}@example.com`);
   const entries = names.map((name, i) => apikey.includes(i)
     ? { name, type: 'apikey', apiKey: `k-${i}` }
@@ -53,10 +53,6 @@ function renderRows(width, { fable = [], sonnet = [], accounts = 6, routes = [],
       a.quota.resetCredits = { available: resetCredits[i], applicable: resetCredits[i], expiresAt: Date.now() + 19 * 24 * h, seenAt: Date.now() };
     }
   });
-
-  // Burn-rate projections by index, in place of the samples the manager would
-  // otherwise need minutes of polls to fit a rate from.
-  if (projections.length) am.projectionsFor = i => projections[i] || {};
 
   const tui = new TUI({
     accountManager: am, config: { proxy: { port: 1 }, accounts: [], routes }, sx: null,
@@ -349,19 +345,4 @@ test('blockedFamilies names the shared weekly, not a family, when that is what i
   // A lower family threshold still bars the family on shared spend alone (#175).
   const th = k => (k === 'unified7dFable' ? 0.8 : 0.98);
   assert.deepEqual(blockedFamilies({ unified7d: 0.85, unified7dFable: 0.5 }, th), ['Fable']);
-});
-
-test('burn-rate tags keep their duration rather than being cut to a bare `Wk TTL`', () => {
-  const d = 24 * 3600_000;
-  const deficit = (bucket, ms) => ({ bucket, kind: 'deficit', exhaustsInMs: ms, resetInMs: 4 * d });
-  const projections = [
-    { unified7d: deficit('unified7d', 3 * d + 2 * 3600_000) },
-    { unified7dFable: deficit('unified7dFable', 2 * d), unified7d: deficit('unified7d', 3 * d) },
-  ];
-  for (const w of [86, 100, 120, 160]) {
-    const rows = renderRows(w, { fable: [0.5, 0.57, 0.1, 0.1, 0.1, 0.1], projections });
-    assert.ok(widest(rows) <= w, `W=${w}: widest row is ${widest(rows)} columns`);
-    assert.match(rows[0], /Wk TTL 3d2h/, `W=${w}: the first row keeps its whole tag`);
-    assert.match(rows[1], /F7 TTL 2d0h · Wk TTL 3d0h/, `W=${w}: the second row keeps both tags`);
-  }
 });

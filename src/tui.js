@@ -14,7 +14,6 @@ import { mintAccountId } from './account-id.js';
 import { ACCOUNT_REFUSAL_CODES } from './account-refusal.js';
 import { formatPercent, heldResetCredits, showSessionRow, showWeeklyRow, unavailableLine } from './status-renderer.js';
 import { resolveMaxUsage, resolveMaxSpendMinor, switchThresholdDiffs, modelLabel, EFFORT_SEP } from './model.js';
-import { formatProjection, formatEstimate, estimateBurn } from './quota-projection.js';
 import { fleetAggregate, routeHeadroom, routeFamily } from './quota-summary.js';
 /** @typedef {import('./quota-summary.js').FleetBucket} FleetBucket */
 import { parseProxyUrl, proxyToUrl, describeProxy, describeSelfProxy, resolveUpstreamProxy, setUpstreamProxy, getUpstreamProxy, localListener, isSelfProxy } from './upstream-proxy.js';
@@ -210,7 +209,7 @@ const BAR_MIN = 5;
 const BAR_MAX = 20;
 
 // The fleet block's own bar cap. A fleet line carries a three-column label, a
-// bar and a burn tag — no name, status, route cells or family columns — so it
+// bar and an optional exemption note — no name, status or route cells — so it
 // has far more room than a row and BAR_MAX would leave most of a wide terminal
 // blank. Capped all the same: a 200-column bar is no more informative than a
 // 40-column one, and past that the percentage stops being readable against it.
@@ -245,9 +244,9 @@ const FLEET_MODES = /** @type {const} */ (['split', 'full', 'off']);
 // accounts is a poor account dashboard.
 const FLEET_PANEL_MIN = FLEET_PREFIX_W + 16;
 // Widest. At FLEET_PREFIX_W + FLEET_BAR_MAX (49) the panel's bar stops growing
-// and the only thing more columns buy is room for the burn tag beside it, which
-// wants about a dozen. Past that every further column reads better in the rows,
-// which have a name column to grow into and never run out of uses for one.
+// and more columns buy room for exemption notes and the route readout. Past
+// that every further column reads better in the rows, which have a name column
+// to grow into and never run out of uses for one.
 const FLEET_PANEL_MAX = 52;
 // Clear space between the two columns. Two, not one: a bar's filled background
 // runs to its last cell, and a single column of gap reads as part of it.
@@ -3458,13 +3457,7 @@ export class TUI {
         const tag = routingTag(a);
         return tag ? Math.max(w, 2 + vw(tag)) : w;
       }, 0);
-      // And for the burn-rate tags (`Wk TTL 3d2h · F7 41% unspent`). Unbudgeted,
-      // they ran past the edge and fitLine cut them to a bare `Wk TTL`.
-      const projW = members.reduce((/** @type {number} */ w, /** @type {any} */ a) => {
-        const tags = this._projectionTags(this.am.accounts.indexOf(a));
-        return tags.length ? Math.max(w, 2 + vw(tags.map(t => t.text).join(' · '))) : w;
-      }, 0);
-      const fixed = 20 + typeCell + NAME_MIN + routeCells + tagW + spendW + creditW + switchW + routeW + projW;
+      const fixed = 20 + typeCell + NAME_MIN + routeCells + tagW + spendW + creditW + switchW + routeW;
       const span = (/** @type {number} */ n, /** @type {number} */ bar) => fixed + 6 * (n - 1) + n * bar;
       const roomFor = (/** @type {number} */ n) => span(n, BAR_MIN) <= W;
       // No Ses bar once every account here has said it meters no 5h window
@@ -3882,61 +3875,37 @@ export class TUI {
     // Guarded because a stand-in manager may carry only the single number.
     const thFor = (/** @type {string} */ k, /** @type {any} */ a = null) => (typeof this.am.thresholdFor === 'function' ? this.am.thresholdFor(k, a) : this.am.switchThreshold);
     const now = Date.now();
-    // The pool's burn comes from its members' rates (see aggregateHeadroom), so
-    // the manager's own lookup is handed over rather than a series sampled here.
-    const rateFor = typeof this.am.rateFor === 'function' ? this.am.rateFor.bind(this.am) : null;
-    const groups = fleetAggregate(this.am.accounts, { thresholdFor: thFor, now, routes, rateFor });
+    const groups = fleetAggregate(this.am.accounts, { thresholdFor: thFor, now, routes });
 
     // Everything is composed before anything is drawn: the bars share one width
     // across the whole block — so that equal lengths mean equal shares, exactly
     // as they do within a row category — and that width is whatever the widest
-    // burn tag leaves over.
+    // exemption note leaves over.
     const blocks = groups.map(group => {
-      /** @type {Array<{bucket: string, value: FleetBucket, tag: string}>} */
+      /** @type {Array<{bucket: string, value: FleetBucket, note: string}>} */
       const entries = [];
       for (const [bucket, value] of Object.entries(group.buckets)) {
         // A bucket no counted seat reports is left out rather than drawn as an
         // empty bar: unobserved is not the same as unspent.
         if (!value) continue;
-        // The aggregate is sampled as its own series under `fleet:<provider>`
-        // (see AccountManager._recordFleetSamples), so this is the row tag's
-        // projection over the fleet's numbers rather than a second kind of
-        // estimate. It needs ~90 minutes of samples before it says anything,
-        // the same as a row tag does, and it stays quiet after a restart
-        // instead of extrapolating from two readings.
-        // An ESTIMATE here, not the row's warning. `project` is deliberately
-        // quiet in the middle ground — a 5h bucket is not weekly so it reports
-        // only a deficit, and a pool that will spend its week almost exactly
-        // falls under the waste floor — which on a healthy fleet left every
-        // line blank and made the panel look broken rather than calm. One line
-        // per pool is read to plan against, so it answers whenever it can.
-        const est = estimateBurn(value, now);
-        // No bucket label: this line already starts with it.
-        const tag = formatEstimate(est);
         // The session bar covers only the seats that meter a 5-hour window
-        // (see aggregateHeadroom). The note names the rest, first, because it
-        // says what the bar is a share of.
+        // (see aggregateHeadroom). The note names the rest, because it says
+        // what the bar is a share of.
         const exempt = value.exemptAccounts || 0;
         const note = exempt ? gray(`${exempt} seat${exempt === 1 ? '' : 's'} no 5h`) : '';
-        entries.push({
-          bucket,
-          value,
-          // The colour carries what the text no longer says: yellow when the
-          // pool runs dry before it resets, gray when it lasts past it.
-          tag: [note, tag ? (est?.dry ? yellow(tag) : gray(tag)) : ''].filter(Boolean).join(gray(' · ')),
-        });
+        entries.push({ bucket, value, note });
       }
       return { group, entries };
     });
 
-    const tagW = blocks.reduce(
-      (w, b) => b.entries.reduce((m, e) => Math.max(m, e.tag ? 2 + vw(e.tag) : 0), w), 0);
+    const noteW = blocks.reduce(
+      (w, b) => b.entries.reduce((m, e) => Math.max(m, e.note ? 2 + vw(e.note) : 0), w), 0);
     const room = W - FLEET_PREFIX_W;
-    // The tags go before the bar does. A bar squeezed under BAR_MIN cannot hold
+    // The note goes before the bar does. A bar squeezed under BAR_MIN cannot hold
     // its own percentage, and a fleet figure nobody can read is worth less than
-    // the pace note beside it.
-    const withTags = room - tagW >= BAR_MIN;
-    const bw = Math.max(1, Math.min(FLEET_BAR_MAX, withTags ? room - tagW : room));
+    // the exemption note beside it.
+    const withNotes = room - noteW >= BAR_MIN;
+    const bw = Math.max(1, Math.min(FLEET_BAR_MAX, withNotes ? room - noteW : room));
 
     // One header shape for the whole block: the widest form EVERY pool can
     // draw, not the widest each can. A block whose first heading says
@@ -3972,7 +3941,7 @@ export class TUI {
         // pace would read calm however spent the pool was. Without it the colour
         // falls back to raw fill, which is what an aggregate can honestly claim.
         // The threshold still forces red at the top of the scale.
-        const tail = withTags && e.tag ? `  ${e.tag}` : '';
+        const tail = withNotes && e.note ? `  ${e.note}` : '';
         lines.push(`${FLEET_INDENT}${label}  ${bar(e.value.utilization, bw, e.value.nextResetAt, null, thFor(e.bucket))}${tail}`);
       }
     }
@@ -4027,8 +3996,7 @@ export class TUI {
    * @param {number} now
    */
   _routeLines(W, routes, thFor, now) {
-    const rateFor = typeof this.am.rateFor === 'function' ? this.am.rateFor.bind(this.am) : null;
-    const entries = routeHeadroom(this.am.accounts, routes, { thresholdFor: thFor, now, rateFor });
+    const entries = routeHeadroom(this.am.accounts, routes, { thresholdFor: thFor, now });
     if (!entries.length) return [];
     const lines = [fitPhrase([
       `  ${bold('Routes')}   ${dim('what stops each one first')}`,
@@ -4337,15 +4305,6 @@ export class TUI {
     const blocked = blockedFamilies(q, limFor);
     if (blocked.length) line += `  ${red('⊘ ' + blocked.join(' '))}`;
 
-    // Burn-rate tags, most urgent first: TTL for a window that runs out before
-    // it resets, an unspent share for one that expires with quota left. A
-    // deficit will stop this account, so it is colored; a surplus is a note and
-    // stays gray. Optional on the manager so a stand-in without projection
-    // support still renders.
-    const projTags = this._projectionTags(idx);
-    if (projTags.length) {
-      line += `  ${projTags.map(t => (t.deficit ? yellow : gray)(t.text)).join(gray(' · '))}`;
-    }
     // Money tag last, so it sits at the end of the row where the eye lands after
     // the bars. Red once real money has moved, yellow while it only could.
     const money = spendTag(q, a.maxSpend);
@@ -4371,17 +4330,6 @@ export class TUI {
     const routeTag = routingTag(a);
     if (routeTag) line += `  ${cyan(routeTag)}`;
     return line;
-  }
-
-  /** The burn-rate tags one account row draws, most urgent first. One source
-   * for the row and its width budget, so the budget reserves exactly what the
-   * row draws.
-   * @param {number} idx
-   * @returns {{ text: string, deficit: boolean }[]} */
-  _projectionTags(idx) {
-    const buckets = this.am.projectionsFor?.(idx) || {};
-    const ranked = this.am.projection?.rank(Object.values(buckets)) || [];
-    return ranked.map((/** @type {any} */ p) => ({ text: formatProjection(p), deficit: p.kind === 'deficit' }));
   }
 
   /** Whether the account behind this row is serving on extra usage. Asked of

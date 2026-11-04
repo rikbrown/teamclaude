@@ -3,7 +3,6 @@ import { SessionTitles } from './session-titles.js';
 import { modelGlobMatches, resolveSwitchThreshold, WEEKLY_BUCKET_KEYS } from './model.js';
 import { safeLine } from './safe-text.js';
 import { providerOf } from './provider.js';
-import { QuotaProjection } from './quota-projection.js';
 
 /** @typedef {import('./types.js').CodedError} CodedError */
 
@@ -233,17 +232,6 @@ export class RemoteAccountManager {
     // this process's own — in attach mode that would name the wrong machine.
     this.versionLabel = '';
     this.updateAvailable = false;
-    // Burn-rate history for the FLEET series only.
-    //
-    // The per-account projections arrive already computed on the payload, so
-    // nothing here recomputes those. The fleet aggregate has no equivalent on
-    // the wire — it is composed from the payload on this side — so its samples
-    // have to be taken here, once per poll, against the same
-    // `fleet:<provider>` keys the server uses. Settings are the defaults: the
-    // window is a property of how utilization is quantised, not of the server,
-    // and the one thing worth mirroring (the on/off switch) is applied in
-    // applyStatus.
-    this.projection = new QuotaProjection();
   }
 
   /** Mirrors AccountManager.onExtraUsage off the payload's per-account flag,
@@ -404,36 +392,9 @@ export class RemoteAccountManager {
       activeRequests: Number.isFinite(sc?.activeRequests) ? sc.activeRequests : null,
       recentErrors: Number.isFinite(sc?.recentErrors) ? sc.recentErrors : null,
     }));
-    // The projection is a readout the server can turn off. With it off there the
-    // account rows carry no tags — theirs come off the payload — and a fleet tag
-    // drawn beside them would be the one burn figure on the screen that this
-    // dashboard had invented for itself. Flipped rather than rebuilt: rebuilding
-    // would throw away the samples, so a nudge on the server would blank the tag
-    // for another window's worth of polls.
-    this.projection.enabled = status?.projection?.enabled !== false;
-    // One sample per poll, on the cadence the server publishes at. Taken after
-    // the accounts are in place, since it is composed from them.
     this.status = status;
     this.connected = true;
     this.lastError = null;
-  }
-
-  /**
-   * This account's measured burn for `bucket`, read from the status payload.
-   *
-   * The server samples and fits; an attached dashboard only reads the result,
-   * so this mirrors AccountManager.rateFor without keeping a second series of
-   * its own. The pool's rate is built from these by aggregateHeadroom, which is
-   * why the payload carries rates and not only projections.
-   *
-   * @param {any} account
-   * @param {string} bucket
-   */
-  rateFor(account, bucket) {
-    const rate = account?.projection?.rates?.[bucket];
-    // Off the wire, so validated rather than trusted: it is about to be
-    // multiplied into a weighted total.
-    return Number.isFinite(rate) && rate > 0 ? Number(rate) : null;
   }
 
   markDisconnected(err) {

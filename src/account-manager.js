@@ -7,7 +7,6 @@ import { weeklyBucketForModel, modelGlobMatches, modelFamily, gatingUtilization,
 import { SessionTracker } from './session-tracker.js';
 import { SessionPins } from './session-pins.js';
 import { buildQuotaSummary, quotaTier } from './quota-summary.js';
-import { QuotaProjection, PROJECTED_BUCKETS } from './quota-projection.js';
 import { ROLLOVER_MIN_JUMP_MS, remapHeld, findHeld, dropHeld, newObservation } from './rollover.js';
 import { decideBand, pressureOf, pressureRank, assertNever, WEEKLY_WINDOW_SECONDS } from './band-decision.js';
 import { BurnRateLearner, ConcurrencyLearner, scoreCandidate } from './adaptive-distribution.js';
@@ -729,13 +728,12 @@ export class AccountManager {
    * @param {Object} [opts.ramp]
    * @param {boolean|string} [opts.distributeSessions]
    * @param {Object} [opts.adaptive]
-   * @param {Object} [opts.projection]
    * @param {Object} [opts.sessionTracker]
    * @param {Object} [opts.expiryRouting]
    * @param {string} [opts.advisorEligibility]  'strict' (default) or 'prefer'
    * @param {{ host: string, port: number }|null} [opts.listener]  this server's own address, so an accounts[].routing that points back at it is refused (see accountRouting)
    */
-  constructor(accounts, switchThreshold = 0.98, { refreshFn = refreshAccessToken, codexRefreshFn = refreshCodexToken, refreshCoordinator = (_account, refresh, _info) => refresh(), throttleProbeFloorMs, familyStaleMs, statusStaleMs, forcedRefreshFloorMs = FORCED_REFRESH_FLOOR_MS, routes, ramp, distributeSessions = false, adaptive, projection, sessionTracker, expiryRouting, advisorEligibility, listener = null } = {}) {
+  constructor(accounts, switchThreshold = 0.98, { refreshFn = refreshAccessToken, codexRefreshFn = refreshCodexToken, refreshCoordinator = (_account, refresh, _info) => refresh(), throttleProbeFloorMs, familyStaleMs, statusStaleMs, forcedRefreshFloorMs = FORCED_REFRESH_FLOOR_MS, routes, ramp, distributeSessions = false, adaptive, sessionTracker, expiryRouting, advisorEligibility, listener = null } = {}) {
     // How long a just-minted token is trusted against a forced refresh.
     this._forcedRefreshFloorMs = forcedRefreshFloorMs;
     // Operator steers (`teamclaude steer`): provider → the one account NEW
@@ -858,7 +856,6 @@ export class AccountManager {
     // bucket silence each other; keying by session id is unbounded, since that
     // id is a client-supplied header.
     this._rolloverHeldLogAt = new Map();
-    this.setProjection(projection);
     // Storm control: when rotation switches to a fresh account, a burst of
     // in-flight requests (e.g. dozens of agents failing over together) would all
     // hit it at once and instantly throttle it — cascading down the fleet
@@ -3952,58 +3949,6 @@ export class AccountManager {
   }
 
   /**
-   * Burn-rate projection settings, applied live on config reload. Enabled by
-   * default: the projection is a readout and no selection code consults it, so
-   * turning it on cannot change which account serves a request.
-   */
-  setProjection(cfg) {
-    const c = cfg || {};
-    this.projection = new QuotaProjection({
-      enabled: c.enabled !== false,
-      windowMinutes: c.windowMinutes,
-      wasteFloor: c.wasteFloor ?? 0.1,
-    });
-  }
-
-  /** Sample every reported bucket. Both quota write paths call this: response
-   *  headers (updateQuota) and the usage probe (applyUsageData). */
-  _recordQuotaSamples(account, now = Date.now()) {
-    const q = account.quota;
-    for (const bucket of PROJECTED_BUCKETS) {
-      if (q[bucket] !== undefined) this.projection.record(account.index, bucket, q[bucket], now);
-    }
-  }
-
-  /**
-   * This account's measured burn for `bucket`, or null when its samples cannot
-   * support one. The fleet aggregate builds a pool's rate out of these.
-   *
-   * @param {any} account
-   * @param {string} bucket
-   */
-  rateFor(account, bucket) {
-    return account == null ? null : this.projection?.rate(account.index, bucket) ?? null;
-  }
-
-  /** Every bucket's projection for one account, keyed by bucket name. Buckets
-   *  without a usable rate are absent rather than null. */
-  projectionsFor(accountIndex, now = Date.now()) {
-    const account = this.accounts[accountIndex];
-    if (!account) return {};
-    const q = account.quota;
-    const out = {};
-    for (const bucket of PROJECTED_BUCKETS) {
-      const projected = this.projection.project(accountIndex, bucket, {
-        utilization: q[bucket],
-        resetAt: q[`${bucket}Reset`],
-        now,
-      });
-      if (projected) out[bucket] = projected;
-    }
-    return out;
-  }
-
-  /**
    * Normalize and store the configurable routing table. A route pins a set of
    * model globs to an exclusive set of accounts (and may override the governing
    * quota bucket). Called from the constructor and on config reload.
@@ -4862,11 +4807,6 @@ export class AccountManager {
    * The ephemeral routes a fleet has earned but not configured: one per model
    * family that some account meters with its own weekly bucket and no
    * configured route already covers.
-   *
-   * Split out of getRoutes so routeMembership can apply the same rule. Which
-   * family buckets exist, and whether a route already claims them, is part of
-   * what "the routing table" means here — a second copy of it would answer
-   * differently the first time either half changed.
    */
   _detectedRoutes() {
     const detected = [];
@@ -4877,33 +4817,6 @@ export class AccountManager {
       detected.push({ name: 'sonnet', match: ['*sonnet*'], sample: 'claude-sonnet-4-6' });
     }
     return detected.filter(d => !this._routeForModel(d.sample));
-  }
-
-  /**
-   * The routing table as MEMBERSHIP only: which accounts each route can reach,
-   * by name, with no live eligibility flag and no target.
-   *
-   * getRoutes() answers the same question and more, and the more is the
-   * problem: eligibility and target both run the selection predicates, which
-   * refresh per-account quota state as they go (an expired window is cleared
-   * where it is noticed). That is right on a render path and wrong on the
-   * request path, where the fleet sampler reads this once per quota update —
-   * recording a sample must not quietly age the readings it is sampling. It is
-   * also most of the work, for an answer this caller throws away.
-   *
-   * Same shape as the `routes` a status payload carries, so fleetAggregate
-   * takes either without knowing which it got.
-   */
-  routeMembership() {
-    const named = (/** @type {any} */ route) =>
-      this._routeMembers(route, DEFAULT_PROVIDER).map(a => ({ name: a.name, provider: providerOf(a) }));
-    const configured = this.routes || [];
-    return [
-      ...configured.map(r => ({ name: r.name, match: r.match, accounts: named(r) })),
-      ...this._detectedRoutes().map(d => ({
-        name: d.name, match: d.match, accounts: named({ accounts: [], match: d.match }),
-      })),
-    ];
   }
 
   /** The name of the account a request for `model` would land on right now, or
@@ -4941,9 +4854,7 @@ export class AccountManager {
       .map(a => ({ name: a.name, provider: providerOf(a), eligible: this._isAvailable(a, sample) }));
   }
 
-  /** The accounts a route can use — the membership half of _routeAccountsView,
-   *  and the whole of routeMembership. Reads config and nothing else: no
-   *  eligibility, no quota, so it is safe to call from the request path.
+  /** The accounts a route can use, before checking live eligibility.
    *  @param {{accounts: Array<string>}} route
    *  @param {string} [provider] */
   _routeMembers(route, provider = DEFAULT_PROVIDER) {
@@ -5802,7 +5713,7 @@ export class AccountManager {
     // position: a ChatGPT Pro plan reports its weekly limit as the primary one
     // and meters no secondary window at all. So each window is filed by length,
     // which lands it in the same 5h/weekly slots the rest of the code reads —
-    // display, projection and switch-threshold logic apply unchanged. A window
+    // display and switch-threshold logic apply unchanged. A window
     // with no length is a bucket the plan does not have, not one at 0% used.
     // The length rule is the direct Codex path's own (windowBucket), so a
     // window that is neither five hours nor seven days, a monthly one say, is
@@ -5856,8 +5767,6 @@ export class AccountManager {
 
     this._observeBurnRate(account, observed);
     this._observeOutsideSpend(account, observed, { familyResets: false });
-
-    this._recordQuotaSamples(account);
 
     account.usage.totalRequests++;
     account.usage.lastUsed = new Date().toISOString();
@@ -6335,8 +6244,6 @@ export class AccountManager {
         console.log(`[TeamClaude] Account "${safeLine(account.name, 64)}" has started spending real money: ${formatMoney(q.spend)}`);
       }
     }
-
-    this._recordQuotaSamples(account);
 
     // If we just learned this account's weekly window while probing, re-evaluate
     // selection (same path as learning it from a live response).
@@ -7033,7 +6940,6 @@ export class AccountManager {
       // When the whole fleet is out at once, and when the first account is
       // back (#550). Null until there are 48 hours of samples.
       fleetForecast: this.fleetForecastStatus(),
-      projection: this.projection.settings(),
       accounts: this.accounts.map(a => ({
         name: a.name,
         type: a.type,
@@ -7099,26 +7005,6 @@ export class AccountManager {
         // serialises it straight away, so this holds a property rather than
         // fixing a live defect.
         usage: { ...a.usage, byBucket: copyBuckets(a.usage.byBucket) },
-        projection: (() => {
-          const buckets = this.projectionsFor(a.index);
-          // The raw rates travel too, not just the projections built from them.
-          // An attached dashboard derives each pool's burn from its members'
-          // rates (see aggregateHeadroom) and cannot recover one from a
-          // projection: `project` reports nothing at all through the whole
-          // middle ground where the fleet lines still have something to say.
-          /** @type {Record<string, number>} */
-          const rates = {};
-          for (const b of PROJECTED_BUCKETS) {
-            // Optional chain for the same reason the rest of this file uses one:
-            // `projection` is set through setProjection, which is a step more of
-            // indirection than the checker follows, and the strict ratchet counts
-            // what it cannot see. It never short-circuits in practice.
-            const r = this.projection?.rate(a.index, b);
-            // Absent rather than null: an unmeasured bucket is not a zero burn.
-            if (r != null) rates[b] = r;
-          }
-          return { headline: this.projection.headline(Object.values(buckets)), buckets, rates };
-        })(),
         rateLimitedUntil: a.rateLimitedUntil
           ? new Date(a.rateLimitedUntil).toISOString()
           : null,

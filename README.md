@@ -1,18 +1,14 @@
 # TeamClaude
 
-> **Fork notice (rikbrown).** This fork adds two features on top of
+> **Fork notice (rikbrown).** This fork adds one feature on top of
 > [KarpelesLab/teamclaude](https://github.com/KarpelesLab/teamclaude), currently based on upstream 1.1.26:
 >
 > - **[OpenAI models via a Codex sidecar](docs/openai.md)** (`sidecars` + `customModels`, opt-in):
 >   route `gpt-*` requests through a supervised local translating proxy to a ChatGPT subscription,
 >   under real model names — `/model gpt-5.6-sol` in the picker and typed, correct 272k context
 >   sizing, and dispatchable GPT subagents — while Claude traffic stays on the Claude accounts.
-> - **[Burn-rate projection](docs/quota.md#burn-rate-projection)** (`projection`, on by default): sample each
->   bucket's consumption over a rolling window and tag every account row with whichever window binds
->   first — `Ses TTL 38m` when it runs out before it resets, `Wk 22% unspent` when the reset arrives
->   first and that much expires. A readout only: no selection code reads it.
 >
-> Setup and use of each: [Fork features](#fork-features).
+> Setup and use: [Fork features](#fork-features).
 >
 > Published as [`@rikcodes/teamclaude`](https://www.npmjs.com/package/@rikcodes/teamclaude); self-update
 > tracks that package, so installs of this fork can never be replaced by an upstream release.
@@ -56,7 +52,6 @@ Already logged into Claude Code? `teamclaude import` takes its credentials inste
 ## What it does
 
 - Rotates to the next account when the 5h session or 7d weekly bucket reaches the threshold (98% by default), preferring the account whose weekly quota resets soonest.
-- Projects each quota window's burn rate against its reset, so a row says `Ses TTL 38m · Wk 22% unspent` instead of leaving you to read it off a bar (`projection`, this fork).
 - Tracks the per-model weekly cap separately, so an account out of Fable quota is skipped for Fable requests and still serves Opus and Sonnet.
 - Tells a spent quota bucket apart from a per-minute rate limit and only rotates on the first one. Rotating on a rate limit would just move the burst to the next account and drop the warm cache, so it paces the same account instead.
 - Paces requests onto a freshly switched account, so a herd of agents failing over at the same instant doesn't throttle it and cascade down the fleet.
@@ -234,10 +229,6 @@ Three details matter:
 One thing differs from the single-account setup: each turn appears **twice** in the activity list, once per hop. Tokens and quota bars both come from the second hop, where the subscription is, so they are booked against the ChatGPT account that served. The sidecar account holds a stub login and spends nothing of its own, so it reads `N req · 0 tok` — booking it as well would double every figure.
 
 Full details, including what happens to quota on each hop: [Several ChatGPT accounts behind one sidecar](docs/openai.md#several-chatgpt-accounts-behind-one-sidecar).
-
-### Burn-rate projection
-
-This feature is on by default. Each account row shows which window binds first: `Ses TTL 38m` when the session bucket runs out before it resets, or `Wk 22% unspent` when the weekly reset arrives first and that amount of quota expires. This is a readout only; no selection code reads it. Tune or disable it with `projection: { enabled, windowMinutes, wasteFloor }`. Details: [Quota](docs/quota.md#burn-rate-projection).
 
 ## Documentation
 

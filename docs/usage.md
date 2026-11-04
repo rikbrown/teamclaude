@@ -138,7 +138,7 @@ Past a handful of accounts the rows answer "what does each seat hold" when the q
 
 ```text
   Fleet — Anthropic   9 seats · 7 counted
-    Ses  ███████░░░░░░░░░░░░░░░░░░░░░  11% · 4h12m  TTL 13h49m
+    Ses  ███████░░░░░░░░░░░░░░░░░░░░░  11% · 4h12m
     Wk   ████████████████████░░░░░░░░  68% · 1d22h
     F7   ██████████████████████████░░  91% · 13m
   Fleet — Codex   2 seats
@@ -159,9 +159,7 @@ Six things the block means, none of them obvious from the bars alone:
 - **A seat whose plan meters no 5-hour window is not in the `Ses` bar.** An [account without that window](quota.md#accounts-without-a-5-hour-window) has no session quota to spend or to have left, so the `Ses` bar covers the seats that meter one, and its line says how many it leaves out (`2 seats no 5h`). Without that note, two such Ultra seats beside one Pro seat at 95% would read as 95% of the pool's session quota spent. A seat that still holds a reading from before its plan changed is in the bar until that reading goes, because the reading still gates it. When no seat in a pool meters the window, the pool draws no `Ses` bar. The `Wk` bar counts every seat either way.
 - **Anthropic and Codex never mix.** They are separate subscriptions metering unrelated windows, so they get a block each; one averaged number would be true of neither.
 
-The `·` tail inside each bar is that bucket's soonest reset across the counted seats. The `TTL` beside it is how long the pool lasts at its measured burn rate, and it is an *estimate*, not the warning an account row carries. A row tag speaks only when a bucket will stop you before it resets, or when it will expire wasting more than the floor; applied to a healthy pool that left every fleet line blank, which reads as broken rather than calm. A fleet line answers whenever a rate exists, and says which side of the reset it falls on with colour: yellow when the pool runs dry before it resets, grey when it lasts past it.
-
-It draws on the same [burn-rate projection](quota.md#burn-rate-projection) sampler, so it needs about 90 minutes of samples before it appears and stays quiet after a restart rather than extrapolating from two readings. Enabling or disabling an account changes what the pool *is*, which resets that history too — and so does a route that stops reaching a seat.
+The `·` tail inside each bar is that bucket's soonest reset across the counted seats.
 
 **The route lines** answer a question the pools cannot. A route has no quota of its own: it spends its members' buckets, so a route holding three of nine seats is stopped by those three whatever the rest of the fleet has left. Each line names the one bucket nearest its ceiling — the constraint that will refuse the route's traffic first — with the percentage, that bucket's soonest reset and how many seats it is spread over. A Fable or Sonnet route is measured on its own weekly bucket **and** the shared weekly and session windows, because family spend meters into the shared weekly too: a route can be well under its `F7` cap and stopped by `Wk` all the same. A route that holds a seat with no 5-hour window is never named as stopped by `Ses`: that seat keeps serving the route after the other seats' sessions are spent.
 

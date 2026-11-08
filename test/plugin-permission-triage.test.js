@@ -51,7 +51,10 @@ function decide(cwd, command) {
   return decision;
 }
 
-// [cwd, command, expected]: an allow, or a deny with a fragment of its reason.
+const homeHint = 'This session runs from the home folder: ask the person to `/cd` into the project folder.';
+
+// [cwd, command, expected]: an allow, or a deny with a fragment of its reason. A cwd whose root contains $HOME also
+// expects the home-folder hint, and every other cwd expects no hint.
 /** @type {[string, string, 'allow' | RegExp][]} */
 const cases = [
   [wt, 'rm -f scripts/nonexistent.txt', 'allow'],
@@ -95,7 +98,11 @@ const cases = [
   [wt, 'sudo rm -rf /tmp/x', /`sudo` is not on the allow list/],
   [wt, `cat .e${'nv'}`, /`cat` is not on the allow list/],
   [home, 'rm -rf Documents', /contains \$HOME/],
+  [home, 'rm -f x', /worktree root .* contains \$HOME/],
+  [home, 'curl -s https://api.cloudflare.com/client/v4/user', /`curl` is not on the allow list/],
+  [home, 'curl -s -H "Authorization: Bearer $(tr -d x < /tmp/token)" https://api.cloudflare.com', /`curl` is not on the allow list/],
   ['/', 'rm -rf tmp/x', /contains \$HOME/],
+  [wt, 'touch /tmp/x', /`touch` is not on the allow list/],
   [wt, "rm -f 'unclosed", /unclosed quote/],
 ];
 
@@ -114,6 +121,9 @@ test('permission-triage decides each Bash command', { skip: !canRun && 'node can
         assert.match(decision.message, /^No\. Too aggro for an unattended run \(/);
         assert.match(decision.message, expected);
         assert.match(decision.message, /tell your coordinator or the person you work for in text\./);
+        const homeSession = cwd === home || cwd === '/';
+        assert.equal(decision.message.endsWith(` ${homeHint}`), homeSession);
+        assert.equal(decision.message.includes('/cd'), homeSession);
       }
     });
   }

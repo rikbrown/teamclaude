@@ -25,7 +25,13 @@ Among them:
 - a path that resolves outside the worktree and the temp directories, also through a symlink or `..`;
 - the whole worktree or a whole temp directory, a glob over a whole temp directory, a recursive glob over the whole
   worktree, a glob with a trailing slash, and a dot glob;
-- a worktree root that contains `$HOME`.
+- an `rm` in a session whose worktree root contains `$HOME`.
+
+The reason names the first problem it finds. A command that is not `rm` gets "`<command>` is not on the allow list",
+whatever the cwd. The hook finds the worktree root only for an `rm`.
+
+When the session's worktree root contains `$HOME`, every deny message ends with: "This session runs from the home
+folder: ask the person to `/cd` into the project folder."
 
 A crash or a timeout (10 seconds) also denies: the hook has `"onFailure": "block"`.
 
@@ -52,4 +58,4 @@ Pick **user** scope. Remove any copy of the hook in `settings.json`, or each pro
 
 ## Test
 
-`node --test test/plugin-permission-triage.test.js` from the repository root runs 42 commands through `hooks/run.sh`.
+`node --test test/plugin-permission-triage.test.js` from the repository root runs 46 commands through `hooks/run.sh`.

@@ -23,7 +23,7 @@ const logFile = join(home, ".claude", "logs", "permission-triage.jsonl");
 
 const denyMessage = (reason: string) =>
   `No. Too aggro for an unattended run (${reason}). Split the chained command, use absolute paths, and scope any ` +
-  `delete to the worktree. If it cannot be done another way, stop and tell your coordinator or Rik in text. ` +
+  `delete to the worktree. If it cannot be done another way, stop and tell your coordinator or the person you work for in text. ` +
   `Do not work around it.`;
 
 // Shell syntax that can run code, redirect, expand or chain. A command with any of these is denied, even inside quotes.

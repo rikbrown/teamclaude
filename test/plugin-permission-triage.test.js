@@ -113,6 +113,7 @@ test('permission-triage decides each Bash command', { skip: !canRun && 'node can
         assert.equal(decision.behavior, 'deny');
         assert.match(decision.message, /^No\. Too aggro for an unattended run \(/);
         assert.match(decision.message, expected);
+        assert.match(decision.message, /tell your coordinator or the person you work for in text\./);
       }
     });
   }

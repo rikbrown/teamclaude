@@ -14,8 +14,8 @@ An `rm`, or `cd <absolute dir> && rm`, whose every path resolves inside the sess
 Everything else, with this message to the agent:
 
 > No. Too aggro for an unattended run (_reason_). Split the chained command, use absolute paths, and scope any delete
-> to the worktree. If it cannot be done another way, stop and tell your coordinator or Rik in text. Do not work around
-> it.
+> to the worktree. If it cannot be done another way, stop and tell your coordinator or the person you work for in text.
+> Do not work around it.
 
 Among them:
 

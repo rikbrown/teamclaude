@@ -1,8 +1,8 @@
 {
   "name": "permission-triage",
   "displayName": "Permission Triage",
-  "version": "0.1.3",
-  "description": "Decides every Bash permission prompt: allows an rm inside the session's worktree or a temp directory, denies the rest with a message that tells the agent what to change",
+  "version": "0.1.4",
+  "description": "Decides every Bash permission prompt: allows an rm inside the session's worktree or a temp directory, denies the rest with a message that tells the agent what to change, and leaves the privacy check's prompts to the person",
   "author": {
     "name": "Rik Brown",
     "url": "https://github.com/rikbrown"

@@ -1,6 +1,9 @@
-// PermissionRequest hook for Bash: no session waits on a permission prompt.
+// PermissionRequest hook for Bash: decides each permission prompt except the privacy check's.
 // Allows an `rm` (optionally after `cd <absolute dir> &&`) whose every target is inside the session's worktree or a temp
 // directory. Denies everything else, with a message that tells the agent what to change. Never sets `interrupt`.
+// Gives no decision for a command that contains the signed-in user's email address: Claude Code's privacy check asks
+// for it, and only the person can answer. The input does not name the check that raised a request, so the address
+// decides.
 // run.sh selects the node binary, which must strip types (Node 22.18 or later). On a crash or timeout,
 // `onFailure: "block"` in hooks.json denies the request.
 import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
@@ -16,15 +19,14 @@ type HookInput = {
   tool_input?: { command?: unknown };
 };
 
-type Verdict = { decision: "allow" | "deny"; reason: string };
+type Verdict = { decision: "allow" | "deny" | "passthrough"; reason: string };
 
 const home = homedir();
 const logFile = join(home, ".claude", "logs", "permission-triage.jsonl");
 
 const denyMessage = (reason: string, homeSession: boolean) =>
   `No. Too aggro for an unattended run (${reason}). Split the chained command, use absolute paths, and scope any ` +
-  `delete to the worktree. If it cannot be done another way, stop and tell your coordinator or the person you work for in text. ` +
-  `Do not work around it.` +
+  `delete to the worktree. If it cannot be done another way, stop and tell your coordinator or the person you work for in text.` +
   (homeSession ? " This session runs from the home folder: ask the person to `/cd` into the project folder." : "");
 
 // Shell syntax that can run code, redirect, expand or chain. A command with any of these is denied, even inside quotes.
@@ -196,9 +198,26 @@ function checkRm(args: string[], base: string, roots: Roots): string {
   return `rm of ${operands.length} path(s) inside the worktree or temp directories`;
 }
 
+// `oauthAccount.emailAddress` in ~/.claude.json. A missing or unreadable file gives no address.
+function signedInEmail(): string | undefined {
+  try {
+    const config = JSON.parse(readFileSync(join(home, ".claude.json"), "utf8")) as {
+      oauthAccount?: { emailAddress?: unknown };
+    };
+    const email = config.oauthAccount?.emailAddress;
+    return typeof email === "string" && email.includes("@") ? email.toLowerCase() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function decide(input: HookInput): Verdict {
   const command = input.tool_input?.command;
   if (typeof command !== "string") refuse(`no Bash command (tool ${input.tool_name ?? "unknown"})`);
+  const email = signedInEmail();
+  if (email !== undefined && (command as string).toLowerCase().includes(email)) {
+    return { decision: "passthrough", reason: "the command contains the signed-in user's email address" };
+  }
   if (typeof input.cwd !== "string" || !input.cwd.startsWith("/")) refuse("no absolute session cwd");
 
   const commands = splitCommands(tokenize(command as string));
@@ -223,7 +242,9 @@ function decide(input: HookInput): Verdict {
   return { decision: "allow", reason: checkRm(args, base, roots) };
 }
 
+// A passthrough writes nothing, so Claude Code shows its own prompt.
 function output(verdict: Verdict, homeSession: boolean): string {
+  if (verdict.decision === "passthrough") return "";
   const decision =
     verdict.decision === "allow"
       ? { behavior: "allow" }
@@ -263,4 +284,5 @@ try {
   verdict = { decision: "deny", reason };
 }
 log(input, verdict);
-process.stdout.write(`${output(verdict, isHomeSession(input.cwd))}\n`);
+const text = output(verdict, isHomeSession(input.cwd));
+if (text !== "") process.stdout.write(`${text}\n`);

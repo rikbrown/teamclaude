@@ -1,7 +1,8 @@
 # permission-triage
 
-A `PermissionRequest` hook that decides every Bash permission prompt, so no unattended session waits on one. It
-decides in sessions that a person watches too: with the plugin on, you do not see a Bash permission dialog.
+A `PermissionRequest` hook that decides Bash permission prompts, so no unattended session waits on one. It decides in
+sessions that a person watches too: with the plugin on, the only Bash permission dialog you see is the privacy check's
+(see below).
 
 ## What it allows
 
@@ -9,13 +10,19 @@ An `rm`, or `cd <absolute dir> && rm`, whose every path resolves inside the sess
 (`/tmp`, `$TMPDIR`). The worktree is the nearest ancestor of the session's cwd that has a `.git` entry. The options are
 `-f`, `-r`, `-R`, `-v`, `-d` and their long forms.
 
+## What it leaves to the person
+
+A command that contains the signed-in user's email address (`oauthAccount.emailAddress` in `~/.claude.json`, in any
+case). Claude Code's privacy check raises a permission request for such a command, also in `bypassPermissions` mode,
+and only the person can answer it. The hook writes no decision, so Claude Code shows its own prompt. The request input
+does not name the check that raised it, so the hook uses the address.
+
 ## What it denies
 
 Everything else, with this message to the agent:
 
 > No. Too aggro for an unattended run (_reason_). Split the chained command, use absolute paths, and scope any delete
 > to the worktree. If it cannot be done another way, stop and tell your coordinator or the person you work for in text.
-> Do not work around it.
 
 Among them:
 
@@ -37,8 +44,8 @@ A crash or a timeout (10 seconds) also denies: the hook has `"onFailure": "block
 
 ## Log
 
-One JSON line per decision in `~/.claude/logs/permission-triage.jsonl`: time, session and agent IDs, cwd, the first 200
-characters of the command, the decision and the reason.
+One JSON line per request in `~/.claude/logs/permission-triage.jsonl`: time, session and agent IDs, cwd, the first 200
+characters of the command, the decision (`allow`, `deny` or `passthrough`) and the reason.
 
 ## Node
 
@@ -58,4 +65,4 @@ Pick **user** scope. Remove any copy of the hook in `settings.json`, or each pro
 
 ## Test
 
-`node --test test/plugin-permission-triage.test.js` from the repository root runs 46 commands through `hooks/run.sh`.
+`node --test test/plugin-permission-triage.test.js` from the repository root runs 50 commands through `hooks/run.sh`.

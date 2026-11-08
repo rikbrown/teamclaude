@@ -54,6 +54,13 @@
       "description": "A [Copy] button under each reply that quotes a draft, which copies the draft without the quote bars.",
       "category": "productivity",
       "keywords": ["transcript", "clipboard", "copy", "mod"]
+    },
+    {
+      "name": "permission-triage",
+      "source": "./plugins/permission-triage",
+      "description": "Decides every Bash permission prompt, so no unattended session waits on one: allows an rm inside the worktree or a temp directory, denies the rest.",
+      "category": "workflow",
+      "keywords": ["permissions", "bash", "rm", "unattended", "hook"]
     }
   ]
 }

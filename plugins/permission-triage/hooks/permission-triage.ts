@@ -21,10 +21,11 @@ type Verdict = { decision: "allow" | "deny"; reason: string };
 const home = homedir();
 const logFile = join(home, ".claude", "logs", "permission-triage.jsonl");
 
-const denyMessage = (reason: string) =>
+const denyMessage = (reason: string, homeSession: boolean) =>
   `No. Too aggro for an unattended run (${reason}). Split the chained command, use absolute paths, and scope any ` +
   `delete to the worktree. If it cannot be done another way, stop and tell your coordinator or the person you work for in text. ` +
-  `Do not work around it.`;
+  `Do not work around it.` +
+  (homeSession ? " This session runs from the home folder: ask the person to `/cd` into the project folder." : "");
 
 // Shell syntax that can run code, redirect, expand or chain. A command with any of these is denied, even inside quotes.
 const forbiddenChars = /[\n\r;|<>`$(){}\\#!~[\]=^%]/;
@@ -32,6 +33,8 @@ const globChars = /[*?]/;
 const rmNames = new Set(["rm", "/bin/rm"]);
 const rmLongOptions = new Set(["--force", "--recursive", "--verbose", "--dir"]);
 const rmShortOption = /^-[fFrRvd]+$/;
+
+const notAllowed = (name: string) => `\`${name}\` is not on the allow list`;
 
 class Refusal extends Error {}
 const refuse = (reason: string): never => {
@@ -42,9 +45,19 @@ const realpath = (path: string) => realpathSync.native(path);
 
 type Word = { text: string } | { operator: "&&" };
 
+// The first word, when it is a plain command name that no allowed command starts with.
+function disallowedLeadingName(command: string): string | undefined {
+  const name = /^[ \t]*([\w./-]+)(?:[ \t]|$)/.exec(command)?.[1];
+  return name === undefined || rmNames.has(name) || name === "cd" ? undefined : name;
+}
+
 function tokenize(command: string): Word[] {
   const forbidden = command.match(forbiddenChars)?.[0];
-  if (forbidden !== undefined) refuse(`the shell character ${JSON.stringify(forbidden)}`);
+  if (forbidden !== undefined) {
+    // The command name tells the agent more than a shell character in its arguments.
+    const name = disallowedLeadingName(command);
+    refuse(name === undefined ? `the shell character ${JSON.stringify(forbidden)}` : notAllowed(name));
+  }
   const words: Word[] = [];
   let current: string | undefined;
   let quote: "'" | '"' | undefined;
@@ -84,9 +97,8 @@ function splitCommands(words: Word[]): string[][] {
   return commands;
 }
 
-// The worktree is the nearest ancestor of cwd with a `.git` entry, else cwd. A root that contains the home directory
-// would allow deletes across all of it, so it is refused.
-function worktreeRoot(cwd: string): string {
+// The worktree is the nearest ancestor of cwd with a `.git` entry, else cwd.
+function findWorktreeRoot(cwd: string): string {
   let dir = realpath(cwd);
   const start = dir;
   while (!existsSync(join(dir, ".git"))) {
@@ -97,9 +109,29 @@ function worktreeRoot(cwd: string): string {
     }
     dir = parent;
   }
-  const realHome = realpath(home);
-  if (dir === "/" || realHome === dir || realHome.startsWith(`${dir}/`)) refuse(`worktree root ${dir} contains $HOME`);
   return dir;
+}
+
+function containsHome(dir: string): boolean {
+  const realHome = realpath(home);
+  return dir === "/" || realHome === dir || realHome.startsWith(`${dir}/`);
+}
+
+// A root that contains the home directory would allow deletes across all of it, so it is refused.
+function worktreeRoot(cwd: string): string {
+  const dir = findWorktreeRoot(cwd);
+  if (containsHome(dir)) refuse(`worktree root ${dir} contains $HOME`);
+  return dir;
+}
+
+// Decides only the hint in the deny message, so a failure gives no hint.
+function isHomeSession(cwd: unknown): boolean {
+  if (typeof cwd !== "string" || !cwd.startsWith("/")) return false;
+  try {
+    return containsHome(findWorktreeRoot(cwd));
+  } catch {
+    return false;
+  }
 }
 
 function tempRoots(): string[] {
@@ -168,7 +200,6 @@ function decide(input: HookInput): Verdict {
   const command = input.tool_input?.command;
   if (typeof command !== "string") refuse(`no Bash command (tool ${input.tool_name ?? "unknown"})`);
   if (typeof input.cwd !== "string" || !input.cwd.startsWith("/")) refuse("no absolute session cwd");
-  const roots: Roots = { worktree: worktreeRoot(input.cwd), temp: tempRoots() };
 
   const commands = splitCommands(tokenize(command as string));
   let base = realpath(input.cwd);
@@ -187,15 +218,16 @@ function decide(input: HookInput): Verdict {
   } else if (commands.length > 2) refuse("more than one `&&`");
 
   const [name, ...args] = rmCommand;
-  if (!rmNames.has(name!)) refuse(`\`${name}\` is not on the allow list`);
+  if (!rmNames.has(name!)) refuse(notAllowed(name!));
+  const roots: Roots = { worktree: worktreeRoot(input.cwd), temp: tempRoots() };
   return { decision: "allow", reason: checkRm(args, base, roots) };
 }
 
-function output(verdict: Verdict): string {
+function output(verdict: Verdict, homeSession: boolean): string {
   const decision =
     verdict.decision === "allow"
       ? { behavior: "allow" }
-      : { behavior: "deny", message: denyMessage(verdict.reason) };
+      : { behavior: "deny", message: denyMessage(verdict.reason, homeSession) };
   return JSON.stringify({ hookSpecificOutput: { hookEventName: "PermissionRequest", decision } });
 }
 
@@ -231,4 +263,4 @@ try {
   verdict = { decision: "deny", reason };
 }
 log(input, verdict);
-process.stdout.write(`${output(verdict)}\n`);
+process.stdout.write(`${output(verdict, isHomeSession(input.cwd))}\n`);

@@ -24,7 +24,7 @@ Among them:
 - more than one `&&`, or a chain that is not `cd <absolute dir> && rm`;
 - a path that resolves outside the worktree and the temp directories, also through a symlink or `..`;
 - the whole worktree or a whole temp directory, a glob over a whole temp directory, a recursive glob over the whole
-  worktree, and a dot glob;
+  worktree, a glob with a trailing slash, and a dot glob;
 - a worktree root that contains `$HOME`.
 
 A crash or a timeout (10 seconds) also denies: the hook has `"onFailure": "block"`.
@@ -52,4 +52,4 @@ Pick **user** scope. Remove any copy of the hook in `settings.json`, or each pro
 
 ## Test
 
-`node --test test/plugin-permission-triage.test.js` from the repository root runs 40 commands through `hooks/run.sh`.
+`node --test test/plugin-permission-triage.test.js` from the repository root runs 42 commands through `hooks/run.sh`.

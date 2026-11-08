@@ -1,0 +1,14 @@
+{
+  "name": "permission-triage",
+  "displayName": "Permission Triage",
+  "version": "0.1.0",
+  "description": "Decides every Bash permission prompt: allows an rm inside the session's worktree or a temp directory, denies the rest with a message that tells the agent what to change",
+  "author": {
+    "name": "Rik Brown",
+    "url": "https://github.com/rikbrown"
+  },
+  "homepage": "https://github.com/rikbrown/teamclaude/blob/rik/main/plugins/permission-triage/README.md",
+  "repository": "https://github.com/rikbrown/teamclaude",
+  "license": "MIT",
+  "keywords": ["permissions", "bash", "rm", "unattended", "hook"]
+}

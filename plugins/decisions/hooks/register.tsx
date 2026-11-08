@@ -83,7 +83,8 @@ const REPLY_SCHEMA = {
 const DESCRIPTION = `Keeps the ledger of the decisions that you ask the person to make in this worktree. The person reads them in \
 the Decisions pane, sees the open IDs above the prompt, and jumps from the pane to the row where you raised each one.
 
-Use it for each question that waits on the person's ruling and that you give an ID.
+Use it for each question that waits on the person's ruling and that you give an ID. Only the session that the person \
+talks to raises decisions. A subagent or an orchestration worker sends its questions to its coordinator.
 - raise: one item for each decision, with title, body, options and recommendation. The tool gives the IDs (D1, D2, ...) \
 and returns them. Use only these IDs. Name an option by ID and key, such as D3a.
 - update: change a decision when you refine it. Give the id and the changed fields.

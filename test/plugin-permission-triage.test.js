@@ -29,6 +29,7 @@ mkdirSync(outside);
 mkdirSync(join(tmp, 'sub'));
 writeFileSync(join(tmp, 'sub', 'a.log'), '');
 symlinkSync(outside, join(tmp, 'escape'));
+symlinkSync(outside, join(wt, 'scripts', 'link'));
 
 /** @param {string} cwd @param {string} command */
 function decide(cwd, command) {
@@ -79,6 +80,8 @@ const cases = [
   [wt, `rm -rf ${tmp}/escape`, 'allow'],
   [wt, `rm -rf ${tmp}/escape/../Documents`, /outside the worktree and temp directories/],
   [wt, 'rm -rf /etc/*/foo', /glob in a directory part/],
+  [wt, 'rm -rf scripts/link*/', /glob with a trailing slash/],
+  [wt, 'rm -f scripts/link*', 'allow'],
   [wt, 'rm --no-preserve-root -rf /tmp/x', /rm option --no-preserve-root/],
   [wt, 'rm /tmp/x -rf', /rm option -rf after a path/],
   [wt, 'cd scripts && rm -f foo', /relative `cd` directory/],

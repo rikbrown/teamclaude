@@ -125,6 +125,8 @@ function checkTarget(operand: string, base: string, recursive: boolean, roots: R
   const parent = realpath(parentPath);
 
   if (globChars.test(name)) {
+    // With a trailing slash, rm follows a matched symlink and deletes its target's contents.
+    if (full.endsWith("/")) refuse(`a glob with a trailing slash \`${operand}\``);
     if (name.startsWith(".")) refuse(`a dot glob \`${operand}\``);
     if (roots.temp.includes(parent)) refuse(`a glob over a whole shared temp directory \`${operand}\``);
     if (parent === roots.worktree && recursive) refuse(`a recursive glob over the whole worktree \`${operand}\``);

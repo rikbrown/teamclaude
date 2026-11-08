@@ -1,5 +1,5 @@
 {
-  "description": "Decides every Bash permission prompt, so no unattended session waits on one.",
+  "description": "Decides each Bash permission prompt except the privacy check's, so no unattended session waits on one.",
   "hooks": {
     "PermissionRequest": [
       {

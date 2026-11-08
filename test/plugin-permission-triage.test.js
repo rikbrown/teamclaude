@@ -10,7 +10,8 @@ import { fileURLToPath } from 'node:url';
 // hooks/run.sh, as Claude Code does, and reads the decision from stdout.
 //
 // The fixture home holds the worktree, so a path that leaves the worktree is outside the temp directories too.
-// HOME points at it, so the log goes there and `$HOME` checks see it. The temp fixture is under /tmp.
+// HOME points at it, so the log goes there, `$HOME` checks see it and the hook reads its `.claude.json`. The temp
+// fixture is under /tmp.
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 const pluginRoot = `${repoRoot}plugins/permission-triage/`;
@@ -30,7 +31,10 @@ mkdirSync(join(tmp, 'sub'));
 writeFileSync(join(tmp, 'sub', 'a.log'), '');
 symlinkSync(outside, join(tmp, 'escape'));
 symlinkSync(outside, join(wt, 'scripts', 'link'));
+const email = 'person@example.test';
+writeFileSync(join(home, '.claude.json'), JSON.stringify({ oauthAccount: { emailAddress: email } }));
 
+// The decision object, or null when the hook writes nothing and Claude Code shows its own prompt.
 /** @param {string} cwd @param {string} command */
 function decide(cwd, command) {
   const input = {
@@ -47,15 +51,16 @@ function decide(cwd, command) {
     env: { ...process.env, HOME: home, PERMISSION_TRIAGE_NODE: process.execPath },
   });
   assert.equal(r.status, 0, r.stderr);
+  if (r.stdout === '') return null;
   const { decision } = JSON.parse(r.stdout).hookSpecificOutput;
   return decision;
 }
 
 const homeHint = 'This session runs from the home folder: ask the person to `/cd` into the project folder.';
 
-// [cwd, command, expected]: an allow, or a deny with a fragment of its reason. A cwd whose root contains $HOME also
+// [cwd, command, expected]: an allow, a passthrough (no decision), or a deny with a fragment of its reason. A cwd whose root contains $HOME also
 // expects the home-folder hint, and every other cwd expects no hint.
-/** @type {[string, string, 'allow' | RegExp][]} */
+/** @type {[string, string, 'allow' | 'passthrough' | RegExp][]} */
 const cases = [
   [wt, 'rm -f scripts/nonexistent.txt', 'allow'],
   [wt, `rm -rf ${wt}/apps/nonexistent-dir`, 'allow'],
@@ -104,6 +109,11 @@ const cases = [
   ['/', 'rm -rf tmp/x', /contains \$HOME/],
   [wt, 'touch /tmp/x', /`touch` is not on the allow list/],
   [wt, "rm -f 'unclosed", /unclosed quote/],
+  // Claude Code's privacy check raises a request for a command that contains the signed-in user's email address.
+  [wt, `ssh host 'git config user.email ${email}'`, 'passthrough'],
+  [wt, `echo ${email.toUpperCase()} | cat`, 'passthrough'],
+  [home, `ssh host 'echo ${email}'`, 'passthrough'],
+  [wt, "ssh host 'git config user.email other@example.test'", /`ssh` is not on the allow list/],
 ];
 
 test('permission-triage decides each Bash command', { skip: !canRun && 'node cannot strip types' }, async (t) => {
@@ -116,11 +126,15 @@ test('permission-triage decides each Bash command', { skip: !canRun && 'node can
       const decision = decide(cwd, command);
       if (expected === 'allow') {
         assert.deepEqual(decision, { behavior: 'allow' });
+      } else if (expected === 'passthrough') {
+        assert.equal(decision, null);
       } else {
+        assert.ok(decision);
         assert.equal(decision.behavior, 'deny');
         assert.match(decision.message, /^No\. Too aggro for an unattended run \(/);
         assert.match(decision.message, expected);
         assert.match(decision.message, /tell your coordinator or the person you work for in text\./);
+        assert.doesNotMatch(decision.message, /work around/);
         const homeSession = cwd === home || cwd === '/';
         assert.equal(decision.message.endsWith(` ${homeHint}`), homeSession);
         assert.equal(decision.message.includes('/cd'), homeSession);
@@ -133,6 +147,8 @@ test('permission-triage decides each Bash command', { skip: !canRun && 'node can
     const first = JSON.parse(lines[0]);
     assert.equal(first.session_id, 'test-session');
     assert.equal(first.decision, 'allow');
+    const passthroughs = lines.map((line) => JSON.parse(line)).filter((line) => line.decision === 'passthrough');
+    assert.equal(passthroughs.length, cases.filter(([, , expected]) => expected === 'passthrough').length);
   });
 });
 

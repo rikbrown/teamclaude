@@ -58,7 +58,7 @@
     {
       "name": "permission-triage",
       "source": "./plugins/permission-triage",
-      "description": "Decides every Bash permission prompt, so no unattended session waits on one: allows an rm inside the worktree or a temp directory, denies the rest.",
+      "description": "Decides each Bash permission prompt, so no unattended session waits on one: allows an rm inside the worktree or a temp directory, denies the rest, and leaves the privacy check's prompts to the person.",
       "category": "workflow",
       "keywords": ["permissions", "bash", "rm", "unattended", "hook"]
     }

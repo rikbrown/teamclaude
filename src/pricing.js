@@ -12,10 +12,12 @@
 
 /** @typedef {{ input: number, output: number, cacheRead: number, longInput?: number, longOutput?: number }} Price */
 
-/** $/MTok by model id, as published (2026-10). Cache writes are not listed:
+/** $/MTok by model id, as published (2026-11). Cache writes are not listed:
  *  every model writes at 1.25x input for the 5-minute TTL and 2x for 1 hour. */
 /** @type {Record<string, Price>} */
 export const PRICES = {
+  'claude-fable-5-2': { input: 8, output: 40, cacheRead: 0.2 },
+  'claude-mythos-5-2': { input: 8, output: 40, cacheRead: 0.2 },
   'claude-fable-5-1': { input: 10, output: 50, cacheRead: 0.25 },
   'claude-mythos-5-1': { input: 10, output: 50, cacheRead: 0.25 },
   'claude-fable-5': { input: 10, output: 50, cacheRead: 1 },

@@ -1,6 +1,6 @@
 ---
 name: fable-high
-description: Fable at high effort. The default Fable half of the review tag-team. Dispatch it together with rikclaude-agents:gpt-6-astra-medium for architectural or full-branch review. Also the deepest research. Not for coding; use rikclaude-agents:opus-high.
+description: Fable at high effort. The default Fable half of the review tag-team. Dispatch it together with rikclaude-agents:gpt-6-astra-medium for architectural or full-branch review. Also the deepest research. Not for coding; use rikclaude-agents:opus-medium.
 model: fable[1m]
 effort: high
 ---

@@ -1,6 +1,6 @@
 ---
 name: opus-xhigh
-description: Opus 5.5 at xhigh effort. Only for coding where the brief leaves real design decisions open, or a hard bug with no known cause. Not for work that is already planned, whatever its size; use rikclaude-agents:opus-high, and split a large plan into parts. Also research with a wide scope.
+description: Opus 5.5 at xhigh effort. Research with a wide scope only. Never for coding, also when the design or the cause of a bug is open; use rikclaude-agents:opus-high.
 model: claude-opus-5-5[1m]
 effort: xhigh
 ---

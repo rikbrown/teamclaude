@@ -52,9 +52,9 @@ const AGENT_PREFIX = 'rikclaude-agents:';
 //
 // `model` overrides that derived id, to pin a version the name does not spell —
 // `opus-high` runs `claude-opus-5-5[1m]`, not whatever the `opus` alias points at,
-// and `sonnet-high` runs `claude-sonnet-5-5[1m]`.
+// `sonnet-high` runs `claude-sonnet-5-5[1m]`, and the Fable rows run `claude-fable-5-2[1m]`.
 // It also opts into 1M: a bare id or alias runs at 200K, only the `[1m]` spelling
-// gets the full window, which is why the Fable rows pin `fable[1m]`.
+// gets the full window.
 // The frontmatter emits it unquoted: the parser takes the rest of the line, so
 // quotes would come back as part of the id.
 //
@@ -74,9 +74,9 @@ const AGENTS = [
   { name: 'opus-xhigh', label: 'Opus 5.5', model: 'claude-opus-5-5[1m]', nesting: 'brief', when: `Research with a wide scope only. Never for coding, also when the design or the cause of a bug is open; use ${AGENT_PREFIX}opus-high.` },
   { name: 'sonnet-high', label: 'Sonnet 5.5', model: 'claude-sonnet-5-5[1m]', nesting: 'none', when: `Exploration that needs no deep fact-finding, e.g. locating code or summarising a module. Also throwaway code that is not committed, e.g. evals or local helper scripts. For exploration across many files, use ${AGENT_PREFIX}opus-medium. Not for committed code; use ${AGENT_PREFIX}opus-medium.` },
   { name: 'sonnet-xhigh', label: 'Sonnet 5.5', model: 'claude-sonnet-5-5[1m]', nesting: 'none', byName: true, when: `Otherwise use ${AGENT_PREFIX}opus-medium for exploration across many files and for internal tooling.` },
-  { name: 'fable-medium', label: 'Fable', model: 'fable[1m]', nesting: 'none', when: `Research and technical design that need heavy reasoning. For architectural or full-branch review, use ${AGENT_PREFIX}fable-high with ${AGENT_PREFIX}gpt-6-astra-medium instead. Not for coding; use ${AGENT_PREFIX}opus-medium.` },
-  { name: 'fable-high', label: 'Fable', model: 'fable[1m]', nesting: 'own', when: `The default Fable half of the review tag-team. Dispatch it together with ${AGENT_PREFIX}gpt-6-astra-medium for architectural or full-branch review. Also the deepest research. Not for coding; use ${AGENT_PREFIX}opus-medium.` },
-  { name: 'fable-xhigh', label: 'Fable', model: 'fable[1m]', nesting: 'own', when: `The Fable half of the review tag-team for the most challenging reviews, where ${AGENT_PREFIX}fable-high is not enough. Dispatch it together with ${AGENT_PREFIX}gpt-6-astra-medium. Not for coding; use ${AGENT_PREFIX}opus-medium.` },
+  { name: 'fable-medium', label: 'Fable 5.2', model: 'claude-fable-5-2[1m]', nesting: 'none', when: `Research and technical design that need heavy reasoning. For architectural or full-branch review, use ${AGENT_PREFIX}fable-high with ${AGENT_PREFIX}gpt-6-astra-medium instead. Not for coding; use ${AGENT_PREFIX}opus-medium.` },
+  { name: 'fable-high', label: 'Fable 5.2', model: 'claude-fable-5-2[1m]', nesting: 'own', when: `The default Fable half of the review tag-team. Dispatch it together with ${AGENT_PREFIX}gpt-6-astra-medium for architectural or full-branch review. Also the deepest research. Not for coding; use ${AGENT_PREFIX}opus-medium.` },
+  { name: 'fable-xhigh', label: 'Fable 5.2', model: 'claude-fable-5-2[1m]', nesting: 'own', when: `The Fable half of the review tag-team for the most challenging reviews, where ${AGENT_PREFIX}fable-high is not enough. Dispatch it together with ${AGENT_PREFIX}gpt-6-astra-medium. Not for coding; use ${AGENT_PREFIX}opus-medium.` },
   { name: 'gpt-6-astra-medium', label: 'GPT-6 Astra', nesting: 'none', when: `The Astra half of the review tag-team for architectural or full-branch review. Dispatch it only together with ${AGENT_PREFIX}fable-high or ${AGENT_PREFIX}fable-xhigh, never alone.` },
   { name: 'gpt-6-astra-high', label: 'GPT-6 Astra', nesting: 'own', byName: true, when: `Otherwise use ${AGENT_PREFIX}gpt-6-astra-medium in the review tag-team.` },
   // { name: 'gpt-6-astra-xhigh', label: 'GPT-6 Astra', nesting: 'own', byName: true, when: `Otherwise use ${AGENT_PREFIX}gpt-6-astra-medium in the review tag-team.` },

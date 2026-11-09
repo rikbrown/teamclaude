@@ -1,6 +1,6 @@
 ---
 name: opus-high
-description: Opus 5.5 at high effort. Default for production coding when the brief settles the design, e.g. a planned feature or a narrow fix from PR feedback. Work that is already planned comes here, whatever its size. Also research that must reason through how code behaves, and prose review of docs that Opus did not write.
+description: Opus 5.5 at high effort. Coding that is less well defined. The brief leaves a design decision or the cause of a bug open, the change spans packages or changes the exports of a shared package, or the result needs judgement, e.g. text that a model reads, checked by evals. Also research that must reason through how code behaves, and prose review of docs that Opus did not write.
 model: claude-opus-5-5[1m]
 effort: high
 ---

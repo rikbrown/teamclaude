@@ -13,14 +13,13 @@ From the `rikclaude-agents` plugin. Its agents are namespaced, so a dispatch alw
 - Never pass the Agent tool's `model` parameter alongside an effort-named agent type. It overrides
   the agent's pinned model but keeps the agent's effort, silently, so you get the wrong model at
   the right effort with no warning. The agent type alone picks both.
-- Delegate liberally. Opus does the coding: `rikclaude-agents:opus-high` when the brief settles
-  the design. Work that is already planned goes there, whatever its size; split a large plan
-  into parts. `rikclaude-agents:opus-xhigh` only when the brief leaves real design decisions
-  open, or for a hard bug with no known cause. If you planned the work, its thinking is done; do
-  not pay for it again at `xhigh`. Fable does not code. `rikclaude-agents:opus-medium` writes
-  committed internal tooling that only developers run, such as dev CLIs, CI and build config, or
-  evals. `rikclaude-agents:sonnet-high` writes throwaway code that is not committed. If a bug in
-  it can reach a user, it goes to `rikclaude-agents:opus-high`.
+- Delegate liberally. Opus does the coding, and never at `xhigh`. `rikclaude-agents:opus-medium`
+  is the default: the brief settles the design and, for a bug, names the cause. Planned work goes
+  there, whatever its size; split a large plan into parts. `rikclaude-agents:opus-high` takes
+  coding that is less well defined: an open design decision or bug cause, a change across packages
+  or to a shared package's exports, or a result that needs judgement, such as model text checked by
+  evals. Fable does not code. `rikclaude-agents:sonnet-high` writes throwaway code that is not
+  committed. If a bug in it can reach a user, it goes to `rikclaude-agents:opus-medium`.
 - Architectural and full-branch reviews are a tag-team. Dispatch `rikclaude-agents:gpt-6-astra-medium`
   together with `rikclaude-agents:fable-high` (`rikclaude-agents:fable-xhigh` for the hardest) in
   one message. Never dispatch Astra alone. They bring different opinions; merge their findings.

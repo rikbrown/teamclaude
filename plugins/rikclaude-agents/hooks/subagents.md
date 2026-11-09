@@ -23,6 +23,7 @@ From the `rikclaude-agents` plugin. Its agents are namespaced, so a dispatch alw
 - Architectural and full-branch reviews are a tag-team. Dispatch `rikclaude-agents:gpt-6-astra-medium`
   together with `rikclaude-agents:fable-high` (`rikclaude-agents:fable-xhigh` for the hardest) in
   one message. Never dispatch Astra alone. They bring different opinions; merge their findings.
+- Release QA and browser checks of a change: `rikclaude-agents:opus-high`.
 - Research: `rikclaude-agents:opus-medium` by default. Use `rikclaude-agents:opus-high` when it
   must reason through how code behaves, and `rikclaude-agents:opus-xhigh` or a
   `rikclaude-agents:fable-*` agent when the scope or the reasoning is large.

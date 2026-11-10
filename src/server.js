@@ -25,6 +25,7 @@ import { createEgressGuard } from './egress-guard.js';
 import { createDrainState, DRAIN_RETRY_AFTER_SECONDS } from './drain.js';
 import { isRoutingFailure, describeRouting } from './account-routing.js';
 import { safeLine } from './safe-text.js';
+import { isTitleRequest, TitleCapture } from './session-titles.js';
 import { forwardRefusal, guardedLookup, FORBIDDEN_FORWARD } from './forward-target.js';
 import { renderDashboardHtml, dashboardCsp } from './dashboard.js';
 import { createUsageRecorder, resolveUsageDimensions, usageDimensionHeaderNames } from './client-usage.js';
@@ -1134,6 +1135,58 @@ export function createProxyServer(accountManager, config, hooks = {}, sx = null,
         return;
       }
 
+      // Session title — a client hook names a session (session-titles.js).
+      // Claude Code's http hook POSTs its hook input here unchanged: of it only
+      // `session_id` and `session_title` (the session's /rename name) are read.
+      // The hook fires on every prompt, and most carry no title, so everything
+      // short of a malformed request answers 200 with an empty JSON object,
+      // which the hook reads as "nothing to do"; any other status or body would
+      // put a hook error in the session. What happened is in the
+      // X-TeamClaude-Session-Title header, for `curl -i`.
+      //
+      // A client key may push: a title is display-only, nothing routes on it,
+      // and the hook runs on the very machines that hold client keys. An
+      // inference-scoped key is still refused by the control-plane gate above.
+      // What keeps a key from filling the store is that only a session the
+      // tracker knows, one that has sent requests through this proxy, is named.
+      // The body is the whole hook input, prompt included, so its cap is a
+      // prompt's size rather than a control body's.
+      if (req.method === 'POST' && req.url === '/teamclaude/session-title') {
+        /** @param {string} outcome */
+        const done = (outcome) => {
+          res.writeHead(200, { 'Content-Type': 'application/json', 'X-TeamClaude-Session-Title': outcome });
+          res.end('{}');
+        };
+        const titles = hooks.sessionTitles;
+        if (!titles?.enabled) {
+          // Drained, not parsed: the answer does not depend on the body.
+          req.resume();
+          done('disabled');
+          return;
+        }
+        let body;
+        try {
+          body = JSON.parse((await readControlBody(req, SESSION_TITLE_BODY_LIMIT)) || '{}');
+        } catch (/** @type {any} */ err) {
+          const tooLarge = err.message === 'body too large';
+          res.writeHead(tooLarge ? 413 : 400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: tooLarge ? 'request body too large' : 'invalid request body' }));
+          return;
+        }
+        const sessionId = body?.session_id;
+        if (typeof sessionId !== 'string' || !SESSION_ID_SHAPE.test(sessionId)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'missing or malformed "session_id"' }));
+          return;
+        }
+        if (typeof body.session_title !== 'string' || !body.session_title.trim()) { done('no-title'); return; }
+        if (!accountManager.sessionTracker.knowsSession(sessionId)) { done('unknown-session'); return; }
+        const kept = titles.push(sessionId, body.session_title);
+        if (kept) console.log(`[TeamClaude] Session ${sessionId.slice(0, 8)} named "${kept}" (pushed by its hook)`);
+        done(kept ? 'stored' : 'unchanged');
+        return;
+      }
+
       // Threshold endpoint — the utilization at which rotation leaves an
       // account, the web equivalent of `teamclaude threshold <1-100>` and of the
       // set_threshold MCP tool. Unlike /switch, which only moves currentIndex in
@@ -1451,6 +1504,11 @@ export function isLocalHostHeader(host, bindHost = null) {
   const bound = typeof bindHost === 'string' ? hostnameOf(bindHost) : null;
   return bound != null && !WILDCARD_BINDS.has(bound) && bound === name;
 }
+
+// The session-title endpoint takes a whole UserPromptSubmit hook input, and
+// that carries the prompt. Above a control body's cap, so a long prompt is not
+// a hook error; a bound all the same.
+const SESSION_TITLE_BODY_LIMIT = 4 * 1024 * 1024;
 
 // Read a control-endpoint body as text. Capped, unlike the proxied request path:
 // these endpoints carry a couple of fields, so anything larger is a mistake or an
@@ -2169,6 +2227,13 @@ export function createProxyRequestListener({ accountManager, upstream, logDir = 
       const effort = parseRequestEffort(body, provider);
       if (effort && !hideActivity) hooks.onRequestModel?.(reqId, { model, effort });
 
+      // Claude Code's session-title request (session-titles.js): its response
+      // is the session's generated name, read on the way back in forwardRequest.
+      // Every other request pays one byte search of its body, and none when
+      // titles are off.
+      const titleSessionId = sessionId && provider === DEFAULT_PROVIDER && hooks.sessionTitles?.enabled && isTitleRequest(body)
+        ? sessionId : null;
+
       // Model blocklist (issue #116): reject a request for a blocked model right
       // here instead of forwarding it. A model no account can serve (e.g. Fable
       // once it left base plans) otherwise gets rate-limited upstream and hangs
@@ -2210,7 +2275,7 @@ export function createProxyRequestListener({ accountManager, upstream, logDir = 
       // stripOverage, synthesizeQuota and poolQuota are sampled once here, at dispatch:
       // retries and holds of this request keep them, and a reload applies to
       // subsequent requests.
-      const ctx = { account: null, callerRequestId: callerId, status: null, attempt: 0, tried: new Set(), reauthed: new Set(), model, advisorModel, streamRequested: parseRequestStream(body), fleetMessageThreads: config?.messageThreads === true, pinnedIndex, pinChain, provider, holdBudgetMs: holdMs, pinKey, onMessage, client, delivered: false, abandoned: false, onUsage: usageRecorder.onUsage, stripHeaders, stripOverage: shouldStripOverageHeaders(config), synthesizeQuota: shouldSynthesizeQuotaHeaders(config), poolQuota: shouldPoolQuotaHeaders(config), logLevel: resolveLogLevel(config), logMaxBodyBytes: resolveLogMaxBodyBytes(config), cacheUsage: /** @type {Record<string, any>|null} */ (null) };
+      const ctx = { account: null, callerRequestId: callerId, status: null, attempt: 0, tried: new Set(), reauthed: new Set(), model, advisorModel, streamRequested: parseRequestStream(body), fleetMessageThreads: config?.messageThreads === true, pinnedIndex, pinChain, provider, holdBudgetMs: holdMs, pinKey, onMessage, client, delivered: false, abandoned: false, onUsage: usageRecorder.onUsage, stripHeaders, stripOverage: shouldStripOverageHeaders(config), synthesizeQuota: shouldSynthesizeQuotaHeaders(config), poolQuota: shouldPoolQuotaHeaders(config), logLevel: resolveLogLevel(config), logMaxBodyBytes: resolveLogMaxBodyBytes(config), cacheUsage: /** @type {Record<string, any>|null} */ (null), titleSessionId };
       // Hold the session "in flight" across the WHOLE request (incl. retries and
       // a multi-minute streaming completion) so it stays counted as active and
       // never expires mid-request.
@@ -4832,19 +4897,23 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
       return;
     }
 
+    // Only the title request's success is read for a title; see the listener.
+    const titleCapture = ctx.titleSessionId && upstreamRes.status >= 200 && upstreamRes.status < 300 ? new TitleCapture() : null;
+
     if (isStreaming) {
       // Stream each chunk straight to the log as it is relayed — never hold the
       // whole (potentially ~1M-token) SSE body in memory.
       const l = getLog();
       const bw = l ? l.bodyWriter('RESPONSE BODY (streamed)', contentType) : null;
       try {
-        await streamResponse(upstreamBody, res, account.index, accountManager, bw, ctx.onUsage, ctx.pinKey, ctx.model, ctx.onMessage, (/** @type {Record<string, any>} */ u) => { ctx.cacheUsage = u; });
+        await streamResponse(upstreamBody, res, account.index, accountManager, bw, ctx.onUsage, ctx.pinKey, ctx.model, ctx.onMessage, (/** @type {Record<string, any>} */ u) => { ctx.cacheUsage = u; }, titleCapture && ((/** @type {string} */ line) => titleCapture.line(line)));
         // Reached only when the stream completed. A stream that dies upstream
         // throws out of streamResponse, so it never marks itself delivered —
         // which is the failure the token counters cannot see, since a stream
         // that emitted message_start has already recorded a usage report.
         if (clientGone(res)) ctx.abandoned = true;
         else ctx.delivered = deliveredStatus;
+        if (titleCapture) keepCapturedTitle(hooks, ctx.titleSessionId, titleCapture.title());
       } finally {
         // Also on the failure path: without the note a capped body reads as a
         // stream that simply stopped, which is the other thing that happens here.
@@ -4858,6 +4927,7 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
       if (l) { l.body('RESPONSE BODY', buf, contentType); l.end(); }
       res.end(buf);
       ctx.delivered = deliveredStatus;
+      if (titleCapture) keepCapturedTitle(hooks, ctx.titleSessionId, TitleCapture.fromBody(buf));
     }
     // An entitlement denial needs more than a 2xx header: a completion, not a
     // side endpoint or a redirect, delivered whole.
@@ -5037,7 +5107,19 @@ export function readWithIdleTimeout(reader, ms) {
  * Stream an SSE response to the client, parsing usage data along the way.
  * `onTotals` is told the usage that was booked, once the stream ends.
  */
-export async function streamResponse(webStream, res, accountIndex, accountManager, bodyWriter, onUsage = null, pinKey = null, model = null, onMessage = null, /** @type {((usage: Record<string, any>) => void)|null} */ onTotals = null) {
+/**
+ * Keep the title read out of a title response, and say so once per change: the
+ * line is how a deploy confirms the capture works.
+ * @param {any} hooks
+ * @param {string} sessionId
+ * @param {string|null} title
+ */
+function keepCapturedTitle(hooks, sessionId, title) {
+  const kept = title ? hooks.sessionTitles?.capture(sessionId, title) : null;
+  if (kept) console.log(`[TeamClaude] Session ${sessionId.slice(0, 8)} titled "${kept}" (from its title request)`);
+}
+
+export async function streamResponse(webStream, res, accountIndex, accountManager, bodyWriter, onUsage = null, pinKey = null, model = null, onMessage = null, /** @type {((usage: Record<string, any>) => void)|null} */ onTotals = null, /** @type {((line: string) => void)|null} */ onLine = null) {
   const reader = webStream.getReader();
   // A client that leaves while upstream is silent must not hold the pending
   // read — and with it the upstream socket and its admission permit — until
@@ -5057,7 +5139,11 @@ export async function streamResponse(webStream, res, accountIndex, accountManage
   // remembers that it did — the incremental counters would book the turn again
   // if a second terminal event arrived. See parseSSEDataLine.
   const responsesTurn = { settled: false };
-  const usage = createSseLineScanner(line => parseSSEDataLine(line, accountIndex, accountManager, onUsage, merged, responsesTurn, onMessage));
+  // `onLine` sees the same lines (the session-title capture); a stream without
+  // one gets the scanner it always had.
+  const usage = createSseLineScanner(onLine
+    ? (/** @type {string} */ line) => { parseSSEDataLine(line, accountIndex, accountManager, onUsage, merged, responsesTurn, onMessage); onLine(line); }
+    : (/** @type {string} */ line) => parseSSEDataLine(line, accountIndex, accountManager, onUsage, merged, responsesTurn, onMessage));
 
   try {
     while (true) {

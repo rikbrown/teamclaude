@@ -5,7 +5,7 @@ import { createInterface } from 'node:readline';
 import { createWriteStream, existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import net from 'node:net';
-import { loadOrCreateConfig, loadConfig, loadConfigPersistingIds, saveConfig, atomicConfigUpdate, getConfigPath, getCrashLogPath, getQuotaSeriesPath, loadState, saveState } from './config.js';
+import { loadOrCreateConfig, loadConfig, loadConfigPersistingIds, saveConfig, atomicConfigUpdate, getConfigPath, getCrashLogPath, getQuotaSeriesPath, getSessionTitlesPath, loadState, saveState } from './config.js';
 import { loadQuotaSeries, saveQuotaSeries } from './quota-series.js';
 import { installCrashHandlers } from './crash-log.js';
 import { AccountManager, distributionMode, accountRouting } from './account-manager.js';
@@ -400,10 +400,13 @@ async function serverCommand() {
     process.exit(1);
   }
   const accountManager = new AccountManager(accounts, threshold, { routes: config.routes, ramp: config.stormRamp, distributeSessions: config.distributeSessions, expiryRouting: config.expiryRouting, preferSoonestWeeklyReset: config.preferSoonestWeeklyReset, advisorEligibility: config.advisorEligibility, adaptive, listener: localListener(config) });
-  // Names the activity log's session column from Claude Code's own on-disk
-  // session titles. Built whether or not the TUI runs, so a reload has one
-  // object to reconfigure.
-  const sessionTitles = new SessionTitles(config.sessionTitles);
+  // Names the activity log's session column: from a client hook's push, from
+  // Claude Code's own on-disk session titles, or from its title request through
+  // this proxy (session-titles.js). Built whether or not the TUI runs, so a
+  // reload has one object to reconfigure and the server one store to fill. The
+  // titles it keeps itself persist beside the state file.
+  const sessionTitles = new SessionTitles({ ...config.sessionTitles, storePath: getSessionTitlesPath() });
+  await sessionTitles.load();
 
   // Restore quota observed in a previous run so a restart doesn't lose rotation
   // state (passive — we never call the API to re-learn it). Stale windows are
@@ -866,6 +869,8 @@ async function serverCommand() {
 
   // Expose reload to the proxy's control endpoint (works with or without TUI).
   hooks.reload = reloadAccounts;
+  // The store the server fills from the title request and the title endpoint.
+  hooks.sessionTitles = sessionTitles;
   hooks.persistAccounts = () => atomicConfigUpdate(mergeAccountsOnto);
 
   // Account controls for the dashboard's POST /teamclaude/{priority,disable}.
@@ -1117,6 +1122,7 @@ async function serverCommand() {
     if (quotaSaveInterval) clearInterval(quotaSaveInterval);
     if (quotaSeriesInterval) clearInterval(quotaSeriesInterval);
     await persistQuotaState();
+    await sessionTitles.flush();
     // Opt-in (proxy.drainTimeoutSeconds): stop taking requests, let the ones in flight
     // finish, and exit when they have or when the window runs out. A second signal
     // still goes straight to exit (the check at the top of shutdown). Without the key

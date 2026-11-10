@@ -396,9 +396,12 @@ export function createAttachSession({ control, config, onQuit, pollMs = DEFAULT_
     accountManager: am,
     config,
     remote: true,
-    // Titles come from this machine's Claude Code sessions. Attaching to a
-    // server on another host leaves the ids unresolved, which shows the short
-    // id rather than a wrong name.
+    // Titles come from this machine's Claude Code sessions on disk. The titles
+    // the server keeps itself (pushed by a hook, read from the title request)
+    // live in the server process, which this view does not reach, so attaching
+    // to a server on another host leaves the ids unresolved and shows the short
+    // id rather than a wrong name. No storePath: the server's titles file is
+    // the server's to write.
     sessionTitles: new SessionTitles(config?.sessionTitles),
     // Every screen that writes config is unreachable in attach mode; if one ever
     // becomes reachable, this fails loudly instead of silently dropping a save.

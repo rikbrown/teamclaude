@@ -309,8 +309,10 @@ With `sessionTitles.enabled` set to `true` on the server, the activity log gets 
 automatically from Claude Code's title request as it passes through the proxy. No client hook is
 needed for these generated names.
 
-A `/rename` name does not reach the server automatically. Add the client `UserPromptSubmit`
-`http` hook from [Pushing `/rename` from another machine](usage.md#pushing-rename-from-another-machine)
+A `/rename` name does not reach the server automatically.
+The [teamclaude-hud plugin](../plugins/teamclaude-hud/README.md#session-names) pushes `/rename <name>` at once, without a settings hook.
+Alternatively, add the client `UserPromptSubmit` `http` hook from
+[Pushing `/rename` from another machine](usage.md#pushing-rename-from-another-machine)
 on each client. It sends the name to `POST /teamclaude/session-title` with the next prompt.
 
 ### What you give up

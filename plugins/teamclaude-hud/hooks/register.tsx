@@ -84,6 +84,23 @@ async function refresh(
   return true
 }
 
+// A best-effort push, separate from quota errors so it never changes the HUD.
+async function pushSessionTitle($: EngineInterface, title: string): Promise<void> {
+  const origin = controlOrigin(
+    await $.env.get('ANTHROPIC_BASE_URL'),
+    (await $.env.get('HTTPS_PROXY')) ?? (await $.env.get('https_proxy')),
+  )
+  if (!origin) {
+    return
+  }
+  const headers = parseHeaders(await $.env.get('ANTHROPIC_CUSTOM_HEADERS'))
+  await $.http.fetch(`${origin}/teamclaude/session-title`, {
+    method: 'POST',
+    headers: { ...headers, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: await $.session.id(), session_title: title }),
+  })
+}
+
 // Closes the pane when it is the one on screen; otherwise opens or raises it.
 async function togglePane($: EngineInterface): Promise<boolean> {
   const panes = await $.ui.panes()
@@ -315,6 +332,19 @@ export const register: Register = on => {
     }
 
     return next(e)
+  })
+
+  on('command.run', { command: 'rename' }, async ($, e, next) => {
+    const result = await next(e)
+    const title = e.args.trim()
+    // No-argument /rename generates a name, but the mod API exposes neither
+    // that title nor the session-storage path to its custom-title.json file.
+    if (title) {
+      // HttpInit has no timeout; never wait for the push or report its failure.
+      void pushSessionTitle($, title).catch(() => {})
+    }
+
+    return result
   })
 
   on('command.run', { command: 'teamclaude' }, async ($, e) => {

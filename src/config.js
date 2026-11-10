@@ -50,6 +50,17 @@ export function getUsageDbPath() {
 }
 
 /**
+ * Path to the session titles the proxy keeps itself (a sibling of the state
+ * file, see session-titles.js): the ones pushed by a client hook and the ones
+ * read out of Claude Code's title request. Its own file, with its own age and
+ * count bounds, like the quota series.
+ */
+export function getSessionTitlesPath() {
+  const cfg = getConfigPath();
+  return cfg.endsWith('.json') ? cfg.replace(/\.json$/, '.session-titles.json') : cfg + '.session-titles';
+}
+
+/**
  * Path to the crash log (a sibling of the config), where a fatal error is
  * recorded before the process exits.
  */

@@ -44,24 +44,86 @@ session. With `sessionTitles.enabled` set, the row is labelled with that session
  ⠋ 17:42:57                     POST /v1/messages?beta=true (claude-opus-5) → claude@rikbrown.co.uk (1.1s...)
 ```
 
-The name comes from Claude Code's own files under `~/.claude/projects`, in this order:
+The first source that has a name wins:
 
-1. `<session-id>/custom-title.json`, written by `/rename`.
-2. A `custom-title` record in the session transcript, which is the only copy for a session renamed before
-   that file existed.
-3. An `ai-title` record, the title Claude Code generates. Most sessions have one without a rename.
+1. **Pushed by a hook.** The session's `/rename` name, sent by an http hook (below). This is the only way a
+   `/rename` reaches a proxy on another machine: the rename itself sends nothing over the network.
+2. **Claude Code's own files** under `~/.claude/projects`, in this order: `<session-id>/custom-title.json`,
+   written by `/rename`; a `custom-title` record in the session transcript, which is the only copy for a
+   session renamed before that file existed; an `ai-title` record, the title Claude Code generates. These
+   exist only on the machine the session runs on.
+3. **Captured from the title request.** Claude Code generates a session's title with one small request on
+   its first prompt, and that request goes through the proxy. The proxy recognises it (its system prompt and
+   its `title` output schema) and reads the title out of the response, so a proxy on another machine names
+   the session too. Every other request pays one byte search of its body for this, and nothing while titles
+   are off. The first capture for a session logs a `Session … titled "…" (from its title request)` line.
 
 A session with none of these keeps the first six hex characters of its id. So does a request that carries no
-session header: a bare SDK or API client reaches the proxy anonymously, and no file names it.
+session header: a bare SDK or API client reaches the proxy anonymously, and nothing names it.
 
 Each label is read once and re-read at most every 30 seconds, off the render path, so a `/rename` reaches the
 log without a restart and no frame waits on the disk. Only a session id shaped like a UUID is looked up, and a
 title is printed with its control characters removed, since both arrive from outside the proxy.
 
-This is off by default: it reads the tail of every visible session's transcript, which is further than the
-proxy reaches for anything else unless asked. Press **g** → **Session titles** to turn the labels on and off
+Pushed and captured titles are kept in `teamclaude.session-titles.json` beside the config and the state
+file, so a restart or a resumed session keeps its name: the title request runs only once per session. An
+entry is dropped 30 days after it was last set, and the file holds at most 2,000 sessions.
+
+This is off by default: it reads the tail of every visible session's transcript and reads titles out of
+request traffic, which is further than the proxy reaches for anything else unless asked. Off stops the
+capture, the push endpoint and the labels. Press **g** → **Session titles** to turn the labels on and off
 while the proxy runs. Set `sessionTitles.width` to change the columns the label gets. See
 [configuration](configuration.md).
+
+#### Pushing `/rename` from another machine
+
+When the proxy runs on another host, the captured title still names each session, but a `/rename` does not
+reach it. Claude Code's `UserPromptSubmit` hook input carries the session's `/rename` name as
+`session_title`, and an `http` hook POSTs that input to the proxy. Add this to `~/.claude/settings.json` on
+the client machine, beside the `ANTHROPIC_BASE_URL` you already set there:
+
+```json
+{
+  "env": {
+    "TEAMCLAUDE_KEY": "tc-…"
+  },
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "http",
+            "url": "http://<host>:3456/teamclaude/session-title",
+            "headers": { "x-api-key": "$TEAMCLAUDE_KEY" },
+            "allowedEnvVars": ["TEAMCLAUDE_KEY"],
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+- **The key.** `TEAMCLAUDE_KEY` holds the same key as your `x-api-key` in `ANTHROPIC_CUSTOM_HEADERS`: the
+  shared `proxy.apiKey` or this machine's `proxy.clientKeys` entry. Claude Code interpolates an environment
+  variable into an http hook header only when `allowedEnvVars` lists it, and never one it treats as a
+  credential: `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY` and `ANTHROPIC_CUSTOM_HEADERS` come through empty.
+  So the key needs a variable of its own. The `env` block above sets it; an exported shell variable works
+  too. An inference-scoped client key is refused, like every control route; a loopback client needs no key.
+- **When it arrives.** The name reaches the proxy with the next prompt after a `/rename`, not at the rename.
+  A title is kept only for a session the proxy has already served, so the first prompt of a new session (sent
+  before its first request) is ignored, and the next one names it. Claude Code does not run http hooks on
+  `SessionStart`, so `UserPromptSubmit` is the only event to use.
+- **The answer.** The endpoint answers `200` with `{}`, which the hook treats as nothing to do, for every
+  well-formed request, including one with no `session_title` (a session never renamed) and while titles are
+  off, so the hook never shows an error. What happened is in the `X-TeamClaude-Session-Title` response
+  header: `stored`, `unchanged`, `no-title`, `unknown-session` or `disabled`. A malformed body or
+  `session_id` gets a `400`.
+- **Private addresses.** Claude Code 2.1.322 has code to block http hooks to private and CGNAT addresses
+  (`10/8`, `172.16/12`, `192.168/16`, `100.64/10`, which covers a LAN or Tailscale host) behind a remote
+  flag that defaults to off; with the flag off it only reports them. If the hook stops arriving, check
+  `claude --debug hooks` first. Loopback is always allowed.
 
 Headless, you can re-sync accounts from the config without a restart by POSTing to the local control endpoint (the equivalent of pressing **R** in the TUI):
 
@@ -80,7 +142,7 @@ It is a setting, not a nudge: the number is written to the config file (under it
 
 You usually don't need to call it directly. `login`, `import`, `enable`, `disable`, `cordon`, `uncordon`, `priority`, `route`, `threshold`, `distribute`, `probe` and `warmup` notify a running server themselves.
 
-Control-plane **writes** (`reload`, `switch`, `session-pin`, `steer`, `threshold`, `priority`, `disable`, `account-cordon`, `account-release`) are refused when the request carries a browser `Origin` or a cross-site `Sec-Fetch-Site`. Loopback is exempt from the proxy API key so the CLI needs no configuration, but that exemption also covers any web page you happen to visit: a page can POST to `127.0.0.1` cross-origin without a preflight, and while it cannot read the reply, the write would still land. `curl` and the CLI send neither header and are unaffected. Reads (`status`) are not restricted — the same-origin policy already stops a page from seeing the response.
+Control-plane **writes** (`reload`, `switch`, `session-pin`, `session-title`, `steer`, `threshold`, `priority`, `disable`, `account-cordon`, `account-release`) are refused when the request carries a browser `Origin` or a cross-site `Sec-Fetch-Site`. Loopback is exempt from the proxy API key so the CLI needs no configuration, but that exemption also covers any web page you happen to visit: a page can POST to `127.0.0.1` cross-origin without a preflight, and while it cannot read the reply, the write would still land. `curl` and the CLI send neither header and are unaffected. Reads (`status`) are not restricted — the same-origin policy already stops a page from seeing the response.
 
 `GET /teamclaude/quota` is the compact read endpoint for status-line integrations. It returns tier-weighted fleet aggregates and the underlying per-account limits; see [Fleet quota endpoint](quota.md#fleet-quota-endpoint).
 
@@ -308,7 +370,7 @@ Re-running `teamclaude service install` rewrites the unit and restarts the proxy
 
 ## Control routes under a second name
 
-Every `/teamclaude/…` route the server exposes — `status`, `quota`, `reload`, `switch`, `session-pin`, `steer`, `disable`, `account-cordon`, `account-release`, `priority`, `threshold`, `probe`, `drain`, `undrain`, `dashboard` and `mcp` — also answers at the same path under `/teamrouter/…`, with the same gates and the same replies. It is the first step of the [rename to TeamRouter](../README.md#renaming-to-teamrouter); scripts and dashboards written against `/teamclaude/…` keep working unchanged.
+Every `/teamclaude/…` route the server exposes — `status`, `quota`, `reload`, `switch`, `session-pin`, `session-title`, `steer`, `disable`, `account-cordon`, `account-release`, `priority`, `threshold`, `probe`, `drain`, `undrain`, `dashboard` and `mcp` — also answers at the same path under `/teamrouter/…`, with the same gates and the same replies. It is the first step of the [rename to TeamRouter](../README.md#renaming-to-teamrouter); scripts and dashboards written against `/teamclaude/…` keep working unchanged.
 
 ## Cordoning one account
 

@@ -9,7 +9,7 @@ does.
 ```
 
 It is a Claude Code **mod**: a plugin of function hooks. Mods are an early-access feature, so a
-Claude Code update can change the API under it. Tested on Claude Code 2.1.287.
+Claude Code update can change the API under it. Tested on Claude Code 2.1.322.
 
 ## Install
 
@@ -62,6 +62,18 @@ borrows one that does nothing outside the diff panel, `app:cycleDiffBase`. Bind 
 While the diff panel is open, that chord cycles the diff base instead, as it would without the
 plugin. With the readout hidden there is no button to press, so the chord does nothing.
 
+## Session names
+
+TeamClaude names sessions from Claude Code's title request on its own when the server has
+`sessionTitles.enabled` set. This plugin also pushes `/rename <name>` to the proxy at once,
+in the background, with the same address and key as the HUD. No settings hook is needed,
+and a failed push never changes or delays the command.
+
+A `/rename` with no arguments is not pushed: the mod API exposes neither the generated name
+nor the session-storage path to `custom-title.json`. Use `/rename <name>` for an immediate
+push, or the [http-hook alternative](../../docs/usage.md#pushing-rename-from-another-machine)
+to send the name with the next prompt.
+
 ## How it finds the proxy
 
 | Your setup | What it reads |
@@ -71,7 +83,7 @@ plugin. With the readout hidden there is no button to press, so the chord does n
 | A proxy key | The `x-api-key` line in `ANTHROPIC_CUSTOM_HEADERS`, as [Remote host](../../docs/remote.md) sets it. Loopback clients need none |
 
 If the address answers but is not TeamClaude (a 404, or a reply that is not a quota summary), the
-mod stops asking and shows nothing. It asks every 5 seconds otherwise.
+quota poll stops and the readout shows nothing. Otherwise it polls every 5 seconds.
 
 ## Developing it
 
@@ -86,7 +98,7 @@ declarations and `tsc -p plugins/teamclaude-hud` type-checks it.
 
 | Path | What it does |
 | --- | --- |
-| `hooks/register.tsx` | The hooks: the poll, the footer readout, the pane, `/teamclaude` |
+| `hooks/register.tsx` | The hooks: the poll, the footer readout, the pane, `/teamclaude`, and the `/rename` push |
 | `hooks/readout.tsx` | The footer readout as a `Client` region, so a click anywhere on it toggles the pane |
 | `hooks/quota.ts` | Reads the quota reply, finds the proxy, and holds the bar maths ported from the TUI (`barColor`, `bar`, `formatReset`, the `weekly-reset` sort). Keep it in step with `src/tui.js` |
 | `types/index.d.ts` | The mod's state contract |

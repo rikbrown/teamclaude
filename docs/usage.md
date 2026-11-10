@@ -46,8 +46,9 @@ session. With `sessionTitles.enabled` set, the row is labelled with that session
 
 The first source that has a name wins:
 
-1. **Pushed by a hook.** The session's `/rename` name, sent by an http hook (below). This is the only way a
-   `/rename` reaches a proxy on another machine: the rename itself sends nothing over the network.
+1. **Pushed by the plugin or an http hook.** The session's `/rename` name, sent by the
+   [teamclaude-hud plugin](../plugins/teamclaude-hud/README.md#session-names) or an http hook (below).
+   A remote proxy needs one of these: the rename itself sends nothing over the network.
 2. **Claude Code's own files** under `~/.claude/projects`, in this order: `<session-id>/custom-title.json`,
    written by `/rename`; a `custom-title` record in the session transcript, which is the only copy for a
    session renamed before that file existed; an `ai-title` record, the title Claude Code generates. These
@@ -78,7 +79,10 @@ while the proxy runs. Set `sessionTitles.width` to change the columns the label 
 #### Pushing `/rename` from another machine
 
 When the proxy runs on another host, the captured title still names each session, but a `/rename` does not
-reach it. Claude Code's `UserPromptSubmit` hook input carries the session's `/rename` name as
+reach it by itself.
+The [teamclaude-hud plugin](../plugins/teamclaude-hud/README.md#session-names) pushes `/rename <name>` at once, without a settings hook.
+
+Alternatively, Claude Code's `UserPromptSubmit` hook input carries the session's `/rename` name as
 `session_title`, and an `http` hook POSTs that input to the proxy. Add this to `~/.claude/settings.json` on
 the client machine, beside the `ANTHROPIC_BASE_URL` you already set there:
 

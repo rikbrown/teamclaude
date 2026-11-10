@@ -1,7 +1,7 @@
 {
   "name": "teamclaude-hud",
   "displayName": "TeamClaude HUD",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "description": "TeamClaude fleet usage at the right of the prompt footer, and per-seat bars in a /teamclaude pane",
   "author": {
     "name": "Rik Brown",

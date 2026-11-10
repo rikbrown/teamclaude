@@ -303,6 +303,16 @@ none of these files, so use the unit's `Environment=` setting.
 There is no user-scope per-machine override. `~/.claude/settings.local.json` is read only inside a
 project, not for the user-level configuration.
 
+### Session names on a remote server
+
+With `sessionTitles.enabled` set to `true` on the server, the activity log gets session names
+automatically from Claude Code's title request as it passes through the proxy. No client hook is
+needed for these generated names.
+
+A `/rename` name does not reach the server automatically. Add the client `UserPromptSubmit`
+`http` hook from [Pushing `/rename` from another machine](usage.md#pushing-rename-from-another-machine)
+on each client. It sends the name to `POST /teamclaude/session-title` with the next prompt.
+
 ### What you give up
 
 `teamclaude run` and `teamclaude env` assume that the proxy is on `localhost`. `run` refuses to

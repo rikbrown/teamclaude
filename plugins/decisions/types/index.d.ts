@@ -33,7 +33,7 @@ export type Reply = {
   // The tool_use_id of the call, or the uuid of the stored row whose text ended a turn: the row a jump reveals.
   mention: string
   at: number
-  // False until the person jumps to it or sends a prompt after it.
+  // False until the person jumps to it, or sends a prompt while it ends the transcript.
   isRead: boolean
 }
 

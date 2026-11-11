@@ -293,6 +293,11 @@ async function jumpToNextReply($: EngineInterface) {
   toast($, await jumpToReply($, reply))
 }
 
+// Opens the pane, which lists the replies. A terminal too narrow for the pane jumps to the oldest unread reply instead.
+async function showReplies($: EngineInterface) {
+  if (!(await openPane($, true))) await jumpToNextReply($)
+}
+
 function toast($: EngineInterface, problem: string | null) {
   if (problem) $.ui.toast(problem)
 }
@@ -306,6 +311,9 @@ export const register: Register = on => {
   let pending: Pending[] = []
   // The question of the person's prompt that started the turn; null for a turn that a notification started.
   let personPrompt: string | null | undefined
+  // The reply that ends the last turn when no row follows it: the one at the bottom of the transcript as the person
+  // types. Their next prompt marks only this reply read. A reload drops it, and the reply stays unread.
+  let replyOnScreen: string | null = null
 
   on('session.start', async ($, e, next) => {
     await $.tool.register({ name: 'decisions', description: DESCRIPTION, inputSchema: INPUT_SCHEMA, isDeferred: false })
@@ -332,9 +340,12 @@ export const register: Register = on => {
   })
 
   // A failed reload keeps the ledger that the pane shows and never stops the prompt.
-  // A prompt from the person marks every reply read: the band then names only answers given after it.
   on('prompt.submit', async ($, e, next) => {
-    if (!e.isMeta) await update($, replies, value => markRead(value))
+    if (!e.isMeta && replyOnScreen !== null) {
+      const id = replyOnScreen
+      replyOnScreen = null
+      await update($, replies, value => markRead(value, id))
+    }
     await load($)
 
     return next(e)
@@ -346,6 +357,7 @@ export const register: Register = on => {
     const content = e.message.content as Row['content']
     const tracked = trackRow(pending, { uuid: e.uuid, door: e.door, content })
     pending = tracked.pending
+    if (e.door === 'response') replyOnScreen = null
     if ((e.door === 'prompt' || e.door === 'delivery') && !e.message.isMeta) personPrompt = promptSummary(content)
     for (const uuid of tracked.narration) {
       await update($, memberOf(isNarration, { requestId: messageKey(uuid) }), () => true)
@@ -371,6 +383,7 @@ export const register: Register = on => {
         return added.replies
       })
       await update($, memberOf(autoReply, { requestId: messageKey(last.uuid) }), () => mark)
+      replyOnScreen = (mark as AutoReplyMark | null)?.id ?? null
     }
 
     return next(e)
@@ -559,15 +572,13 @@ export const register: Register = on => {
           <Button key={`band-${decision.id}`} label={decision.id} plain onPress={() => void show($, decision)} />
         ))}
         {open.length > 0 && unread.length > 0 ? <Text dimColor>·</Text> : null}
-        {unread.length > 0 ? <Text color={REPLY_COLOR}>{MARKS.reply} Unread:</Text> : null}
-        {unread.map(reply => (
-          <Button
-            key={`band-${reply.id}`}
-            label={reply.id}
-            plain
-            onPress={async () => toast($, await jumpToReply($, reply))}
-          />
-        ))}
+        {unread.length > 0 ? (
+          <Button key="band-unread" plain onPress={() => void showReplies($)}>
+            <Text color={REPLY_COLOR}>
+              {MARKS.reply} {unread.length} unread
+            </Text>
+          </Button>
+        ) : null}
       </Box>
     )
   })

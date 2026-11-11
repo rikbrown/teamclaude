@@ -25,8 +25,11 @@ Claude often answers a question and then does several screens of other work, so 
   markdown. Italics and nested formatting show as written.
 - When Claude answers you and more work follows in the same turn, it calls the `reply` tool. The transcript draws that
   answer in the same way, under a short form of your question that Claude writes.
-- The band above the prompt shows `↳ Unread: R2` until you click the ID or send your next prompt. A click jumps to the
-  reply.
+- The band above the prompt shows `↳ 2 unread` while a reply is unread. A click opens the pane, which lists the replies.
+  If the terminal is too narrow for the pane, the click jumps to the oldest unread reply.
+- A reply stays unread until you jump to it. One exception: when a turn ends with a reply and no row follows it, your
+  next prompt marks that reply read, because it was at the bottom of the screen. A later turn, such as one that a
+  finished agent starts, keeps it unread.
 - The pane lists this session's replies under **Replies**. Unread replies are bold. Click a row to jump to the reply and
   to show or hide its text. `/decisions R2` does the same.
 - `ctrl+x r`, or `/next-reply`, jumps to the oldest unread reply. With none unread, it jumps to the newest reply, then

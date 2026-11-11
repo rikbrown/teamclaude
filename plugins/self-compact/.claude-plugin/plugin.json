@@ -1,7 +1,7 @@
 {
   "name": "self-compact",
   "displayName": "Self Compact",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A tool that lets Claude run /compact on its own session, then resume with a prompt it writes",
   "author": {
     "name": "Rik Brown",

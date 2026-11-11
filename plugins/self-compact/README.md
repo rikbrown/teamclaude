@@ -31,8 +31,12 @@ A compaction cannot start while a turn runs, and a tool call always runs inside 
 from a timer callback, outside the hook. The command runs when the turn ends, and the resume prompt follows it as
 a new turn. The tool tells Claude to end its turn at once.
 
+Claude Code can start a queued prompt, such as a background task's notification, as soon as the compaction ends and
+before the resume prompt is sent. So the first prompt after the compaction, of any origin, carries the resume prompt
+as context, and the plugin then sends no separate resume prompt. A slash command does not take it.
+
 ## Limits
 
 - Only the main conversation can use it. A subagent's call is refused.
 - One compaction at a time: a second call before the first runs is refused.
-- If the compaction fails, a toast shows the error and the resume prompt is not sent.
+- If the compaction fails or a hook skips it, the resume prompt is not sent. A failure also shows a toast.

@@ -8,7 +8,7 @@ import { EMPTY_REPLIES, addReply, markRead, nextReply, normaliseReplyId, parseRe
 const REPLY_TOOL = 'mcp__decisions__reply'
 const ROOT = '/tmp/worktree'
 
-function engine(on: On) {
+function engine(on: On, opened: string[] = []) {
   mock.store(on)
   mock.clock(on)
   mock.session(on)
@@ -16,7 +16,11 @@ function engine(on: On) {
   on('session.root', () => ({ value: ROOT }))
   on('tool.register', (_$, e) => ({ value: { tool: `mcp__decisions__${e.name}` } }))
   on('command.register', (_$, e) => ({ value: { command: e.name } }))
-  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.open', (_$, e) => {
+    opened.push(e.id)
+
+    return { value: { isPlaced: true } }
+  })
   on('prompt.submit', (_$, e) => ({ text: e.text }))
   on('turn.complete', (_$, e) => ({ text: e.answer, reason: 'answer' }) as never)
   // The engine's own drawing of a site that the plugin passes on.
@@ -81,18 +85,48 @@ test('markRead marks one reply or all of them', async () => {
   expect(markRead(two).items.every(reply => reply.isRead)).toBe(true)
 })
 
-test('a reply shows in the band until the person sends a prompt', async ($, on) => {
-  engine(on)
+test('a prompt leaves a reply of the reply tool unread; a click on the band opens the pane', async ($, on) => {
+  const opened: string[] = []
+  engine(on, opened)
   await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
   const result = await $.tool.call({ tool: REPLY_TOOL, text: 'Yes, it can.', question: 'Can it?' })
   expect(JSON.stringify(result)).toContain('R1')
 
-  const shown = await $.ui.mount({ ...band, props: bandProps })
-  expect(await shown.find({ key: 'band-R1' })).toBeTruthy()
-
   await $.prompt.submit({ text: 'Thanks', wait: false, origin: { kind: 'composer' } })
-  const after = await $.ui.mount({ ...band, props: bandProps })
-  expect(await after.find({ key: 'band-R1' })).toBeUndefined()
+  const shown = await $.ui.mount({ ...band, props: bandProps })
+  expect(await shown.find({ type: 'Text', text: /1 unread/ })).toBeTruthy()
+
+  await shown.press({ key: 'band-unread' })
+  expect(opened).toEqual(['decisions'])
+})
+
+test('a prompt marks read the reply that ends the transcript, and no other', async ($, on) => {
+  engine(on)
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  const append = appender($)
+  const complete = (turnId: string) =>
+    $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId, reason: 'answer' } as never)
+  const unreadCount = async (count: number) => {
+    const shown = await $.ui.mount({ ...band, props: bandProps })
+
+    return shown.find({ type: 'Text', text: new RegExp(`↳ ${count} unread`) })
+  }
+
+  await append('p1', 'prompt', [{ type: 'text', text: 'First?' }])
+  await append('t1', 'response', [{ type: 'text', text: 'Answer one.' }])
+  await complete('turn-1')
+  await append('n1', 'prompt', [{ type: 'text', text: '<task-notification>' }], true)
+  await append('t2', 'response', [{ type: 'text', text: 'Agent done.' }])
+  await complete('turn-2')
+  await $.prompt.submit({ text: 'Next', wait: false, origin: { kind: 'composer' } })
+  expect(await unreadCount(1)).toBeTruthy()
+
+  await append('p2', 'prompt', [{ type: 'text', text: 'Second?' }])
+  await append('t3', 'response', [{ type: 'text', text: 'Answer two.' }])
+  await complete('turn-3')
+  await $.prompt.submit({ text: 'Thanks', wait: false, origin: { kind: 'composer' } })
+  expect(await unreadCount(1)).toBeTruthy()
+  expect(await unreadCount(2)).toBeUndefined()
 })
 
 test('a subagent cannot reply', async ($, on) => {
@@ -163,7 +197,7 @@ test('text that a tool call follows draws dim; the last text of a turn becomes a
   const answer = await draw('t2', 'The answer.')
   expect(await answer.find({ type: 'Text', text: /R1\s+Question\?/ })).toBeTruthy()
   const shown = await $.ui.mount({ ...band, props: bandProps })
-  expect(await shown.find({ key: 'band-R1' })).toBeTruthy()
+  expect(await shown.find({ key: 'band-unread' })).toBeTruthy()
 })
 
 test('a turn that a notification starts makes no reply', async ($, on) => {

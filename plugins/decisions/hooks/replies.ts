@@ -79,6 +79,16 @@ export const textOf = (content: readonly Block[]) =>
     .join('\n')
     .trim()
 
+// Claude Code delivers these as user rows that are not meta. The person did not write them.
+const HARNESS_TAGS = ['<task-notification>', '<system-reminder>']
+
+// A row that a background task or the harness sends, such as a finished agent's notification.
+export function isHarnessMessage(content: readonly Block[]): boolean {
+  const text = textOf(content)
+
+  return HARNESS_TAGS.some(tag => text.startsWith(tag))
+}
+
 // The person's prompt in one line, as the question of the reply that ends its turn.
 export function promptSummary(content: readonly Block[]): string | null {
   const line = textOf(content)

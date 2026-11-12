@@ -11,6 +11,7 @@ import {
   parseReply,
   drawnMessageId,
   messageKey,
+  isHarnessMessage,
   promptSummary,
   replyTitle,
   trackRow,
@@ -309,7 +310,8 @@ export const register: Register = on => {
   // The main thread's turn, which a reload drops: its text then stays bright and its last text makes no reply.
   // The text blocks that no tool call follows yet.
   let pending: Pending[] = []
-  // The question of the person's prompt that started the turn; null for a turn that a notification started.
+  // The question of the person's prompt that started the turn: null for a prompt with no text, undefined for a turn
+  // that a notification started.
   let personPrompt: string | null | undefined
   // The reply that ends the last turn when no row follows it: the one at the bottom of the transcript as the person
   // types. Their next prompt marks only this reply read. A reload drops it, and the reply stays unread.
@@ -358,7 +360,8 @@ export const register: Register = on => {
     const tracked = trackRow(pending, { uuid: e.uuid, door: e.door, content })
     pending = tracked.pending
     if (e.door === 'response') replyOnScreen = null
-    if ((e.door === 'prompt' || e.door === 'delivery') && !e.message.isMeta) personPrompt = promptSummary(content)
+    const isPersonPrompt = (e.door === 'prompt' || e.door === 'delivery') && !e.message.isMeta && !isHarnessMessage(content)
+    if (isPersonPrompt) personPrompt = promptSummary(content)
     for (const uuid of tracked.narration) {
       await update($, memberOf(isNarration, { requestId: messageKey(uuid) }), () => true)
     }

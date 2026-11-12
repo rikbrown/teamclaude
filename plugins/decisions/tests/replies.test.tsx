@@ -33,14 +33,14 @@ function engine(on: On, opened: string[] = []) {
 
 const appender =
   ($: Engine) =>
-  (uuid: string, door: 'prompt' | 'response', content: unknown[], isMeta = false) =>
+  (uuid: string, door: 'prompt' | 'delivery' | 'response', content: unknown[], isMeta = false) =>
     $.session.append({
       uuid,
       door,
-      origin: door === 'prompt' ? { kind: 'composer' } : { kind: 'model', model: 'test' },
+      origin: door === 'response' ? { kind: 'model', model: 'test' } : { kind: 'composer' },
       message: {
-        type: door === 'prompt' ? 'user' : 'assistant',
-        role: door === 'prompt' ? 'user' : 'assistant',
+        type: door === 'response' ? 'assistant' : 'user',
+        role: door === 'response' ? 'assistant' : 'user',
         ...(isMeta ? { isMeta: true } : {}),
         content,
       },
@@ -224,6 +224,38 @@ test('a turn that a notification starts makes no reply', async ($, on) => {
     props: { title: 'Decisions', isFocused: false, bodyColumns: 60, placement: 'dock' } as unknown as RenderPropsOf['Pane'],
   })
   expect(await pane.find({ key: 'row-R1' })).toBeTruthy()
+  expect(await pane.find({ key: 'row-R2' })).toBeUndefined()
+})
+
+test('a harness message that Claude Code delivers as a user row makes no reply and keeps the question', async ($, on) => {
+  engine(on)
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  const append = appender($)
+  const complete = (turnId: string) =>
+    $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId, reason: 'answer' } as never)
+
+  await append('n1', 'delivery', [{ type: 'text', text: '<task-notification>\n<task-id>a1</task-id>' }])
+  await append('t1', 'response', [{ type: 'text', text: 'Agent done.' }])
+  await complete('turn-1')
+  await append('n2', 'prompt', [{ type: 'text', text: '<system-reminder>\nA reminder.' }])
+  await append('t2', 'response', [{ type: 'text', text: 'Noted.' }])
+  await complete('turn-2')
+
+  await append('p1', 'prompt', [{ type: 'text', text: 'Question?' }])
+  await append('u1', 'response', [{ type: 'tool_use', id: 'call-1', name: 'Bash', input: {} }])
+  await append('n3', 'delivery', [{ type: 'text', text: '<task-notification>' }])
+  await append('t3', 'response', [{ type: 'text', text: 'The answer.' }])
+  await complete('turn-3')
+
+  const pane = await $.ui.mount({
+    plugin: 'decisions',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'decisions',
+    props: { title: 'Decisions', isFocused: false, bodyColumns: 60, placement: 'dock' } as unknown as RenderPropsOf['Pane'],
+  })
+  expect(await pane.find({ key: 'row-R1' })).toBeTruthy()
+  expect(await pane.find({ type: 'Text', text: /Question\?/ })).toBeTruthy()
   expect(await pane.find({ key: 'row-R2' })).toBeUndefined()
 })
 

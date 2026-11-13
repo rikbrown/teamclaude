@@ -190,6 +190,7 @@ curl -X POST http://localhost:3456/teamclaude/account-cordon \
 | `t` | [Steer](routing.md#steer-new-conversations-to-one-account) new conversations to an account: `←`/`→` choose how long (until the wall, 1h, 6h, 24h), `r` redeems its banked reset at the weekly wall (on a Claude or Codex subscription row), `Enter` on the steered account clears it. Running conversations keep their accounts. Also in attach mode |
 | `d` | Enable/disable an account |
 | `l` | Sign an account in again (opens on the first account in `error`; not in attach mode). A panel shows the sign-in link, clickable and copied to the clipboard, and takes the pasted answer back, so it works over SSH — see [Signing in again from the TUI](accounts.md#signing-in-again-from-the-tui) |
+| `r` | Choose an OAuth Claude or Codex account, then read and spend a [banked reset](accounts.md#reading-and-spending-a-reset-by-hand). Starts on the first account holding one; local TUI only |
 | `p` | Refresh quota on all accounts (one-shot probe of the zero-spend usage endpoint) |
 | `R` | Reload accounts from config |
 | `f` | Fleet view — cycles the pooled aggregate between **split** (beside the rows, the default), **full** (instead of the rows) and **off** |
@@ -197,6 +198,8 @@ curl -X POST http://localhost:3456/teamclaude/account-cordon \
 | `q` | Quit |
 
 In selection mode, use `j`/`k` or the arrow keys to navigate, `Enter` to confirm, `Esc` to cancel.
+
+In the Resets panel, `↑`/`↓` or `j`/`k` choose a grant, `Enter` shows the spend confirmation and warnings, and `y`/`Y` spends it. Any other key cancels the confirmation. Blocked grants cannot be spent; warnings do not block a manual spend. `r` reads fresh details; `Esc`/`q` closes the panel. Spending cannot be undone or cancelled once it starts.
 
 ### Fleet view
 
@@ -241,7 +244,7 @@ The `·` tail inside each bar is that bucket's soonest reset across the counted 
 
 The split needs a terminal wide enough for both — about a hundred columns, and more for a fleet drawing Sonnet and Fable bars. The exact width is worked out from what the two sides need rather than fixed, so the panel never appears at the cost of a bar the account rows would otherwise draw. A narrower terminal shows the rows alone, and `full` is how you read the aggregates there.
 
-Starting a selection (`s`, `d`) from `full` brings the rows back for as long as it is open, since the account table is the selection UI.
+Starting a selection (`s`, `t`, `d`, `l`, `r`) from `full` brings the rows back for as long as it is open, since the account table is the selection UI.
 
 The view works when [attached](remote.md) to a server elsewhere, and the sidecar readout stays under the account rows either way.
 
@@ -484,7 +487,7 @@ Two routes are served:
 - `GET /v0/management/auth-files` lists the Claude and Codex subscription accounts as `{ "observed_at", "files": [{ id, auth_index, name, provider, email, status, disabled }] }`, in the fleet's own order. `auth_index` is the account's config entry id, and `status` is `error` for an account whose login was rejected. API-key and third-party backend accounts have no subscription usage and are not listed. CLIProxyAPI's query parameters work as they do there: `name` (an id or a name) and `auth_index` narrow the list, and `page` / `page_size` (default 50) page it, adding `total`, `page`, `page_size` and `has_more`; a paging value that is not a positive whole number is a 400.
 - `POST /v0/management/api-call` with `{ "auth_index", "method": "GET", "url" }` answers two URLs: `https://api.anthropic.com/api/oauth/usage` for a Claude account and `https://chatgpt.com/backend-api/wham/usage` for a Codex one. The reply is CLIProxyAPI's envelope, `{ "status_code": 200, "header": {…}, "body": "<json>" }`, with the body in the provider's own shape: `five_hour`, `seven_day` and `weekly_scoped` limits on a 0–100 scale with ISO-8601 reset times for Claude, `rate_limit.primary_window` / `secondary_window` with `used_percent` and epoch-second `reset_at` for Codex.
 
-Unlike CLIProxyAPI, `api-call` relays nothing. The answer is built from the quota the server already tracks; no request goes upstream, no credential is read, and the request's `header` and `data` (including any `$TOKEN$` placeholder) are ignored. Any other URL or method is refused with 403. Codex reset credits are not offered: their list and consume URLs, and `POST /v0/management/reset-quota`, answer 501, because spending a credit is irreversible. Use **r** on the account in the local TUI for a manual spend, or the server's own [`autoRedeemResets`](quota.md) policy for automatic spending.
+Unlike CLIProxyAPI, `api-call` relays nothing. The answer is built from the quota the server already tracks; no request goes upstream, no credential is read, and the request's `header` and `data` (including any `$TOKEN$` placeholder) are ignored. Any other URL or method is refused with 403. Codex reset credits are not offered: their list and consume URLs, and `POST /v0/management/reset-quota`, answer 501, because spending a credit is irreversible. Press **r** on the local TUI main screen, then choose the account for a manual spend, or use the server's own [`autoRedeemResets`](quota.md) policy for automatic spending.
 
 The readings are as fresh as the server's: an account in use is read off every response, an idle one only by the [quota probe](quota.md#quota-probe), which is off by default. Turn the probe on for current numbers on idle accounts. Three cases are reported the way the provider would report them, so a dashboard can tell them apart:
 

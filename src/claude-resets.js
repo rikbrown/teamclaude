@@ -29,6 +29,7 @@ import { randomUUID } from 'node:crypto';
 import { USAGE_URL, OAUTH_USAGE_BETA, USAGE_USER_AGENT, normalizeUsagePayload, isFableReset } from './oauth.js';
 import { providerOf, DEFAULT_PROVIDER } from './provider.js';
 import { safeLine } from './safe-text.js';
+import { rememberResetReading, resetRetryAt } from './reset-readings.js';
 import { proxyFetch } from './upstream-fetch.js';
 
 export const CLAUDE_RESET_PROGRAM = 'cedar_ember';
@@ -152,7 +153,7 @@ export async function fetchClaudeResetStatus(account, { fetchImpl = proxyFetch, 
   if (!account?.credential) return { error: 'no credential' };
   try {
     const res = await fetchImpl(USAGE_URL, { headers: headers(account), signal: AbortSignal.timeout(timeoutMs), routing: account.routing ?? null });
-    if (!res.ok) return { error: `HTTP ${res.status}`, status: res.status };
+    if (!res.ok) return { error: `HTTP ${res.status}`, status: res.status, retryAt: resetRetryAt(res) };
     const data = await res.json();
     return { reset: parseResetStatus(data?.cedar_ember), usage: normalizeUsagePayload(data) };
   } catch (/** @type {any} */ err) {
@@ -267,6 +268,19 @@ export class ClaudeResetRedeemer {
     const held = account.quota.claudeResetHoldUntil;
     if (!Number.isFinite(held) || until >= held) this.fleetHoldStartedAt = this.now();
     account.quota.claudeResetHoldUntil = Number.isFinite(held) ? Math.max(held, until) : until;
+  }
+
+  /** Every status read, including auto-redeem and post-claim quota reapply.
+   * @param {Record<string, any>} account
+   * @param {{ timeoutMs?: number }} [opts]
+   */
+  async readStatus(account, opts = {}) {
+    let read;
+    try { read = await this.statusFn(account, opts); } catch (/** @type {any} */ error) {
+      read = { error: error?.message || String(error) };
+    }
+    rememberResetReading(account, 'claude', read, this.now());
+    return read;
   }
 
   /** @param {object} account */
@@ -408,7 +422,7 @@ export class ClaudeResetRedeemer {
       return { ...later(`token refresh failed (${safeLine(err?.message || String(err), 80)})`), retryAt: now + DECLINED_COOLDOWN_MS };
     }
     const left = () => Math.max(1, deadline - this.now());
-    const read = await this.statusFn(account, { timeoutMs: left() });
+    const read = await this.readStatus(account, { timeoutMs: left() });
     if (read?.error) {
       state.cooldownUntil = now + DECLINED_COOLDOWN_MS;
       return later(`could not read reset status (${read.error})`);
@@ -534,7 +548,7 @@ export class ClaudeResetRedeemer {
   async _reapply(account, deadline) {
     try { this.am.clearRateLimited(account.index); } catch { /* not held */ }
     try { this.am.clearUpstreamRejected(account.index); } catch { /* not rejected */ }
-    const read = await this.statusFn(account, { timeoutMs: Math.max(1, deadline - this.now()) });
+    const read = await this.readStatus(account, { timeoutMs: Math.max(1, deadline - this.now()) });
     if (read?.usage && !read.usage.error) this.am.applyUsageData(account.index, read.usage);
   }
 }

@@ -41,6 +41,7 @@ import { Prober, probeApplicable } from './prober.js';
 import { CreditMonitor } from './api-credit.js';
 import { ResetCreditRedeemer } from './codex-reset-credits.js';
 import { ClaudeResetRedeemer } from './claude-resets.js';
+import { createResetActions } from './reset-actions.js';
 import { Warmer, warmApplicable } from './warmer.js';
 import { formatWarmupScheduleConfirmation, resolveWarmupConfig } from './warmup-schedule.js';
 import { Sidecar, SIDECAR_DRAIN_GRACE_MS, SIDECAR_SHUTDOWN_GRACE_MS } from './sidecar.js';
@@ -838,6 +839,10 @@ async function serverCommand() {
     clearAddedAccountIds(config);
   };
 
+  const redeemer = new ResetCreditRedeemer(accountManager, { config });
+  const claudeRedeemer = new ClaudeResetRedeemer(accountManager, { config });
+  const resetActions = createResetActions({ accountManager, claudeRedeemer, codexRedeemer: redeemer });
+
   let tui = null;
   // A bag of optional callbacks the application installs on a shared object the
   // server, the MITM listener and the control endpoints all read through.
@@ -846,7 +851,7 @@ async function serverCommand() {
 
   if (useTUI) {
     tui = new TUI({
-      accountManager, config, sx, activityLogPath, sessionTitles, versionLabel, updateAvailable,
+      accountManager, config, sx, activityLogPath, sessionTitles, versionLabel, updateAvailable, resetActions,
       saveConfig: () => atomicConfigUpdate(async diskConfig => {
         mergeAccountsOnto(diskConfig);
         // Persist sx.org settings (set/cleared from the TUI settings screen).
@@ -1024,9 +1029,7 @@ async function serverCommand() {
   // is not about redemption) simply refuses as before. The shared config, so the
   // fleet switch (`autoRedeemResets`) is read live — a TUI toggle or a reload
   // binds on the next refusal, not the next restart.
-  const redeemer = new ResetCreditRedeemer(accountManager, { config });
-  // Banked Claude usage-limit resets, armed by the same switch (autoRedeemResets).
-  const claudeRedeemer = new ClaudeResetRedeemer(accountManager, { config });
+  // Banked Claude usage-limit resets are armed by the same switch.
   hooks.redeemClaudeResetForPool = (/** @type {Record<string, any>[]} */ accounts) => claudeRedeemer.maybeRedeemForPool(accounts);
   hooks.redeemCodexResetForPool = (/** @type {Record<string, any>[]} */ accounts) => redeemer.maybeRedeemForPool(accounts);
   // And a `steer --redeem`, once its target has spent its week: the same two

@@ -463,6 +463,7 @@ export function createAttachSession({ control, config, onQuit, pollMs = DEFAULT_
     accountManager: am,
     config,
     remote: true,
+    resetActions: null,
     // Titles come from this machine's Claude Code sessions on disk. The titles
     // the server keeps itself (pushed by a hook, read from the title request)
     // live in the server process, which this view does not reach, so attaching

@@ -5160,7 +5160,7 @@ export class TUI {
         const fleet = `${bold('f')}leet`;
         return this.remote
           ? ` ${bold('s')}witch  s${bold('t')}eer  ${bold('R')}eload  ${fleet}  ${bold('q')}uit`
-          : ` ${bold('s')}witch  s${bold('t')}eer  ${bold('d')}isable  ${this.loginAccount ? `${bold('l')}ogin  ` : ''}${this.resetActions && this.am.accounts.length > 0 ? `${bold('r')} resets  ` : ''}${bold('p')}robe quota  ${bold('R')}eload  ${fleet}${this.onRestart ? `  ${bold('u')}pdate` : ''}  ${bold('g')} settings  ${bold('q')}uit`;
+          : ` ${bold('s')}witch  s${bold('t')}eer  ${bold('d')}isable  ${this.loginAccount ? `${bold('l')}ogin  ` : ''}${this.resetActions && this.am.accounts.length > 0 ? `${bold('r')}esets  ` : ''}${bold('p')}robe quota  ${bold('R')}eload  ${fleet}${this.onRestart ? `  ${bold('u')}pdate` : ''}  ${bold('g')} settings  ${bold('q')}uit`;
       }
       case 'settings':
         return ` ${dim('↑↓')} navigate  ${dim('←→')} change  ${bold('Enter')} edit  ${bold('Esc')} back`;

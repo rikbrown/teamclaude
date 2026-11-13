@@ -521,15 +521,15 @@ test('resets: a Codex credit with no total or expiry is selectable on a short sc
 test('resets: r and its footer hint are available only locally with actions and accounts', () => {
   const local = makeTUI({ resetActions: actions() });
   local.loginAccount = async () => ({});
-  assert.match(stripAnsi(local._renderFooter()), /r resets/);
-  assert.match(stripAnsi(frame(local, { columns: 80 }).at(-1)), /r resets/);
+  assert.match(stripAnsi(local._renderFooter()), / resets /);
+  assert.match(stripAnsi(frame(local, { columns: 80 }).at(-1)), / resets /);
   // The fork also offers steer and fleet controls; its full hint list needs more room.
-  assert.match(stripAnsi(frame(local, { columns: 120 }).at(-1)), /steer.*r resets.*fleet.*quit/);
+  assert.match(stripAnsi(frame(local, { columns: 120 }).at(-1)), /steer.* resets .*fleet.*quit/);
   for (const options of [{}, { resetActions: actions(), remote: true }, { resetActions: actions(), accounts: [] }]) {
     const tui = makeTUI(options);
     tui._key('r');
     assert.equal(tui.mode, 'normal');
-    assert.doesNotMatch(stripAnsi(tui._renderFooter()), /r resets/);
+    assert.doesNotMatch(stripAnsi(tui._renderFooter()), / resets /);
   }
 });
 

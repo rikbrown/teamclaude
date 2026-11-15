@@ -1,6 +1,7 @@
 import type { Register } from 'claude-code'
 
 const TOOL = 'compact'
+const PLUGIN = 'self-compact'
 
 const optionalText = (value: unknown) =>
   typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined
@@ -9,15 +10,19 @@ const resumeContext = (resume: string) =>
   `The self-compact plugin compacted this conversation at your request. Your resume prompt follows. Do it after you ` +
   `deal with the message above:\n\n${resume}`
 
-type Pending = {
+type Compaction = {
   resume: string | undefined
-  // Set once the compaction is installed. From then on, the first prompt of the session takes the resume.
   isCompacted: boolean
   isResumeDelivered: boolean
 }
 
 export const register: Register = on => {
-  let pending: Pending | undefined
+  // From the tool call until `/compact` ends: a second call is refused.
+  let queued: Compaction | undefined
+  // From the compaction until a prompt takes the resume.
+  let resumeDue: Compaction | undefined
+  // Resume prompts that this plugin queued and that have not started.
+  const resumePrompts: Compaction[] = []
 
   on('session.start', async ($, e, next) => {
     await $.tool.register({
@@ -41,43 +46,64 @@ export const register: Register = on => {
 
   on('session.compact', async ($, e, next) => {
     const result = await next(e)
-    if (e.agentId === undefined && e.trigger !== 'precompute' && result.messages !== undefined && pending) {
-      pending.isCompacted = true
+    if (e.agentId === undefined && e.trigger !== 'precompute' && result.messages !== undefined && queued) {
+      queued.isCompacted = true
+      if (queued.resume !== undefined) resumeDue = queued
     }
     return result
   })
 
-  // The engine starts a queued task notification as soon as the compaction ends, before `$.command.run` resolves
-  // here. So the first prompt after the compaction, of any origin, carries the resume.
+  // `$.command.run` resolves when the compaction ends, before the prompts that queued during it start. The resume
+  // prompt then queues behind them and starts only when the session is idle. So the first prompt to start after the
+  // compaction takes the resume, and the resume prompt is dropped if it starts later.
   on('prompt.submit', ($, e, next) => {
-    if (!pending?.isCompacted || pending.resume === undefined || pending.isResumeDelivered || e.command) return next(e)
-    pending.isResumeDelivered = true
-    if (e.origin.kind === 'plugin' && e.text === pending.resume) return next(e)
-    return next({ ...e, context: [...(e.context ?? []), resumeContext(pending.resume)] })
+    if (e.command) return next(e)
+    const index =
+      e.origin.kind === 'plugin' && e.origin.name === PLUGIN
+        ? resumePrompts.findIndex(compaction => compaction.resume === e.text)
+        : -1
+    if (index !== -1) {
+      const [compaction] = resumePrompts.splice(index, 1)
+      if (compaction?.isResumeDelivered) return { drop: 'self-compact: an earlier prompt took the resume.' }
+      if (compaction) compaction.isResumeDelivered = true
+      if (resumeDue === compaction) resumeDue = undefined
+      return next(e)
+    }
+    const compaction = resumeDue
+    if (compaction?.resume === undefined || compaction.isResumeDelivered) return next(e)
+    compaction.isResumeDelivered = true
+    resumeDue = undefined
+    return next({ ...e, context: [...(e.context ?? []), resumeContext(compaction.resume)] })
   })
 
   on('tool.call', { tool: 'mcp__self-compact__compact' }, ($, e) => {
     if (e.agentId !== undefined) return { deny: 'Only the main conversation can compact itself.' }
-    if (pending) return { deny: 'A compaction is already queued for the end of this turn.' }
+    if (queued) return { deny: 'A compaction is already queued for the end of this turn.' }
 
     const instructions = optionalText(e.instructions)
     const resume = optionalText(e.resume)
-    const queued: Pending = { resume, isCompacted: false, isResumeDelivered: false }
-    pending = queued
+    const compaction: Compaction = { resume, isCompacted: false, isResumeDelivered: false }
+    queued = compaction
 
     // `$.command.run` rejects inside a hook the turn waits on; a timer callback runs outside it, and the command
     // queues until the session is idle.
     $.clock.after(0, () => {
       void (async () => {
         try {
-          await $.command.run({ command: 'compact', args: instructions ?? '' })
-          if (resume !== undefined && queued.isCompacted && !queued.isResumeDelivered) {
-            await $.prompt.submit({ text: resume })
+          try {
+            await $.command.run({ command: 'compact', args: instructions ?? '' })
+          } finally {
+            queued = undefined
           }
+          if (resume === undefined || !compaction.isCompacted || compaction.isResumeDelivered) return
+          resumePrompts.push(compaction)
+          await $.prompt.submit({ text: resume })
         } catch (error) {
           $.ui.toast(`self-compact: ${error instanceof Error ? error.message : String(error)}`)
         } finally {
-          pending = undefined
+          const index = resumePrompts.indexOf(compaction)
+          if (index !== -1) resumePrompts.splice(index, 1)
+          if (resumeDue === compaction) resumeDue = undefined
         }
       })()
     })

@@ -52,6 +52,58 @@ test('a prompt that starts first after the compaction carries the resume, and no
   expect(prompts[0]?.context?.at(-1)).toMatch(/Continue with step 3\.$/)
 })
 
+test('a resume prompt that starts after another prompt took the resume is dropped', async ($, on) => {
+  const clock = mock.clock(on)
+  const prompts: { text: string; context: readonly string[] | undefined }[] = []
+  const dropped: string[] = []
+  on('session.compact', () => ({ messages: summary }))
+  on('command.run', async () => {
+    await compactNow($)
+    return { text: 'compacted' }
+  })
+  // The engine runs the plugin's hooks on its resume prompt when the prompt starts, not when the timer queues it,
+  // and a prompt that queued during the compaction starts first. The replay stands for that start.
+  let isQueueAhead = true
+  on('prompt.submit', async (_, e) => {
+    if (e.origin.kind === 'plugin' && isQueueAhead) {
+      isQueueAhead = false
+      await notify($, 'Monitor event: PR checks passed.')
+      const replay = await $.prompt.submit({ text: e.text, origin: e.origin, wait: false } as never)
+      if (replay.drop !== undefined) dropped.push(replay.drop)
+      return replay
+    }
+    prompts.push({ text: e.text, context: e.context })
+    return { text: e.text, context: e.context }
+  })
+
+  await $.tool.call({ tool: TOOL, resume: 'Continue with step 3.' })
+  await clock.advance(0)
+
+  expect(prompts.map(p => p.text)).toEqual(['Monitor event: PR checks passed.'])
+  expect(prompts[0]?.context?.at(-1)).toMatch(/Continue with step 3\.$/)
+  expect(dropped).toHaveLength(1)
+})
+
+test('the tool takes a new call while the resume prompt waits for the session to go idle', async ($, on) => {
+  const clock = mock.clock(on)
+  let release: (() => void) | undefined
+  on('session.compact', () => ({ messages: summary }))
+  on('command.run', async () => {
+    await compactNow($)
+    return { text: 'compacted' }
+  })
+  on('prompt.submit', async (_, e) => {
+    await new Promise<void>(resolve => (release = resolve))
+    return { text: e.text }
+  })
+
+  await $.tool.call({ tool: TOOL, resume: 'Continue with step 3.' })
+  await clock.advance(0)
+  expect(release).toBeDefined()
+  expect((await $.tool.call({ tool: TOOL })).deny).toBeUndefined()
+  release?.()
+})
+
 test('a prompt before the compaction ends gets no resume', async ($, on) => {
   const clock = mock.clock(on)
   const prompts: { text: string; context: readonly string[] | undefined }[] = []

@@ -20,9 +20,16 @@ From the `rikclaude-agents` plugin. Its agents are namespaced, so a dispatch alw
   or to a shared package's exports, or a result that needs judgement, such as model text checked by
   evals. Fable does not code. `rikclaude-agents:sonnet-high` writes throwaway code that is not
   committed. If a bug in it can reach a user, it goes to `rikclaude-agents:opus-medium`.
-- Architectural and full-branch reviews are a tag-team. Dispatch `rikclaude-agents:gpt-6-astra-medium`
-  together with `rikclaude-agents:fable-high` (`rikclaude-agents:fable-xhigh` for the hardest) in
-  one message. Never dispatch Astra alone. They bring different opinions; merge their findings.
+- Code review (a PR, a branch, a commit, a diff, a fix-round delta): `rikclaude-agents:opus-high`.
+  For the riskiest changes, dispatch `rikclaude-agents:gpt-6-astra-medium` together with it in one
+  message, and merge their findings.
+- Design, plan and architecture review, before code exists, is a tag-team. Dispatch
+  `rikclaude-agents:gpt-6-astra-medium` together with `rikclaude-agents:fable-high`
+  (`rikclaude-agents:fable-xhigh` for the hardest) in one message. They bring different opinions;
+  merge their findings.
+- Fable does not code and does not review code. Never dispatch Astra alone: only with
+  `rikclaude-agents:opus-high` (code) or a Fable agent (design). An agent that wrote the code does
+  not review it.
 - Release QA and browser checks of a change: `rikclaude-agents:opus-high`.
 - Research: `rikclaude-agents:opus-medium` by default. Use `rikclaude-agents:opus-high` when it
   must reason through how code behaves, and `rikclaude-agents:opus-xhigh` or a

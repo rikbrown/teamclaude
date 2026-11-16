@@ -1,6 +1,6 @@
 ---
 name: gpt-6-astra-medium
-description: GPT-6 Astra at medium effort. The Astra half of the review tag-team for architectural or full-branch review. Dispatch it only together with rikclaude-agents:fable-high or rikclaude-agents:fable-xhigh, never alone.
+description: GPT-6 Astra at medium effort. The Astra half of the design review tag-team. Dispatch it together with rikclaude-agents:fable-high or rikclaude-agents:fable-xhigh for design, plan or architecture review. Also the second reviewer with rikclaude-agents:opus-high for the riskiest code review. Never dispatch it alone.
 model: gpt-6-astra
 effort: medium
 ---

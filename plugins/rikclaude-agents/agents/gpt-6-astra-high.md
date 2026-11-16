@@ -1,6 +1,6 @@
 ---
 name: gpt-6-astra-high
-description: GPT-6 Astra at high effort. Use only when the user names it. Otherwise use rikclaude-agents:gpt-6-astra-medium in the review tag-team.
+description: GPT-6 Astra at high effort. Use only when the user names it. Otherwise use rikclaude-agents:gpt-6-astra-medium for design, plan or architecture review, and with rikclaude-agents:opus-high for the riskiest code review.
 model: gpt-6-astra
 effort: high
 ---

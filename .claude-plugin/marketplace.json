@@ -37,7 +37,7 @@
     {
       "name": "self-compact",
       "source": "./plugins/self-compact",
-      "description": "A tool that lets Claude run /compact on its own session, then resume with a prompt it writes.",
+      "description": "A tool that lets Claude run /compact on its own session, then resume with a prompt it writes, and a reminder to use it when the context is large.",
       "category": "productivity",
       "keywords": ["compact", "context", "tool", "mod"]
     },

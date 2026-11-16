@@ -1,7 +1,12 @@
-import type { Register } from 'claude-code'
+import type { EngineInterface, Register } from 'claude-code'
 
 const TOOL = 'compact'
 const PLUGIN = 'self-compact'
+
+const CONTEXT_NUDGE_TOKENS = 250_000
+const CONTEXT_NUDGE_STEP_TOKENS = 20_000
+// The `CLAUDE_CODE_AUTO_COMPACT_WINDOW` that the line names. The plugin does not read the variable.
+const AUTO_COMPACT_TOKENS = 300_000
 
 const optionalText = (value: unknown) =>
   typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined
@@ -9,6 +14,20 @@ const optionalText = (value: unknown) =>
 const resumeContext = (resume: string) =>
   `The self-compact plugin compacted this conversation at your request. Your resume prompt follows. Do it after you ` +
   `deal with the message above:\n\n${resume}`
+
+const contextNudge = (tokens: number) =>
+  `From the self-compact plugin: context is about ${Math.round(tokens / 1000)}k tokens. Auto-compaction runs at ` +
+  `${AUTO_COMPACT_TOKENS / 1000}k. At the next quiet point, call the self-compact \`compact\` tool with ` +
+  `\`instructions\` and a \`resume\` prompt. Do not stop in the middle of a step.`
+
+// The status line's figure: the input tokens of the main conversation's last response; absent before one.
+async function mainContextTokens($: EngineInterface) {
+  try {
+    return (await $.session.usage()).context.tokens
+  } catch {
+    return undefined
+  }
+}
 
 type Compaction = {
   resume: string | undefined
@@ -23,6 +42,19 @@ export const register: Register = on => {
   let resumeDue: Compaction | undefined
   // Resume prompts that this plugin queued and that have not started.
   const resumePrompts: Compaction[] = []
+  // The context size at the last nudge, until the context drops below the threshold or compacts.
+  let nudgedAtTokens: number | undefined
+
+  const takeContextNudge = (tokens: number | undefined) => {
+    if (queued) return undefined
+    if (tokens === undefined || tokens < CONTEXT_NUDGE_TOKENS) {
+      nudgedAtTokens = undefined
+      return undefined
+    }
+    if (nudgedAtTokens !== undefined && tokens < nudgedAtTokens + CONTEXT_NUDGE_STEP_TOKENS) return undefined
+    nudgedAtTokens = tokens
+    return contextNudge(tokens)
+  }
 
   on('session.start', async ($, e, next) => {
     await $.tool.register({
@@ -46,9 +78,12 @@ export const register: Register = on => {
 
   on('session.compact', async ($, e, next) => {
     const result = await next(e)
-    if (e.agentId === undefined && e.trigger !== 'precompute' && result.messages !== undefined && queued) {
-      queued.isCompacted = true
-      if (queued.resume !== undefined) resumeDue = queued
+    if (e.agentId === undefined && e.trigger !== 'precompute' && result.messages !== undefined) {
+      nudgedAtTokens = undefined
+      if (queued) {
+        queued.isCompacted = true
+        if (queued.resume !== undefined) resumeDue = queued
+      }
     }
     return result
   })
@@ -56,7 +91,7 @@ export const register: Register = on => {
   // `$.command.run` resolves when the compaction ends, before the prompts that queued during it start. The resume
   // prompt then queues behind them and starts only when the session is idle. So the first prompt to start after the
   // compaction takes the resume, and the resume prompt is dropped if it starts later.
-  on('prompt.submit', ($, e, next) => {
+  on('prompt.submit', async ($, e, next) => {
     if (e.command) return next(e)
     const index =
       e.origin.kind === 'plugin' && e.origin.name === PLUGIN
@@ -69,11 +104,24 @@ export const register: Register = on => {
       if (resumeDue === compaction) resumeDue = undefined
       return next(e)
     }
+    const context: string[] = []
     const compaction = resumeDue
-    if (compaction?.resume === undefined || compaction.isResumeDelivered) return next(e)
-    compaction.isResumeDelivered = true
-    resumeDue = undefined
-    return next({ ...e, context: [...(e.context ?? []), resumeContext(compaction.resume)] })
+    if (compaction?.resume !== undefined && !compaction.isResumeDelivered) {
+      compaction.isResumeDelivered = true
+      resumeDue = undefined
+      context.push(resumeContext(compaction.resume))
+    }
+    const nudge = takeContextNudge(await mainContextTokens($))
+    if (nudge !== undefined) context.push(nudge)
+    return context.length === 0 ? next(e) : next({ ...e, context: [...(e.context ?? []), ...context] })
+  })
+
+  // Each tool result of a long turn reaches the model, so the nudge does not wait for the next prompt.
+  on('tool.call', async ($, e, next) => {
+    const result = await next(e)
+    if (e.agentId !== undefined || result.deny !== undefined) return result
+    const nudge = takeContextNudge(await mainContextTokens($))
+    return nudge === undefined ? result : { ...result, context: [...(result.context ?? []), nudge] }
   })
 
   on('tool.call', { tool: 'mcp__self-compact__compact' }, ($, e) => {

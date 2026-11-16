@@ -4,6 +4,9 @@ This mod gives Claude a `compact` tool (`mcp__self-compact__compact`). Claude ca
 session, the same as when you type it. Then a prompt that Claude wrote starts the next turn, so the work continues
 without you.
 
+When the main conversation passes 250,000 tokens of context, the mod also tells Claude to compact itself at the next
+quiet point, before auto-compaction starts in the middle of a task.
+
 It is a Claude Code **mod**: a plugin of function hooks. Mods are an early-access feature, so a Claude
 Code update can change the API under it. Tested on Claude Code 2.1.310.
 
@@ -35,6 +38,20 @@ Prompts that queued during the compaction, such as a background task's notificat
 which queues behind them and starts only when the session is idle. So the first prompt to start after the compaction,
 of any origin, carries the resume prompt as context, and the resume prompt is then dropped. A slash command does not
 take it.
+
+## Context size reminder
+
+A model cannot see its own token count. From 250,000 tokens of context, the mod adds this line after a tool result or a
+prompt of the main conversation:
+
+> From the self-compact plugin: context is about 262k tokens. Auto-compaction runs at 300k. At the next quiet point,
+> call the self-compact `compact` tool with `instructions` and a `resume` prompt. Do not stop in the middle of a step.
+
+- The count is the status line's figure: the input tokens of the last response of the main conversation.
+- The line comes once at 250,000 tokens, then at most once for each further 20,000 tokens.
+- A compaction resets it. No line comes while a compaction is queued, or in a subagent.
+- The line states the auto-compaction point that `CLAUDE_CODE_AUTO_COMPACT_WINDOW=300000` sets. The mod does not read
+  the variable, and it has no settings.
 
 ## Limits
 

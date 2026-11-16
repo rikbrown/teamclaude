@@ -158,3 +158,98 @@ test('a second call before the first runs is refused', async ($, on) => {
 test('a subagent cannot compact the main conversation', async $ => {
   expect((await $.tool.call({ tool: TOOL, agentId: 'a1' })).deny).toMatch(/main conversation/)
 })
+
+const ECHO = 'mcp__fixture__echo'
+const NUDGE = /^From the self-compact plugin: context is about \d+k tokens\. Auto-compaction runs at 300k\. .*`compact` tool/
+
+// Stands for the engine's status-line figures: `tokens` is what the last response of the main conversation read.
+const contextOf = (on: (event: 'session.usage', hook: () => unknown) => unknown) => {
+  const context = { tokens: 0 }
+  on('session.usage', () => ({
+    value: { startedAt: 0, context: { tokens: context.tokens, window: 1_000_000 }, rateLimits: [] },
+  }))
+  return context
+}
+const echo = async (
+  $: { tool: { call: (input: never) => Promise<{ context?: readonly string[] }> } },
+  agentId?: string,
+) => {
+  const result = await $.tool.call({ tool: ECHO, text: 'hi', ...(agentId === undefined ? {} : { agentId }) } as never)
+  return result.context ?? []
+}
+
+test('a tool result gets no nudge below 250k tokens', async ($, on) => {
+  const context = contextOf(on as never)
+  on('tool.call', () => ({ result: 'hi' }))
+  context.tokens = 249_999
+  expect(await echo($ as never)).toEqual([])
+})
+
+test('the first tool result at 250k tokens gets one nudge, and the next 20k tokens get none', async ($, on) => {
+  const context = contextOf(on as never)
+  on('tool.call', () => ({ result: 'hi' }))
+
+  context.tokens = 250_400
+  const first = await echo($ as never)
+  expect(first).toHaveLength(1)
+  expect(first[0]).toMatch(NUDGE)
+  expect(first[0]).toMatch(/context is about 250k tokens\./)
+
+  context.tokens = 270_399
+  expect(await echo($ as never)).toEqual([])
+
+  context.tokens = 270_400
+  expect((await echo($ as never))[0]).toMatch(/context is about 270k tokens\./)
+})
+
+test('a prompt at 250k tokens carries the nudge', async ($, on) => {
+  const context = contextOf(on as never)
+  const prompts: (readonly string[] | undefined)[] = []
+  on('prompt.submit', (_, e) => {
+    prompts.push(e.context)
+    return { text: e.text, context: e.context }
+  })
+
+  context.tokens = 260_000
+  await notify($, 'Monitor event: PR checks passed.')
+  await notify($, 'Monitor event: PR merged.')
+
+  expect(prompts[0]?.at(-1)).toMatch(NUDGE)
+  expect(prompts[1]).toBeUndefined()
+})
+
+test('a compaction resets the nudge', async ($, on) => {
+  const context = contextOf(on as never)
+  on('tool.call', () => ({ result: 'hi' }))
+  on('session.compact', () => ({ messages: summary }))
+
+  context.tokens = 260_000
+  expect(await echo($ as never)).toHaveLength(1)
+  await compactNow($)
+  context.tokens = 261_000
+  expect(await echo($ as never)).toHaveLength(1)
+})
+
+test('a subagent tool result gets no nudge', async ($, on) => {
+  const context = contextOf(on as never)
+  on('tool.call', () => ({ result: 'hi' }))
+
+  context.tokens = 280_000
+  expect(await echo($ as never, 'a1')).toEqual([])
+  expect(await echo($ as never)).toHaveLength(1)
+})
+
+test('no nudge while a compaction is queued', async ($, on) => {
+  const clock = mock.clock(on)
+  const context = contextOf(on as never)
+  on('tool.call', () => ({ result: 'hi' }))
+  on('command.run', () => ({ text: 'compacted' }))
+
+  context.tokens = 280_000
+  const queued = await $.tool.call({ tool: TOOL })
+  expect(queued.context).toBeUndefined()
+  expect(await echo($ as never)).toEqual([])
+
+  await clock.advance(0)
+  expect(await echo($ as never)).toHaveLength(1)
+})

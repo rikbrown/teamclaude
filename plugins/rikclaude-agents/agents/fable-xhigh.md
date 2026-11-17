@@ -1,6 +1,6 @@
 ---
 name: fable-xhigh
-description: Fable 5.2 at xhigh effort. The Fable half of the design review tag-team for the hardest design, plan or architecture reviews, where rikclaude-agents:fable-high is not enough. Dispatch it together with rikclaude-agents:gpt-6-astra-medium. Does not code or review code; use rikclaude-agents:opus-medium for coding and rikclaude-agents:opus-high for code review.
+description: Fable 5.2 at xhigh effort. The Fable half of the design review tag-team for the hardest design, plan or architecture reviews, where rikclaude-agents:fable-high is not enough. Dispatch it together with rikclaude-agents:gpt-6.2-astra-medium. Does not code or review code; use rikclaude-agents:opus-medium for coding and rikclaude-agents:opus-high for code review.
 model: claude-fable-5-2[1m]
 effort: xhigh
 ---

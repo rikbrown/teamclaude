@@ -2,11 +2,11 @@
 
 A Claude Code plugin that ships in this repo: **one named subagent per model and effort level**,
 plus the routing policy that goes with them. Install it and a session can say "dispatch
-`rikclaude-agents:gpt-6-astra-high`" and get exactly that model at exactly that effort, every
+`rikclaude-agents:gpt-6.2-astra-high`" and get exactly that model at exactly that effort, every
 time.
 
 The models it names are the ones a TeamClaude fleet serves — `claude-fable-5-2[1m]`, `claude-opus-5-5[1m]`, `claude-sonnet-5-5[1m]` and `claude-haiku-5-5[1m]` for Claude,
-`gpt-6-astra`, `gpt-6.1-sol`, `gpt-6-luna` and `gpt-6.1-terra` through the [Codex sidecar](openai.md). On a plain Claude
+`gpt-6.2-astra`, `gpt-6.2-sol`, `gpt-6-luna` and `gpt-6.1-terra` through the [Codex sidecar](openai.md). On a plain Claude
 Code install, with no fleet behind it, the GPT agents resolve to model ids nothing can answer.
 
 ## Why an agent definition and not the `model` parameter
@@ -14,7 +14,7 @@ Code install, with no fleet behind it, the GPT agents resolve to model ids nothi
 The Agent tool takes a per-call `model` parameter, and it looks like it solves this. It does not:
 
 - It is an **alias enum** — `sonnet | opus | haiku | fable` — so it cannot name a custom model id
-  at all. `gpt-6-astra` is not on the list.
+  at all. `gpt-6.2-astra` is not on the list.
 - It carries **no effort**. A dispatch that names a model inherits the parent session's effort,
   silently. Ask for a cheap second opinion from a session running at `xhigh` and you buy an `xhigh`
   second opinion.
@@ -23,9 +23,9 @@ An agent **definition** pins both, in its frontmatter:
 
 ```yaml
 ---
-name: gpt-6-astra-high
-description: GPT-6 Astra at high effort. Engineering sidekick, on par with Fable. …
-model: gpt-6-astra
+name: gpt-6.2-astra-high
+description: GPT-6.2 Astra at high effort. Engineering sidekick, on par with Fable. …
+model: gpt-6.2-astra
 effort: high
 ---
 ```
@@ -68,10 +68,10 @@ at the moment it picks an agent, and they say more than this table does.
 | `claude-opus-5-5[1m]` | `opus-medium`, `opus-high`, `opus-xhigh` | The coding, at `medium` by default: the brief settles the design and, for a bug, names the cause; planned work goes there whatever its size. `high` for less well-defined coding: an open design decision or bug cause, a change across packages or to a shared package's exports, or a result that needs judgement, such as model text checked by evals. No coding at `xhigh`. `medium` is also the default for research and exploration that spans many files. Code review, release QA and browser checks, research that must reason through how code behaves, and prose review of docs Opus did not write, at `high`. Wide research at `xhigh` |
 | `claude-sonnet-5-5[1m]` | `sonnet-high`, `sonnet-xhigh` | Exploration without deep fact-finding, and throwaway code that is not committed, at `high`. Never committed code. `xhigh` by name only |
 | `claude-fable-5-2[1m]` | `fable-medium`, `fable-high`, `fable-xhigh` | Research and design at `medium`. At `high` (`xhigh` for the hardest), the Fable half of the design, plan and architecture review tag-team. Does not code or review code |
-| `gpt-6-astra` | `gpt-6-astra-medium`, `gpt-6-astra-high` | `medium` is the Astra half of the design review tag-team, and the second reviewer with `opus-high` for the riskiest code review. Never dispatched alone. `high` by name only |
+| `gpt-6.2-astra` | `gpt-6.2-astra-medium`, `gpt-6.2-astra-high` | `medium` is the Astra half of the design review tag-team, and the second reviewer with `opus-high` for the riskiest code review. Never dispatched alone. `high` by name only |
 | `claude-haiku-5-5[1m]` | `haiku-medium` | Quick, cheap tasks, on par with Luna |
 | `gpt-6-luna` | `gpt-6-luna-medium` | Quick, cheap tasks, on par with Haiku |
-| `gpt-6.1-sol` | `gpt-6.1-sol-xhigh` | By name only. Light or interim code review |
+| `gpt-6.2-sol` | `gpt-6.2-sol-xhigh` | By name only. Light or interim code review |
 | `gpt-6.1-terra` | `gpt-6.1-terra-medium` | By name only. Prose refinement of docs, comments and messages. On trial for exploration against `sonnet-high` |
 
 "By name only" agents open their description with "Use only when the user names it.", set by the

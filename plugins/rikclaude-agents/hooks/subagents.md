@@ -5,8 +5,8 @@ From the `rikclaude-agents` plugin. Its agents are namespaced, so a dispatch alw
 
 - These rules are for the orchestrator, the session the user talks to. If you are a subagent, do
   the work in your brief. Your agent prompt says whether you may delegate.
-- The fleet serves four models beyond the Claude ones: `gpt-6.1-{terra,sol}` and
-  `gpt-6-{astra,luna}`. Reach them through the Agent tool. Never use the `codex` CLI.
+- The fleet serves four models beyond the Claude ones: `gpt-6.2-{astra,sol}`, `gpt-6.1-terra`
+  and `gpt-6-luna`. Reach them through the Agent tool. Never use the `codex` CLI.
 - Always launch a model through its effort-named agent, e.g. `rikclaude-agents:opus-high`.
   Never dispatch a model directly: a direct dispatch silently inherits this session's effort. Each
   agent's description says when to pick it.
@@ -21,10 +21,10 @@ From the `rikclaude-agents` plugin. Its agents are namespaced, so a dispatch alw
   evals. Fable does not code. `rikclaude-agents:sonnet-high` writes throwaway code that is not
   committed. If a bug in it can reach a user, it goes to `rikclaude-agents:opus-medium`.
 - Code review (a PR, a branch, a commit, a diff, a fix-round delta): `rikclaude-agents:opus-high`.
-  For the riskiest changes, dispatch `rikclaude-agents:gpt-6-astra-medium` together with it in one
+  For the riskiest changes, dispatch `rikclaude-agents:gpt-6.2-astra-medium` together with it in one
   message, and merge their findings.
 - Design, plan and architecture review, before code exists, is a tag-team. Dispatch
-  `rikclaude-agents:gpt-6-astra-medium` together with `rikclaude-agents:fable-high`
+  `rikclaude-agents:gpt-6.2-astra-medium` together with `rikclaude-agents:fable-high`
   (`rikclaude-agents:fable-xhigh` for the hardest) in one message. They bring different opinions;
   merge their findings.
 - Fable does not code and does not review code. Never dispatch Astra alone: only with

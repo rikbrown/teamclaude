@@ -8,140 +8,160 @@ const compactNow = ($: { session: { compact: (input: never) => Promise<unknown> 
 const notify = ($: { prompt: { submit: (input: never) => Promise<unknown> } }, text: string) =>
   $.prompt.submit({ text, origin: { kind: 'task-notification' }, wait: false } as never)
 
-test('the tool queues /compact with its instructions, then sends the resume prompt', async ($, on) => {
+type Origin = { kind: string; name?: string }
+type Started = { text: string; origin: string; context: readonly string[] | undefined }
+
+// Stands for the engine's prompt queue, as measured on Claude Code 2.1.326: a queued prompt's `prompt.submit` hooks
+// run when it starts, and a plugin's prompt starts only when no other prompt waits.
+const engineQueue = ($: { prompt: { submit: (input: never) => Promise<{ drop?: string }> } }, on: never) => {
+  const waiting: { text: string; origin: Origin; isMeta?: true }[] = []
+  const started: Started[] = []
+  const dropped: string[] = []
+  let isStarting = false
+  ;(on as (event: 'prompt.submit', hook: (_: unknown, e: never) => unknown) => void)(
+    'prompt.submit',
+    (_, e: { text: string; origin: Origin; context?: readonly string[]; isMeta?: true }) => {
+      if (!isStarting) {
+        waiting.push({ text: e.text, origin: e.origin, ...(e.isMeta ? { isMeta: e.isMeta } : {}) })
+        return { text: e.text }
+      }
+      started.push({ text: e.text, origin: e.origin.kind, context: e.context })
+      return { text: e.text, context: e.context }
+    },
+  )
+  const start = async (prompt: { text: string; origin: Origin; isMeta?: true }) => {
+    isStarting = true
+    try {
+      const result = await $.prompt.submit({ ...prompt, wait: false } as never)
+      if (result.drop !== undefined) dropped.push(result.drop)
+    } finally {
+      isStarting = false
+    }
+  }
+  return {
+    started,
+    dropped,
+    // A prompt that queues with no hook run, as a task notification does during a compaction.
+    enqueue: (text: string, extra: { isMeta?: true } = {}) =>
+      waiting.push({ text, origin: { kind: 'task-notification' }, ...extra }),
+    start,
+    // The session goes idle: the waiting prompts start, a plugin's last.
+    drain: async () => {
+      const isPlugin = (prompt: { origin: Origin }) => prompt.origin.kind === 'plugin'
+      const order = [...waiting.filter(prompt => !isPlugin(prompt)), ...waiting.filter(isPlugin)]
+      waiting.length = 0
+      for (const prompt of order) await start(prompt)
+    },
+  }
+}
+
+const compactOnCommand = ($: Parameters<typeof compactNow>[0], on: never, during?: () => void) =>
+  (on as (event: 'command.run', hook: (_: unknown, e: { command: string; args: string }) => unknown) => void)(
+    'command.run',
+    async (_, e) => {
+      await compactNow($, e.args)
+      during?.()
+      return { text: 'compacted' }
+    },
+  )
+
+const RESUME_CONTEXT = /^The self-compact plugin compacted this conversation\b.*\n\nContinue with step 3\.$/s
+
+test('the tool queues /compact, and the resume prompt starts its own turn when nothing else waits', async ($, on) => {
   const clock = mock.clock(on)
-  const order: string[] = []
+  const queue = engineQueue($ as never, on as never)
+  const commands: string[] = []
   on('session.compact', () => ({ messages: summary }))
   on('command.run', async (_, e) => {
-    order.push(`/${e.command} ${e.args}`)
+    commands.push(`/${e.command} ${e.args}`)
     await compactNow($, e.args)
     return { text: 'compacted' }
-  })
-  on('prompt.submit', (_, e) => {
-    order.push(`prompt ${e.text}`)
-    return { text: e.text, context: e.context }
   })
 
   const queued = await $.tool.call({ tool: TOOL, instructions: 'keep the plan', resume: 'Continue with step 3.' })
   expect(queued.deny).toBeUndefined()
-  expect(order).toEqual([])
+  expect(commands).toEqual([])
 
   await clock.advance(0)
-  expect(order).toEqual(['/compact keep the plan', 'prompt Continue with step 3.'])
+  await queue.drain()
+  expect(commands).toEqual(['/compact keep the plan'])
+  expect(queue.started).toEqual([{ text: 'Continue with step 3.', origin: 'plugin', context: undefined }])
+  expect(queue.dropped).toEqual([])
 })
 
-test('a prompt that starts first after the compaction carries the resume, and no resume prompt follows', async ($, on) => {
+test('a notification queued in the compaction takes the resume, and the resume prompt is dropped', async ($, on) => {
   const clock = mock.clock(on)
-  const prompts: { text: string; context: readonly string[] | undefined }[] = []
+  const queue = engineQueue($ as never, on as never)
   on('session.compact', () => ({ messages: summary }))
-  on('prompt.submit', (_, e) => {
-    prompts.push({ text: e.text, context: e.context })
-    return { text: e.text, context: e.context }
-  })
-  on('command.run', async () => {
-    await compactNow($)
-    await notify($, 'Monitor event: PR checks passed.')
-    return { text: 'compacted' }
-  })
+  compactOnCommand($, on as never, () => queue.enqueue('Monitor event: PR checks passed.'))
 
   await $.tool.call({ tool: TOOL, resume: 'Continue with step 3.' })
   await clock.advance(0)
+  await queue.drain()
 
-  expect(prompts).toHaveLength(1)
-  expect(prompts[0]?.text).toBe('Monitor event: PR checks passed.')
-  expect(prompts[0]?.context?.at(-1)).toMatch(/Continue with step 3\.$/)
+  expect(queue.started.map(p => p.text)).toEqual(['Monitor event: PR checks passed.'])
+  expect(queue.started[0]?.context?.at(-1)).toMatch(RESUME_CONTEXT)
+  expect(queue.dropped).toEqual(['self-compact: an earlier prompt took the resume.'])
 })
 
-test('a resume prompt that starts after another prompt took the resume is dropped', async ($, on) => {
+test('a meta prompt that starts first gets no resume, and the resume prompt starts after it', async ($, on) => {
   const clock = mock.clock(on)
-  const prompts: { text: string; context: readonly string[] | undefined }[] = []
-  const dropped: string[] = []
+  const queue = engineQueue($ as never, on as never)
   on('session.compact', () => ({ messages: summary }))
-  on('command.run', async () => {
-    await compactNow($)
-    return { text: 'compacted' }
-  })
-  // The engine runs the plugin's hooks on its resume prompt when the prompt starts, not when the timer queues it,
-  // and a prompt that queued during the compaction starts first. The replay stands for that start.
-  let isQueueAhead = true
-  on('prompt.submit', async (_, e) => {
-    if (e.origin.kind === 'plugin' && isQueueAhead) {
-      isQueueAhead = false
-      await notify($, 'Monitor event: PR checks passed.')
-      const replay = await $.prompt.submit({ text: e.text, origin: e.origin, wait: false } as never)
-      if (replay.drop !== undefined) dropped.push(replay.drop)
-      return replay
-    }
-    prompts.push({ text: e.text, context: e.context })
-    return { text: e.text, context: e.context }
-  })
+  compactOnCommand($, on as never, () => queue.enqueue('An idle notice.', { isMeta: true }))
 
   await $.tool.call({ tool: TOOL, resume: 'Continue with step 3.' })
   await clock.advance(0)
+  await queue.drain()
 
-  expect(prompts.map(p => p.text)).toEqual(['Monitor event: PR checks passed.'])
-  expect(prompts[0]?.context?.at(-1)).toMatch(/Continue with step 3\.$/)
-  expect(dropped).toHaveLength(1)
+  expect(queue.started.map(p => [p.text, p.context])).toEqual([
+    ['An idle notice.', undefined],
+    ['Continue with step 3.', undefined],
+  ])
 })
 
-test('the tool takes a new call while the resume prompt waits for the session to go idle', async ($, on) => {
+test('a prompt that starts before the compaction gets no resume', async ($, on) => {
   const clock = mock.clock(on)
-  let release: (() => void) | undefined
+  const queue = engineQueue($ as never, on as never)
   on('session.compact', () => ({ messages: summary }))
-  on('command.run', async () => {
-    await compactNow($)
-    return { text: 'compacted' }
-  })
-  on('prompt.submit', async (_, e) => {
-    await new Promise<void>(resolve => (release = resolve))
-    return { text: e.text }
-  })
+  compactOnCommand($, on as never)
 
   await $.tool.call({ tool: TOOL, resume: 'Continue with step 3.' })
+  await queue.start({ text: 'early', origin: { kind: 'task-notification' } })
   await clock.advance(0)
-  expect(release).toBeDefined()
-  expect((await $.tool.call({ tool: TOOL })).deny).toBeUndefined()
-  release?.()
+  await queue.drain()
+
+  expect(queue.started.map(p => [p.text, p.context])).toEqual([
+    ['early', undefined],
+    ['Continue with step 3.', undefined],
+  ])
 })
 
-test('a prompt before the compaction ends gets no resume', async ($, on) => {
+test('a skipped compaction drops the resume prompt', async ($, on) => {
   const clock = mock.clock(on)
-  const prompts: { text: string; context: readonly string[] | undefined }[] = []
-  on('session.compact', () => ({ messages: summary }))
-  on('prompt.submit', (_, e) => {
-    prompts.push({ text: e.text, context: e.context })
-    return { text: e.text, context: e.context }
-  })
-  on('command.run', async () => {
-    await notify($, 'early')
-    await compactNow($)
-    return { text: 'compacted' }
-  })
-
-  await $.tool.call({ tool: TOOL, resume: 'Continue with step 3.' })
-  await clock.advance(0)
-
-  expect(prompts.map(p => p.text)).toEqual(['early', 'Continue with step 3.'])
-  expect(prompts[0]?.context).toBeUndefined()
-})
-
-test('a skipped compaction sends no resume prompt', async ($, on) => {
-  const clock = mock.clock(on)
-  const prompts: string[] = []
+  const queue = engineQueue($ as never, on as never)
   on('session.compact', () => ({ skip: 'vetoed' }))
-  on('prompt.submit', (_, e) => {
-    prompts.push(e.text)
-    return { text: e.text }
-  })
-  on('command.run', async () => {
-    await compactNow($)
-    return { text: 'not compacted' }
-  })
+  compactOnCommand($, on as never)
 
   await $.tool.call({ tool: TOOL, resume: 'Continue with step 3.' })
   await clock.advance(0)
+  await queue.drain()
 
-  expect(prompts).toEqual([])
+  expect(queue.started).toEqual([])
+  expect(queue.dropped).toEqual(['self-compact: the compaction did not run.'])
+})
+
+test('the tool takes a new call while the resume prompt waits', async ($, on) => {
+  const clock = mock.clock(on)
+  const queue = engineQueue($ as never, on as never)
+  on('session.compact', () => ({ messages: summary }))
+  compactOnCommand($, on as never)
+
+  await $.tool.call({ tool: TOOL, resume: 'Continue with step 3.' })
+  await clock.advance(0)
+  expect((await $.tool.call({ tool: TOOL })).deny).toBeUndefined()
+  await queue.drain()
+  expect(queue.started.map(p => p.text)).toEqual(['Continue with step 3.'])
 })
 
 test('a second call before the first runs is refused', async ($, on) => {

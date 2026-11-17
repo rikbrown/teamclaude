@@ -8,7 +8,7 @@ When the main conversation passes 250,000 tokens of context, the mod also tells 
 quiet point, before auto-compaction starts in the middle of a task.
 
 It is a Claude Code **mod**: a plugin of function hooks. Mods are an early-access feature, so a Claude
-Code update can change the API under it. Tested on Claude Code 2.1.310.
+Code update can change the API under it. Tested on Claude Code 2.1.326.
 
 ## Install
 
@@ -34,10 +34,11 @@ A compaction cannot start while a turn runs, and a tool call always runs inside 
 from a timer callback, outside the hook. The command runs when the turn ends, and the resume prompt follows it as
 a new turn. The tool tells Claude to end its turn at once.
 
-Prompts that queued during the compaction, such as a background task's notification, start before the resume prompt,
-which queues behind them and starts only when the session is idle. So the first prompt to start after the compaction,
-of any origin, carries the resume prompt as context, and the resume prompt is then dropped. A slash command does not
-take it.
+The resume prompt queues when the compaction starts. Claude Code starts a plugin's prompt only when no other prompt
+waits, so a prompt that queued during the compaction, such as a background task's notification, starts first. The
+first prompt to start after the compaction, of any origin, carries the resume prompt as context, and the resume prompt
+is then dropped. Claude Code shows one line for it: "Prompt dropped by a hook: self-compact: an earlier prompt took the
+resume." A slash command, or a prompt that Claude Code adds and does not show as typed, does not take it.
 
 ## Context size reminder
 
@@ -57,4 +58,4 @@ prompt of the main conversation:
 
 - Only the main conversation can use it. A subagent's call is refused.
 - One compaction at a time: a second call before the first compaction ends is refused.
-- If the compaction fails or a hook skips it, the resume prompt is not sent. A failure also shows a toast.
+- If the compaction fails or a hook skips it, the resume prompt is dropped. A failure also shows a toast.

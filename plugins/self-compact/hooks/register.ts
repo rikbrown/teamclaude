@@ -29,19 +29,16 @@ async function mainContextTokens($: EngineInterface) {
   }
 }
 
-type Compaction = {
-  resume: string | undefined
-  isCompacted: boolean
-  isResumeDelivered: boolean
-}
+const toastError = ($: EngineInterface, error: unknown) =>
+  $.ui.toast(`self-compact: ${error instanceof Error ? error.message : String(error)}`)
+
+type Resume = { text: string; isCompacted: boolean; isDelivered: boolean }
 
 export const register: Register = on => {
-  // From the tool call until `/compact` ends: a second call is refused.
-  let queued: Compaction | undefined
-  // From the compaction until a prompt takes the resume.
-  let resumeDue: Compaction | undefined
-  // Resume prompts that this plugin queued and that have not started.
-  const resumePrompts: Compaction[] = []
+  // From the tool call until `/compact` ends: a second call is refused. A compaction takes `resume` and clears it.
+  let queued: { resume: string | undefined } | undefined
+  // The resumes whose own prompt has not started.
+  const resumes: Resume[] = []
   // The context size at the last nudge, until the context drops below the threshold or compacts.
   let nudgedAtTokens: number | undefined
 
@@ -77,39 +74,48 @@ export const register: Register = on => {
   })
 
   on('session.compact', async ($, e, next) => {
+    const isMain = e.agentId === undefined && e.trigger !== 'precompute'
+    const text = isMain ? queued?.resume : undefined
+    let resume: Resume | undefined
+    if (queued && text !== undefined) {
+      queued.resume = undefined
+      resume = { text, isCompacted: false, isDelivered: false }
+      resumes.push(resume)
+      // In Claude Code 2.1.326, a prompt from a timer that starts after this hook's first `await` does not reach this
+      // plugin's `prompt.submit` hook, which then cannot drop it. `$.prompt.submit` rejects inside a hook the session
+      // waits on; a timer callback runs outside it.
+      $.clock.after(0, () => {
+        $.prompt.submit({ text }).catch((error: unknown) => toastError($, error))
+      })
+    }
     const result = await next(e)
-    if (e.agentId === undefined && e.trigger !== 'precompute' && result.messages !== undefined) {
+    if (isMain && result.messages !== undefined) {
       nudgedAtTokens = undefined
-      if (queued) {
-        queued.isCompacted = true
-        if (queued.resume !== undefined) resumeDue = queued
-      }
+      if (resume) resume.isCompacted = true
     }
     return result
   })
 
-  // `$.command.run` resolves when the compaction ends, before the prompts that queued during it start. The resume
-  // prompt then queues behind them and starts only when the session is idle. So the first prompt to start after the
-  // compaction takes the resume, and the resume prompt is dropped if it starts later.
+  // The engine starts this plugin's resume prompt only when no other prompt waits, and it raises `prompt.submit` when a
+  // prompt starts. So the first prompt to start after the compaction takes the resume, and the resume prompt is dropped
+  // if it starts later.
   on('prompt.submit', async ($, e, next) => {
     if (e.command) return next(e)
-    const index =
-      e.origin.kind === 'plugin' && e.origin.name === PLUGIN
-        ? resumePrompts.findIndex(compaction => compaction.resume === e.text)
-        : -1
-    if (index !== -1) {
-      const [compaction] = resumePrompts.splice(index, 1)
-      if (compaction?.isResumeDelivered) return { drop: 'self-compact: an earlier prompt took the resume.' }
-      if (compaction) compaction.isResumeDelivered = true
-      if (resumeDue === compaction) resumeDue = undefined
+    const isOwn = e.origin.kind === 'plugin' && e.origin.name === PLUGIN
+    const own = isOwn ? resumes.find(resume => resume.text === e.text) : undefined
+    if (own) {
+      resumes.splice(resumes.indexOf(own), 1)
+      if (!own.isCompacted) return { drop: 'self-compact: the compaction did not run.' }
+      if (own.isDelivered) return { drop: 'self-compact: an earlier prompt took the resume.' }
+      own.isDelivered = true
       return next(e)
     }
     const context: string[] = []
-    const compaction = resumeDue
-    if (compaction?.resume !== undefined && !compaction.isResumeDelivered) {
-      compaction.isResumeDelivered = true
-      resumeDue = undefined
-      context.push(resumeContext(compaction.resume))
+    // A meta prompt that starts a turn takes no context.
+    const due = e.isMeta ? undefined : resumes.find(resume => resume.isCompacted && !resume.isDelivered)
+    if (due) {
+      due.isDelivered = true
+      context.push(resumeContext(due.text))
     }
     const nudge = takeContextNudge(await mainContextTokens($))
     if (nudge !== undefined) context.push(nudge)
@@ -130,30 +136,15 @@ export const register: Register = on => {
 
     const instructions = optionalText(e.instructions)
     const resume = optionalText(e.resume)
-    const compaction: Compaction = { resume, isCompacted: false, isResumeDelivered: false }
-    queued = compaction
+    queued = { resume }
 
     // `$.command.run` rejects inside a hook the turn waits on; a timer callback runs outside it, and the command
     // queues until the session is idle.
     $.clock.after(0, () => {
-      void (async () => {
-        try {
-          try {
-            await $.command.run({ command: 'compact', args: instructions ?? '' })
-          } finally {
-            queued = undefined
-          }
-          if (resume === undefined || !compaction.isCompacted || compaction.isResumeDelivered) return
-          resumePrompts.push(compaction)
-          await $.prompt.submit({ text: resume })
-        } catch (error) {
-          $.ui.toast(`self-compact: ${error instanceof Error ? error.message : String(error)}`)
-        } finally {
-          const index = resumePrompts.indexOf(compaction)
-          if (index !== -1) resumePrompts.splice(index, 1)
-          if (resumeDue === compaction) resumeDue = undefined
-        }
-      })()
+      $.command
+        .run({ command: 'compact', args: instructions ?? '' })
+        .catch((error: unknown) => toastError($, error))
+        .finally(() => (queued = undefined))
     })
 
     return {

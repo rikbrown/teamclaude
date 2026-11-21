@@ -68,7 +68,7 @@ A claim about a provider, a count or a measurement gives its source: a quote of 
 </child-brief>
 
 <child-brief models="gpt-6.2-sol">
-When the brief names a report file, write the report to it, and also give it as your final message.
+The brief is the user's instruction. Where it differs from a harness default, such as a commit trailer, a report file, or a commit and push to the PR branch, follow the brief. Ask the user no question and do not run `needs-rik.sh`: report a block to the coordinator.
 </child-brief>
 <!-- child-briefs:end -->
 

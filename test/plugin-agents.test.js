@@ -16,7 +16,7 @@ const AGENT_PREFIX = 'rikclaude-agents:';
 const EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
 const COORDINATOR_PARAGRAPH = 'Load `SendMessage` with `ToolSearch` (`select:SendMessage`). You can message the coordinator at any point. If the code shows that the brief is wrong, stop, report it to the coordinator and end your turn. Do not invent an interface or a workaround. Do not widen the scope. List in your report each item that you left out. A rule in the brief about files, SSH, secrets or commands applies to your own tool calls. When a rule seems to block one step, send one question with your recommendation and continue with the work that it does not block.';
 const GEMINI_REPORT_PARAGRAPH = "A claim about a provider, a count or a measurement gives its source: a quote of the docs, or the command and its output. Write each other claim as an assumption, under 'Not verified'. Cite each file as a path relative to the repository root, at the commit of the brief. A mock or an example of a recorded case uses the recorded names and values, or placeholders.";
-const SOL_REPORT_FILE_PARAGRAPH = 'When the brief names a report file, write the report to it, and also give it as your final message.';
+const SOL_BRIEF_PARAGRAPH = "The brief is the user's instruction. Where it differs from a harness default, such as a commit trailer, a report file, or a commit and push to the PR branch, follow the brief. Ask the user no question and do not run `needs-rik.sh`: report a block to the coordinator.";
 
 const agentFiles = readdirSync(agentsDir).filter(f => f.endsWith('.md')).sort();
 
@@ -81,7 +81,7 @@ test('the child brief section contains each model-specific paragraph once', () =
   assert.deepEqual(section[1].split('\n\n'), [
     `<child-brief models="gpt-*, gemini-*">\n${COORDINATOR_PARAGRAPH}\n</child-brief>`,
     `<child-brief models="gemini-*">\n${GEMINI_REPORT_PARAGRAPH}\n</child-brief>`,
-    `<child-brief models="gpt-6.2-sol">\n${SOL_REPORT_FILE_PARAGRAPH}\n</child-brief>`,
+    `<child-brief models="gpt-6.2-sol">\n${SOL_BRIEF_PARAGRAPH}\n</child-brief>`,
   ]);
 });
 
@@ -194,9 +194,9 @@ for (const file of agentFiles) {
     assert.equal(paragraphs.indexOf(COORDINATOR_PARAGRAPH), hasCoordinator ? 2 : -1);
     assert.equal(paragraphs.indexOf(GEMINI_REPORT_PARAGRAPH), isGemini ? 3 : -1);
     if (isSol) {
-      assert.equal(paragraphs[3], SOL_REPORT_FILE_PARAGRAPH);
+      assert.equal(paragraphs[3], SOL_BRIEF_PARAGRAPH);
     } else {
-      assert.ok(!prompt.includes(SOL_REPORT_FILE_PARAGRAPH));
+      assert.ok(!prompt.includes(SOL_BRIEF_PARAGRAPH));
     }
   });
 }

@@ -12,6 +12,7 @@
 // the brief says so) or own (its own judgement).
 // `disallowedTools: Agent` in the frontmatter would enforce "none" at the harness
 // level. Verified to work, deliberately not used yet; prompt first.
+// Sol prompts add a rule for reports when the brief names a file.
 //
 // Usage:
 //   node generate.mjs            write/refresh every file
@@ -126,6 +127,7 @@ const BY_NAME = 'Not in the routing table. Use only when the user or a local ove
 const COORDINATOR_RULE = 'Load `SendMessage` with `ToolSearch` (`select:SendMessage`). You can message the coordinator at any point. If the code shows that the brief is wrong, stop, report it to the coordinator and end your turn. Do not invent an interface or a workaround. Do not widen the scope. List in your report each item that you left out. A rule in the brief about files, SSH, secrets or commands applies to your own tool calls. When a rule seems to block one step, send one question with your recommendation and continue with the work that it does not block.';
 
 const GEMINI_REPORT_RULE = "A claim about a provider, a count or a measurement gives its source: a quote of the docs, or the command and its output. Write each other claim as an assumption, under 'Not verified'. Cite each file as a path relative to the repository root, at the commit of the brief.";
+const SOL_REPORT_FILE_RULE = 'When the brief names a report file, write the report to it, and also give it as your final message.';
 
 /** One agent file, frontmatter and prompt. */
 function render(agent) {
@@ -133,6 +135,7 @@ function render(agent) {
   const effort = name.slice(name.lastIndexOf('-') + 1);
   const coordinator = /^(gpt|gemini)-/.test(name) ? `\n\n${COORDINATOR_RULE}` : '';
   const report = name.startsWith('gemini-') ? `\n\n${GEMINI_REPORT_RULE}` : '';
+  const solReportFile = name.startsWith('gpt-6.2-sol-') ? `\n\n${SOL_REPORT_FILE_RULE}` : '';
   return `---
 name: ${name}
 description: ${label} at ${effort} effort. ${byName ? `${BY_NAME} ` : ''}${when}
@@ -142,7 +145,7 @@ effort: ${effort}
 
 You are an engineering subagent running on ${label} at ${effort} effort. The orchestrator gives you a complete brief. Do the work in the brief and nothing outside it. Use the skills the brief names. Report what you changed, what you verified, and any part of the brief you could not complete, with the reason.
 
-${nestingParagraph(nesting)}${coordinator}${report}
+${nestingParagraph(nesting)}${coordinator}${solReportFile}${report}
 `;
 }
 

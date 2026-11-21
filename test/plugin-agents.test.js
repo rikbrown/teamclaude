@@ -16,6 +16,7 @@ const AGENT_PREFIX = 'rikclaude-agents:';
 const EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
 const COORDINATOR_PARAGRAPH = 'Load `SendMessage` with `ToolSearch` (`select:SendMessage`). You can message the coordinator at any point. If the code shows that the brief is wrong, stop, report it to the coordinator and end your turn. Do not invent an interface or a workaround. Do not widen the scope. List in your report each item that you left out. A rule in the brief about files, SSH, secrets or commands applies to your own tool calls. When a rule seems to block one step, send one question with your recommendation and continue with the work that it does not block.';
 const GEMINI_REPORT_PARAGRAPH = "A claim about a provider, a count or a measurement gives its source: a quote of the docs, or the command and its output. Write each other claim as an assumption, under 'Not verified'. Cite each file as a path relative to the repository root, at the commit of the brief.";
+const SOL_REPORT_FILE_PARAGRAPH = 'When the brief names a report file, write the report to it, and also give it as your final message.';
 
 const agentFiles = readdirSync(agentsDir).filter(f => f.endsWith('.md')).sort();
 
@@ -177,9 +178,15 @@ for (const file of agentFiles) {
     const paragraphs = prompt.trim().split('\n\n');
     const hasCoordinator = /^(gpt|gemini)-/.test(file);
     const isGemini = file.startsWith('gemini-');
-    assert.equal(paragraphs.length, isGemini ? 4 : hasCoordinator ? 3 : 2);
+    const isSol = file.startsWith('gpt-6.2-sol-');
+    assert.equal(paragraphs.length, isGemini || isSol ? 4 : hasCoordinator ? 3 : 2);
     assert.equal(paragraphs.indexOf(COORDINATOR_PARAGRAPH), hasCoordinator ? 2 : -1);
     assert.equal(paragraphs.indexOf(GEMINI_REPORT_PARAGRAPH), isGemini ? 3 : -1);
+    if (isSol) {
+      assert.equal(paragraphs[3], SOL_REPORT_FILE_PARAGRAPH);
+    } else {
+      assert.ok(!prompt.includes(SOL_REPORT_FILE_PARAGRAPH));
+    }
   });
 }
 

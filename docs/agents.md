@@ -82,7 +82,8 @@ this restriction to its description before the role text.
 Each prompt tells the agent if it can launch subagents. GPT and Gemini prompts also tell the agent how to
 contact the coordinator, report a problem in the brief, and stay within the brief. Gemini prompts also require
 sources for claims about providers, counts, and measurements. Gemini agents label other claims as assumptions
-under `Not verified` and cite files by path from the repository root at the commit of the brief.
+under `Not verified` and cite files by path from the repository root at the commit of the brief. A mock or an example of a recorded
+case uses the recorded names and values, or placeholders.
 If the brief names a report file, Sol prompts tell the agent to write its report to that file and give the report as its
 final message.
 

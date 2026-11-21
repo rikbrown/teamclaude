@@ -64,7 +64,7 @@ Load `SendMessage` with `ToolSearch` (`select:SendMessage`). You can message the
 </child-brief>
 
 <child-brief models="gemini-*">
-A claim about a provider, a count or a measurement gives its source: a quote of the docs, or the command and its output. Write each other claim as an assumption, under 'Not verified'. Cite each file as a path relative to the repository root, at the commit of the brief.
+A claim about a provider, a count or a measurement gives its source: a quote of the docs, or the command and its output. Write each other claim as an assumption, under 'Not verified'. Cite each file as a path relative to the repository root, at the commit of the brief. A mock or an example of a recorded case uses the recorded names and values, or placeholders.
 </child-brief>
 
 <child-brief models="gpt-6.2-sol">

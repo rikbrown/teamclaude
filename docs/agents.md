@@ -83,6 +83,8 @@ Each prompt tells the agent if it can launch subagents. GPT and Gemini prompts a
 contact the coordinator, report a problem in the brief, and stay within the brief. Gemini prompts also require
 sources for claims about providers, counts, and measurements. Gemini agents label other claims as assumptions
 under `Not verified` and cite files by path from the repository root at the commit of the brief.
+A separate paragraph tells Gemini agents to end the turn with one status line when they wait on a background job
+and never to write a notification, a system reminder, a `user` line or a tool result.
 
 Every `gpt-*` name has to exist in your fleet's [`customModels`](configuration.md) and be served by
 a sidecar that knows it, or the dispatch reaches a model id nothing answers. See

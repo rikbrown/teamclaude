@@ -12,7 +12,6 @@
 // the brief says so) or own (its own judgement).
 // `disallowedTools: Agent` in the frontmatter would enforce "none" at the harness
 // level. Verified to work, deliberately not used yet; prompt first.
-// Gemini prompts end with a rule for turns that wait on a background job.
 //
 // Usage:
 //   node generate.mjs            write/refresh every file
@@ -127,14 +126,13 @@ const BY_NAME = 'Not in the routing table. Use only when the user or a local ove
 const COORDINATOR_RULE = 'Load `SendMessage` with `ToolSearch` (`select:SendMessage`). You can message the coordinator at any point. If the code shows that the brief is wrong, stop, report it to the coordinator and end your turn. Do not invent an interface or a workaround. Do not widen the scope. List in your report each item that you left out. A rule in the brief about files, SSH, secrets or commands applies to your own tool calls. When a rule seems to block one step, send one question with your recommendation and continue with the work that it does not block.';
 
 const GEMINI_REPORT_RULE = "A claim about a provider, a count or a measurement gives its source: a quote of the docs, or the command and its output. Write each other claim as an assumption, under 'Not verified'. Cite each file as a path relative to the repository root, at the commit of the brief.";
-const GEMINI_TURN_RULE = 'When you wait on a background job, write one status line and end your turn. The harness sends the notification of the result. Never write a notification, a system reminder, a `user` line or a tool result yourself.';
 
 /** One agent file, frontmatter and prompt. */
 function render(agent) {
   const { name, label, when, nesting, byName = false } = agent;
   const effort = name.slice(name.lastIndexOf('-') + 1);
   const coordinator = /^(gpt|gemini)-/.test(name) ? `\n\n${COORDINATOR_RULE}` : '';
-  const geminiRules = name.startsWith('gemini-') ? `\n\n${GEMINI_REPORT_RULE}\n\n${GEMINI_TURN_RULE}` : '';
+  const report = name.startsWith('gemini-') ? `\n\n${GEMINI_REPORT_RULE}` : '';
   return `---
 name: ${name}
 description: ${label} at ${effort} effort. ${byName ? `${BY_NAME} ` : ''}${when}
@@ -144,7 +142,7 @@ effort: ${effort}
 
 You are an engineering subagent running on ${label} at ${effort} effort. The orchestrator gives you a complete brief. Do the work in the brief and nothing outside it. Use the skills the brief names. Report what you changed, what you verified, and any part of the brief you could not complete, with the reason.
 
-${nestingParagraph(nesting)}${coordinator}${geminiRules}
+${nestingParagraph(nesting)}${coordinator}${report}
 `;
 }
 

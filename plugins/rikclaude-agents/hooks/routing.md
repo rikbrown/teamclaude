@@ -17,7 +17,7 @@ it. Its agent prompt says if it can delegate.
   `orca worktree create --agent claude --model <Model> --effort <effort> …`, for example
   `--model gpt-6.2-sol --effort xhigh`. Use `--agent claude` for each model: the fleet serves the GPT and Gemini
   models through Claude Code. Without both flags, the session starts on the default model. Never use the `codex` or
-  `gemini` CLI.
+  `gemini` CLI. Put the blocks of "Child session briefs" in its brief.
 - A Gemini model takes its effort only from its model id. The id is the agent name without the prefix, for example
   `--model gemini-4-neon-high`. `--effort` does not change the effort of a Gemini model: to change it, change the id.
 - An agent that is not in the table is never your own pick. Use it only when the user or a local override names it.
@@ -52,6 +52,25 @@ it. Its agent prompt says if it can delegate.
 - Batch reviews: eight tasks, simple ones included, are a few review rounds, not eight reviews.
 - The review rules of the user or the repository decide when a review happens and what is risky. This table decides
   who does it.
+
+## Child session briefs
+
+A child session does not get an agent prompt. Copy into its brief each block below whose `models` matches the
+model of the session.
+
+<!-- child-briefs:start (written by generate.mjs) -->
+<child-brief models="gpt-*, gemini-*">
+Load `SendMessage` with `ToolSearch` (`select:SendMessage`). You can message the coordinator at any point. If the code shows that the brief is wrong, stop, report it to the coordinator and end your turn. Do not invent an interface or a workaround. Do not widen the scope. List in your report each item that you left out. A rule in the brief about files, SSH, secrets or commands applies to your own tool calls. When a rule seems to block one step, send one question with your recommendation and continue with the work that it does not block.
+</child-brief>
+
+<child-brief models="gemini-*">
+A claim about a provider, a count or a measurement gives its source: a quote of the docs, or the command and its output. Write each other claim as an assumption, under 'Not verified'. Cite each file as a path relative to the repository root, at the commit of the brief.
+</child-brief>
+
+<child-brief models="gpt-6.2-sol">
+When the brief names a report file, write the report to it, and also give it as your final message.
+</child-brief>
+<!-- child-briefs:end -->
 
 ## Local overrides
 

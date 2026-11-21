@@ -35,7 +35,7 @@ function parseAgent(text) {
 
 // ── the generator is the source of truth ─────────────────────────────────────
 
-test('generate.mjs --check passes against the agent files and role table', () => {
+test('generate.mjs --check passes against the agent files and generated routing sections', () => {
   const r = spawnSync(process.execPath, [`${pluginRoot}generate.mjs`, '--check'], { encoding: 'utf8' });
   assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
   // The generator reports extra agent files on stderr without setting a nonzero exit code.
@@ -72,6 +72,17 @@ test('the role table names plugin agents and uses their pinned models', () => {
       assert.equal(models[index], `\`${front.model}\``, `${role}: model for ${agent}`);
     }
   }
+});
+
+test('the child brief section contains each model-specific paragraph once', () => {
+  const routing = readFileSync(routingPath, 'utf8');
+  const section = /<!-- child-briefs:start \(written by generate\.mjs\) -->\n([\s\S]+?)\n<!-- child-briefs:end -->/.exec(routing);
+  assert.ok(section, 'child brief section is missing');
+  assert.deepEqual(section[1].split('\n\n'), [
+    `<child-brief models="gpt-*, gemini-*">\n${COORDINATOR_PARAGRAPH}\n</child-brief>`,
+    `<child-brief models="gemini-*">\n${GEMINI_REPORT_PARAGRAPH}\n</child-brief>`,
+    `<child-brief models="gpt-6.2-sol">\n${SOL_REPORT_FILE_PARAGRAPH}\n</child-brief>`,
+  ]);
 });
 
 // ── manifests ────────────────────────────────────────────────────────────────

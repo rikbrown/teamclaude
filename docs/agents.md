@@ -106,6 +106,9 @@ Claude Code does not load a plugin's `CLAUDE.md` as project context. The `Sessio
 `hooks/hooks.json` prints `hooks/routing.md` instead. Claude Code adds the output to the session context at launch,
 after `/clear`, and after compaction. The hook skips missing files and exits 0.
 
+A child session does not get an agent prompt. The routing policy prints the model-specific paragraphs in
+"Child session briefs" so the orchestrator can copy them into the brief. `generate.mjs` writes that section.
+
 ## Local routing overrides
 
 Use `~/.claude/rikclaude-agents.local.md` to trial a routing change before it goes into the plugin.
@@ -173,7 +176,7 @@ Edit `AGENTS` in `plugins/rikclaude-agents/generate.mjs` to change the roster, d
 Edit `ROLES` to change the role table. Then run:
 
 ```bash
-node plugins/rikclaude-agents/generate.mjs           # rewrite agents/ and the role table
+node plugins/rikclaude-agents/generate.mjs           # rewrite agents/ and the generated routing sections
 node plugins/rikclaude-agents/generate.mjs --check   # exit 1 if generated content is stale or missing
 ```
 

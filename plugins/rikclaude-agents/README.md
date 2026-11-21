@@ -20,9 +20,9 @@ Full write-up, install and team pre-seeding: [docs/agents.md](../../docs/agents.
 | Path | What it does |
 | --- | --- |
 | `agents/*.md` | Agent definitions. Dispatch them as `rikclaude-agents:<model>-<effort>`. Each description names the agent's role. |
-| [`hooks/routing.md`](hooks/routing.md) | The routing policy and role table. Use the table to select an agent. |
+| [`hooks/routing.md`](hooks/routing.md) | The routing policy, role table, and model-specific paragraphs for child session briefs. Use the table to select an agent. |
 | `hooks/hooks.json` | A `SessionStart` command hook that prints the policy, then any local overrides. Claude Code adds the output to the session context. The hook skips missing files and exits 0. |
-| `generate.mjs` | Writes `agents/` from `AGENTS` and the role table from `ROLES`. |
+| `generate.mjs` | Writes `agents/` from `AGENTS` and the role table from `ROLES`. It writes the child session briefs and the model-specific agent paragraphs from `CHILD_BRIEFS`. |
 
 ## Local routing overrides
 
@@ -36,7 +36,7 @@ Edit `AGENTS` in `generate.mjs` to change the roster, descriptions, or nesting r
 role table. Then run:
 
 ```bash
-node plugins/rikclaude-agents/generate.mjs           # rewrite agents/ and the role table
+node plugins/rikclaude-agents/generate.mjs           # rewrite agents/ and the generated routing sections
 node plugins/rikclaude-agents/generate.mjs --check   # exit 1 if generated content is stale or missing
 ```
 

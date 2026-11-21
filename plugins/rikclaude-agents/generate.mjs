@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Regenerates the agent definitions in agents/ and the role table in hooks/routing.md.
+// Regenerates the agent definitions in agents/ and the role table and child session briefs in hooks/routing.md.
 //
 // An agent definition pins the model and effort. A direct dispatch inherits the
 // parent session's effort. Claude Code adds the namespace to the frontmatter name.
@@ -93,16 +93,16 @@ function renderRoles() {
   return lines.join('\n');
 }
 
-function renderRouting(routing) {
-  const startMarker = '<!-- roles:start (written by generate.mjs) -->\n';
-  const endMarker = '<!-- roles:end -->';
+function replaceRoutingSection(routing, section, content) {
+  const startMarker = `<!-- ${section}:start (written by generate.mjs) -->\n`;
+  const endMarker = `<!-- ${section}:end -->`;
   const start = routing.indexOf(startMarker);
   const end = routing.indexOf(endMarker);
-  const tableStart = start + startMarker.length;
-  if (start < 0 || end < tableStart || start !== routing.lastIndexOf(startMarker) || end !== routing.lastIndexOf(endMarker)) {
-    throw new Error('invalid role table markers in hooks/routing.md');
+  const contentStart = start + startMarker.length;
+  if (start < 0 || end < contentStart || start !== routing.lastIndexOf(startMarker) || end !== routing.lastIndexOf(endMarker)) {
+    throw new Error(`invalid ${section} markers in hooks/routing.md`);
   }
-  return `${routing.slice(0, tableStart)}${renderRoles()}\n${routing.slice(end)}`;
+  return `${routing.slice(0, contentStart)}${content}\n${routing.slice(end)}`;
 }
 
 // Preserve the dispatch rule in the prompt of each agent that can delegate.
@@ -129,13 +129,23 @@ const COORDINATOR_RULE = 'Load `SendMessage` with `ToolSearch` (`select:SendMess
 const GEMINI_REPORT_RULE = "A claim about a provider, a count or a measurement gives its source: a quote of the docs, or the command and its output. Write each other claim as an assumption, under 'Not verified'. Cite each file as a path relative to the repository root, at the commit of the brief.";
 const SOL_REPORT_FILE_RULE = 'When the brief names a report file, write the report to it, and also give it as your final message.';
 
+const CHILD_BRIEFS = [
+  { models: 'gpt-*, gemini-*', matches: name => /^(gpt|gemini)-/.test(name), paragraph: COORDINATOR_RULE },
+  { models: 'gemini-*', matches: name => name.startsWith('gemini-'), paragraph: GEMINI_REPORT_RULE },
+  { models: 'gpt-6.2-sol', matches: name => name.startsWith('gpt-6.2-sol-'), paragraph: SOL_REPORT_FILE_RULE },
+];
+
+function renderChildBriefs() {
+  return CHILD_BRIEFS.map(({ models, paragraph }) => `<child-brief models="${models}">\n${paragraph}\n</child-brief>`)
+    .join('\n\n');
+}
+
 /** One agent file, frontmatter and prompt. */
 function render(agent) {
   const { name, label, when, nesting, byName = false } = agent;
   const effort = name.slice(name.lastIndexOf('-') + 1);
-  const coordinator = /^(gpt|gemini)-/.test(name) ? `\n\n${COORDINATOR_RULE}` : '';
-  const report = name.startsWith('gemini-') ? `\n\n${GEMINI_REPORT_RULE}` : '';
-  const solReportFile = name.startsWith('gpt-6.2-sol-') ? `\n\n${SOL_REPORT_FILE_RULE}` : '';
+  const modelParagraphs = CHILD_BRIEFS.filter(({ matches }) => matches(name)).map(({ paragraph }) => paragraph);
+  const prompt = [nestingParagraph(nesting), ...modelParagraphs].join('\n\n');
   return `---
 name: ${name}
 description: ${label} at ${effort} effort. ${byName ? `${BY_NAME} ` : ''}${when}
@@ -145,18 +155,19 @@ effort: ${effort}
 
 You are an engineering subagent running on ${label} at ${effort} effort. The orchestrator gives you a complete brief. Do the work in the brief and nothing outside it. Use the skills the brief names. Report what you changed, what you verified, and any part of the brief you could not complete, with the reason.
 
-${nestingParagraph(nesting)}${coordinator}${solReportFile}${report}
+${prompt}
 `;
 }
 
 const check = process.argv.includes('--check');
 const routing = readFileSync(routingPath, 'utf8');
-const updatedRouting = renderRouting(routing);
+const routingWithRoles = replaceRoutingSection(routing, 'roles', renderRoles());
+const updatedRouting = replaceRoutingSection(routingWithRoles, 'child-briefs', renderChildBriefs());
 const expected = new Map();
 let stale = 0;
 
 if (check && routing !== updatedRouting) {
-  console.error('stale role table: hooks/routing.md');
+  console.error('stale generated sections: hooks/routing.md');
   stale = 1;
 }
 
@@ -192,8 +203,8 @@ for (const file of readdirSync(agentsDir)) {
 }
 
 if (check) {
-  if (!stale) console.log(`all ${expected.size} agent files and the role table are up to date`);
+  if (!stale) console.log(`all ${expected.size} agent files and generated routing sections are up to date`);
   process.exit(stale);
 }
-console.log(`wrote ${expected.size} agent files and refreshed the role table`);
+console.log(`wrote ${expected.size} agent files and refreshed the generated routing sections`);
 console.log('verify they loaded: run /agents in a new session (a stale file list means a parse error)');

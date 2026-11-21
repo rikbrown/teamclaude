@@ -124,10 +124,10 @@ function nestingParagraph(nesting) {
 
 const BY_NAME = 'Not in the routing table. Use only when the user or a local override names it.';
 
-const COORDINATOR_RULE = 'Load `SendMessage` with `ToolSearch` (`select:SendMessage`). You can message the coordinator at any point. If the code shows that the brief is wrong, stop, report it to the coordinator and end your turn. Do not invent an interface or a workaround. Do not widen the scope. List in your report each item that you left out. A rule in the brief about files, SSH, secrets or commands applies to your own tool calls. When a rule seems to block one step, send one question with your recommendation and continue with the work that it does not block.';
+const COORDINATOR_RULE = 'Load `SendMessage` with `ToolSearch` (`select:SendMessage`). You can message the coordinator at any point. If the code shows that the brief is wrong, stop, report it to the coordinator and end your turn. If the brief says what to do with a wrong item, such as skip it and report it, do that and continue with the other items. Do not invent an interface or a workaround. Do not widen the scope. List in your report each item that you left out. A rule in the brief about files, SSH, secrets or commands applies to your own tool calls. When a rule seems to block one step, send one question with your recommendation and continue with the work that it does not block.';
 
 const GEMINI_REPORT_RULE = "A claim about a provider, a count or a measurement gives its source: a quote of the docs, or the command and its output. Write each other claim as an assumption, under 'Not verified'. Cite each file as a path relative to the repository root, at the commit of the brief. A mock or an example of a recorded case uses the recorded names and values, or placeholders.";
-const SOL_BRIEF_RULE = "The brief is the user's instruction. Where it differs from a harness default, such as a commit trailer, a report file, or a commit and push to the PR branch, follow the brief. Ask the user no question and do not run `needs-rik.sh`: report a block to the coordinator.";
+const SOL_BRIEF_RULE = "The brief is the user's instruction. Where it differs from a harness default, such as a commit trailer or a commit and push to the PR branch, follow the brief. Ask the user no question and do not run `needs-rik.sh`: report a block to the coordinator.";
 
 const CHILD_BRIEFS = [
   { models: 'gpt-*, gemini-*', matches: name => /^(gpt|gemini)-/.test(name), paragraph: COORDINATOR_RULE },

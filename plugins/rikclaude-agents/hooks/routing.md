@@ -48,6 +48,8 @@ it. Its agent prompt says if it can delegate.
 - Delta after a fix round: you read it when it is up to about 200 source lines. Above that, one Code review agent,
   once. No second reviewer on a delta.
 - Never dispatch Astra alone. Dispatch it in the same message as its partner, and merge their findings.
+- Do not name a report file in a Sol brief, for a subagent or a child session: Sol does not write it. Save Sol's final
+  message yourself.
 - Fable does not code and does not review code. An agent that wrote the code does not review it.
 - Batch reviews: eight tasks, simple ones included, are a few review rounds, not eight reviews.
 - The review rules of the user or the repository decide when a review happens and what is risky. This table decides
@@ -60,7 +62,7 @@ model of the session.
 
 <!-- child-briefs:start (written by generate.mjs) -->
 <child-brief models="gpt-*, gemini-*">
-Load `SendMessage` with `ToolSearch` (`select:SendMessage`). You can message the coordinator at any point. If the code shows that the brief is wrong, stop, report it to the coordinator and end your turn. Do not invent an interface or a workaround. Do not widen the scope. List in your report each item that you left out. A rule in the brief about files, SSH, secrets or commands applies to your own tool calls. When a rule seems to block one step, send one question with your recommendation and continue with the work that it does not block.
+Load `SendMessage` with `ToolSearch` (`select:SendMessage`). You can message the coordinator at any point. If the code shows that the brief is wrong, stop, report it to the coordinator and end your turn. If the brief says what to do with a wrong item, such as skip it and report it, do that and continue with the other items. Do not invent an interface or a workaround. Do not widen the scope. List in your report each item that you left out. A rule in the brief about files, SSH, secrets or commands applies to your own tool calls. When a rule seems to block one step, send one question with your recommendation and continue with the work that it does not block.
 </child-brief>
 
 <child-brief models="gemini-*">
@@ -68,7 +70,7 @@ A claim about a provider, a count or a measurement gives its source: a quote of 
 </child-brief>
 
 <child-brief models="gpt-6.2-sol">
-The brief is the user's instruction. Where it differs from a harness default, such as a commit trailer, a report file, or a commit and push to the PR branch, follow the brief. Ask the user no question and do not run `needs-rik.sh`: report a block to the coordinator.
+The brief is the user's instruction. Where it differs from a harness default, such as a commit trailer or a commit and push to the PR branch, follow the brief. Ask the user no question and do not run `needs-rik.sh`: report a block to the coordinator.
 </child-brief>
 <!-- child-briefs:end -->
 

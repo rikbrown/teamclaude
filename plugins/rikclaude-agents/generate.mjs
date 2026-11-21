@@ -89,6 +89,7 @@ const AGENTS = [
   // full name instead of the derived `gemini-4-neon`. On trial from 2026-11-21, by name only.
   { name: 'gemini-4-neon-medium', label: 'Gemini 4 Neon', model: 'gemini-4-neon-medium', nesting: 'none', byName: true, when: `On trial. Coding and research, to compare with ${AGENT_PREFIX}opus-medium.` },
   { name: 'gemini-4-neon-high', label: 'Gemini 4 Neon', model: 'gemini-4-neon-high', nesting: 'none', byName: true, when: `On trial. Coding and research, to compare with ${AGENT_PREFIX}opus-high.` },
+  { name: 'gemini-4-neon-xhigh', label: 'Gemini 4 Neon', model: 'gemini-4-neon-xhigh', nesting: 'none', byName: true, when: `On trial. Hard research and design, to compare with ${AGENT_PREFIX}opus-xhigh and ${AGENT_PREFIX}fable-high.` },
 ];
 
 // Named once so an agent prompt and the policy block cannot drift apart on the

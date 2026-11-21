@@ -7,7 +7,7 @@ time.
 
 The models it names are the ones a TeamClaude fleet serves — `claude-fable-5-2[1m]`, `claude-opus-5-5[1m]`, `claude-sonnet-5-5[1m]` and `claude-haiku-5-5[1m]` for Claude,
 `gpt-6.2-astra`, `gpt-6.2-sol`, `gpt-6-luna` and `gpt-6.1-terra` through the [Codex sidecar](openai.md), and, on trial,
-`gemini-4-neon-medium` and `gemini-4-neon-high` through a `gemini-*` route. On a plain Claude Code install, with no fleet
+`gemini-4-neon-medium`, `gemini-4-neon-high` and `gemini-4-neon-xhigh` through a `gemini-*` route. On a plain Claude Code install, with no fleet
 behind it, the GPT and Gemini agents resolve to model ids nothing can answer.
 
 ## Why an agent definition and not the `model` parameter
@@ -74,7 +74,7 @@ at the moment it picks an agent, and they say more than this table does.
 | `gpt-6-luna` | `gpt-6-luna-medium` | Quick, cheap tasks, on par with Haiku |
 | `gpt-6.2-sol` | `gpt-6.2-sol-xhigh` | By name only. Light or interim code review |
 | `gpt-6.1-terra` | `gpt-6.1-terra-medium` | By name only. Prose refinement of docs, comments and messages. On trial for exploration against `sonnet-high` |
-| `gemini-4-neon-medium`, `gemini-4-neon-high` | `gemini-4-neon-medium`, `gemini-4-neon-high` | By name only. On trial for coding and research against `opus-medium` and `opus-high`. Gemini spells the thinking level in the model id, so the roster sets `model` to the full name |
+| `gemini-4-neon-medium`, `gemini-4-neon-high`, `gemini-4-neon-xhigh` | `gemini-4-neon-medium`, `gemini-4-neon-high`, `gemini-4-neon-xhigh` | By name only. On trial for coding and research against `opus-medium` and `opus-high`; `xhigh` for hard research and design against `opus-xhigh` and `fable-high`. Gemini spells the thinking level in the model id, so the roster sets `model` to the full name |
 
 "By name only" agents open their description with "Use only when the user names it.", set by the
 roster's `byName` flag, so the orchestrator never picks them on its own judgement.

@@ -5,8 +5,9 @@ From the `rikclaude-agents` plugin. Its agents are namespaced, so a dispatch alw
 
 - These rules are for the orchestrator, the session the user talks to. If you are a subagent, do
   the work in your brief. Your agent prompt says whether you may delegate.
-- The fleet serves four models beyond the Claude ones: `gpt-6.2-{astra,sol}`, `gpt-6.1-terra`
-  and `gpt-6-luna`. Reach them through the Agent tool. Never use the `codex` CLI.
+- The fleet serves five models beyond the Claude ones: `gpt-6.2-{astra,sol}`, `gpt-6.1-terra`,
+  `gpt-6-luna` and, on trial, `gemini-4-neon`. Reach them through the Agent tool. Never use the
+  `codex` or `gemini` CLI.
 - Always launch a model through its effort-named agent, e.g. `rikclaude-agents:opus-high`.
   Never dispatch a model directly: a direct dispatch silently inherits this session's effort. Each
   agent's description says when to pick it.

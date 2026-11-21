@@ -6,8 +6,9 @@ plus the routing policy that goes with them. Install it and a session can say "d
 time.
 
 The models it names are the ones a TeamClaude fleet serves — `claude-fable-5-2[1m]`, `claude-opus-5-5[1m]`, `claude-sonnet-5-5[1m]` and `claude-haiku-5-5[1m]` for Claude,
-`gpt-6.2-astra`, `gpt-6.2-sol`, `gpt-6-luna` and `gpt-6.1-terra` through the [Codex sidecar](openai.md). On a plain Claude
-Code install, with no fleet behind it, the GPT agents resolve to model ids nothing can answer.
+`gpt-6.2-astra`, `gpt-6.2-sol`, `gpt-6-luna` and `gpt-6.1-terra` through the [Codex sidecar](openai.md), and, on trial,
+`gemini-4-neon-medium` and `gemini-4-neon-high` through a `gemini-*` route. On a plain Claude Code install, with no fleet
+behind it, the GPT and Gemini agents resolve to model ids nothing can answer.
 
 ## Why an agent definition and not the `model` parameter
 
@@ -73,6 +74,7 @@ at the moment it picks an agent, and they say more than this table does.
 | `gpt-6-luna` | `gpt-6-luna-medium` | Quick, cheap tasks, on par with Haiku |
 | `gpt-6.2-sol` | `gpt-6.2-sol-xhigh` | By name only. Light or interim code review |
 | `gpt-6.1-terra` | `gpt-6.1-terra-medium` | By name only. Prose refinement of docs, comments and messages. On trial for exploration against `sonnet-high` |
+| `gemini-4-neon-medium`, `gemini-4-neon-high` | `gemini-4-neon-medium`, `gemini-4-neon-high` | By name only. On trial for coding and research against `opus-medium` and `opus-high`. Gemini spells the thinking level in the model id, so the roster sets `model` to the full name |
 
 "By name only" agents open their description with "Use only when the user names it.", set by the
 roster's `byName` flag, so the orchestrator never picks them on its own judgement.
@@ -84,6 +86,11 @@ when its brief says so, or not at all. Without it, a subagent that reaches the r
 Every `gpt-*` name has to exist in your fleet's [`customModels`](configuration.md) and be served by
 a sidecar that knows it, or the dispatch reaches a model id nothing answers. See
 [OpenAI models](openai.md) for the sidecar setup; the ids there and the ids here are the same list.
+
+The `gemini-*` agents need a route that sends `gemini-*` to a translating proxy for a Google AI
+subscription. The trial uses [antigravity-claude-proxy](https://github.com/badrisnarayanan/antigravity-claude-proxy)
+as a backend account (`upstream` set to the proxy, `accessToken` set to the proxy's `API_KEY`). That proxy
+holds the Google sign-in and picks the account itself, so TeamClaude does not see the Google quota yet.
 
 ## The routing policy
 

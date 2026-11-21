@@ -85,11 +85,15 @@ const AGENTS = [
   { name: 'gpt-6.2-sol-xhigh', label: 'GPT-6.2 Sol', nesting: 'none', byName: true, when: 'Light or interim code review. Weak at coding.' },
   // { name: 'gpt-6.2-sol-high', label: 'GPT-6.2 Sol', nesting: 'none', byName: true, when: 'Light or interim code review. Weak at coding.' },
   { name: 'gpt-6.1-terra-medium', label: 'GPT-6.1 Terra', nesting: 'none', byName: true, when: `Prose refinement of docs, comments and messages. Also on trial for exploration that needs no deep fact-finding, against ${AGENT_PREFIX}sonnet-high. Weak at hard coding.` },
+  // Gemini 4 Neon spells its thinking level in the model id (`gemini-4-neon-high`), so `model` repeats the
+  // full name instead of the derived `gemini-4-neon`. On trial from 2026-11-21, by name only.
+  { name: 'gemini-4-neon-medium', label: 'Gemini 4 Neon', model: 'gemini-4-neon-medium', nesting: 'none', byName: true, when: `On trial. Coding and research, to compare with ${AGENT_PREFIX}opus-medium.` },
+  { name: 'gemini-4-neon-high', label: 'Gemini 4 Neon', model: 'gemini-4-neon-high', nesting: 'none', byName: true, when: `On trial. Coding and research, to compare with ${AGENT_PREFIX}opus-high.` },
 ];
 
 // Named once so an agent prompt and the policy block cannot drift apart on the
 // one rule that matters most.
-const EFFORT_RULE = `Use only the effort-named agent types (\`${AGENT_PREFIX}fable-*\`, \`${AGENT_PREFIX}opus-*\`, \`${AGENT_PREFIX}sonnet-*\`, \`${AGENT_PREFIX}haiku-*\`, \`${AGENT_PREFIX}gpt-*-*\`) — never dispatch a model directly, which silently inherits this session's effort.`;
+const EFFORT_RULE = `Use only the effort-named agent types (\`${AGENT_PREFIX}fable-*\`, \`${AGENT_PREFIX}opus-*\`, \`${AGENT_PREFIX}sonnet-*\`, \`${AGENT_PREFIX}haiku-*\`, \`${AGENT_PREFIX}gpt-*-*\`, \`${AGENT_PREFIX}gemini-*-*\`) — never dispatch a model directly, which silently inherits this session's effort.`;
 
 /** The paragraph that tells one agent whether it may launch agents of its own. */
 function nestingParagraph(nesting) {

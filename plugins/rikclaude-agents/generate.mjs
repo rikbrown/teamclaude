@@ -1,33 +1,15 @@
 #!/usr/bin/env node
-// Regenerates this plugin's effort-pinned subagent definitions in agents/.
+// Regenerates the agent definitions in agents/ and the role table in hooks/routing.md.
 //
-// Why these exist: the Agent tool's per-call `model` parameter is an alias enum
-// (sonnet|opus|haiku|fable) with no effort control, so a direct dispatch silently
-// inherits the parent session's effort. An agent DEFINITION can pin both, so each
-// model gets one file per effort level and the orchestrator names the agent type.
+// An agent definition pins the model and effort. A direct dispatch inherits the
+// parent session's effort. Claude Code adds the namespace to the frontmatter name.
 //
-// Why every rule spells a prefix: Claude Code namespaces plugin agents as
-// `<plugin>:<agent>`, so the dispatchable name is `rikclaude-agents:fable-medium`
-// and not `fable-medium`. A bare name left in a rule names nothing the harness can
-// resolve, which lands the caller back on the effort-less direct dispatch these
-// files exist to prevent. AGENT_PREFIX is the one place it is spelled; the
-// frontmatter `name:` stays bare, because Claude Code adds the prefix itself.
+// The routing table is for the orchestrator. An agent description names its role.
+// A SessionStart hook prints the policy because Claude Code does not load a plugin's CLAUDE.md.
+// Changes to agent descriptions take effect in a new session.
 //
-// Why routing lives in the descriptions: the orchestrator reads each description
-// at the moment it picks a subagent_type, so "when to pick this one" has to be
-// there. Policy that spans all the agents cannot ride along in a CLAUDE.md — a
-// plugin's own CLAUDE.md is not loaded as context — so it ships as
-// hooks/subagents.md and a SessionStart hook prints it into every session.
-//
-// Claude Code announces agents by name only, so an edited description reaches the
-// orchestrator in a NEW session, not the current one.
-//
-// Why each agent gets a nesting rule: a subagent that reaches the routing policy
-// — whether through a CLAUDE.md or through the hook below — used to read
-// "delegate liberally" as an instruction to itself, and a two-line task grew a
-// tree. That bullet is now scoped to the orchestrator, and each agent prompt says
-// what IT may do: none (do the work alone), brief (only if the brief says so) or
-// own (its own judgement).
+// Each agent prompt has a nesting rule: none (do the work alone), brief (only if
+// the brief says so) or own (its own judgement).
 // `disallowedTools: Agent` in the frontmatter would enforce "none" at the harness
 // level. Verified to work, deliberately not used yet; prompt first.
 //
@@ -41,59 +23,88 @@ import { fileURLToPath } from 'node:url';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const agentsDir = join(root, 'agents');
+const routingPath = join(root, 'hooks', 'routing.md');
 
 /** The namespace Claude Code puts in front of a plugin agent's name. */
 const AGENT_PREFIX = 'rikclaude-agents:';
 
-// The roster, and the only source of truth for it. `name` is `<model>-<effort>`:
-// everything after the last hyphen is the effort, everything before it is the
-// model id the frontmatter carries, which has to match a `customModels` row (or
-// be a built-in alias) for the dispatch to reach anything.
+// `name` is `<model>-<effort>`. `model` overrides the derived model ID to pin a
+// version or the 1M context window. An unpinned ID or alias runs at 200K.
+// The frontmatter leaves the model ID unquoted. The parser keeps any quotes.
 //
-// `model` overrides that derived id, to pin a version the name does not spell —
-// `opus-high` runs `claude-opus-5-5[1m]`, not whatever the `opus` alias points at,
-// `sonnet-high` runs `claude-sonnet-5-5[1m]`, and the Fable rows run `claude-fable-5-2[1m]`.
-// It also opts into 1M: a bare id or alias runs at 200K, only the `[1m]` spelling
-// gets the full window.
-// The frontmatter emits it unquoted: the parser takes the rest of the line, so
-// quotes would come back as part of the id.
-//
-// `nesting` is one of none | brief | own — see the head comment.
-//
-// `byName` marks an agent the orchestrator never picks on its own judgement, only
-// when the user names it. render() puts BY_NAME first in its description, so the
-// rule is the first thing read at pick time and no row can drop or reword it.
-//
-// Commented-out rows are efforts that exist but are not worth listing: every row
-// costs the orchestrator description text at pick time, so the roster stays the
-// set somebody would actually choose between.
+// `byName` limits use to agents named by the user or a local override. `render`
+// puts this restriction before the role text.
+// `nesting` is one of none | brief | own.
 /** @type {{ name: string, label: string, model?: string, when: string, nesting: 'none'|'brief'|'own', byName?: boolean }[]} */
 const AGENTS = [
-  { name: 'opus-medium', label: 'Opus 5.5', model: 'claude-opus-5-5[1m]', nesting: 'brief', when: `Default for coding when the brief settles the design and, for a bug, names the cause, e.g. a planned feature or fix, a dependency update, a narrow fix from PR feedback, or internal tooling. Planned work comes here, whatever its size; split a large plan into parts. For less well-defined coding, use ${AGENT_PREFIX}opus-high. Also the default for fact-finding and research, and exploration across many files or naming conventions, where ${AGENT_PREFIX}sonnet-high is too shallow.` },
-  { name: 'opus-high', label: 'Opus 5.5', model: 'claude-opus-5-5[1m]', nesting: 'brief', when: `Coding that is less well defined. The brief leaves a design decision or the cause of a bug open, the change spans packages or changes the exports of a shared package, or the result needs judgement, e.g. text that a model reads, checked by evals. Also code review of a PR, a branch, a commit or a diff, by an agent that did not write the code; for the riskiest changes, dispatch it together with ${AGENT_PREFIX}gpt-6.2-astra-medium. Also release QA and browser checks of a change, research that must reason through how code behaves, and prose review of docs that Opus did not write.` },
-  { name: 'opus-xhigh', label: 'Opus 5.5', model: 'claude-opus-5-5[1m]', nesting: 'brief', when: `Research with a wide scope only. Never for coding, also when the design or the cause of a bug is open; use ${AGENT_PREFIX}opus-high.` },
-  { name: 'sonnet-high', label: 'Sonnet 5.5', model: 'claude-sonnet-5-5[1m]', nesting: 'none', when: `Exploration that needs no deep fact-finding, e.g. locating code or summarising a module. Also throwaway code that is not committed, e.g. evals or local helper scripts. For exploration across many files, use ${AGENT_PREFIX}opus-medium. Not for committed code; use ${AGENT_PREFIX}opus-medium.` },
-  { name: 'sonnet-xhigh', label: 'Sonnet 5.5', model: 'claude-sonnet-5-5[1m]', nesting: 'none', byName: true, when: `Otherwise use ${AGENT_PREFIX}opus-medium for exploration across many files and for internal tooling.` },
-  { name: 'fable-medium', label: 'Fable 5.2', model: 'claude-fable-5-2[1m]', nesting: 'none', when: `Research and technical design that need heavy reasoning. For design, plan or architecture review, use ${AGENT_PREFIX}fable-high with ${AGENT_PREFIX}gpt-6.2-astra-medium instead. Does not code or review code; use ${AGENT_PREFIX}opus-medium for coding and ${AGENT_PREFIX}opus-high for code review.` },
-  { name: 'fable-high', label: 'Fable 5.2', model: 'claude-fable-5-2[1m]', nesting: 'own', when: `The default Fable half of the design review tag-team. Dispatch it together with ${AGENT_PREFIX}gpt-6.2-astra-medium for design, plan or architecture review, before code exists. Also the deepest research. Does not code or review code; use ${AGENT_PREFIX}opus-medium for coding and ${AGENT_PREFIX}opus-high for code review.` },
-  { name: 'fable-xhigh', label: 'Fable 5.2', model: 'claude-fable-5-2[1m]', nesting: 'own', when: `The Fable half of the design review tag-team for the hardest design, plan or architecture reviews, where ${AGENT_PREFIX}fable-high is not enough. Dispatch it together with ${AGENT_PREFIX}gpt-6.2-astra-medium. Does not code or review code; use ${AGENT_PREFIX}opus-medium for coding and ${AGENT_PREFIX}opus-high for code review.` },
-  { name: 'gpt-6.2-astra-medium', label: 'GPT-6.2 Astra', nesting: 'none', when: `The Astra half of the design review tag-team. Dispatch it together with ${AGENT_PREFIX}fable-high or ${AGENT_PREFIX}fable-xhigh for design, plan or architecture review. Also the second reviewer with ${AGENT_PREFIX}opus-high for the riskiest code review. Never dispatch it alone.` },
-  { name: 'gpt-6.2-astra-high', label: 'GPT-6.2 Astra', nesting: 'own', byName: true, when: `Otherwise use ${AGENT_PREFIX}gpt-6.2-astra-medium for design, plan or architecture review, and with ${AGENT_PREFIX}opus-high for the riskiest code review.` },
+  { name: 'opus-medium', label: 'Opus 5.5', model: 'claude-opus-5-5[1m]', nesting: 'brief', when: 'Settled coding. The default for research.' },
+  { name: 'opus-high', label: 'Opus 5.5', model: 'claude-opus-5-5[1m]', nesting: 'brief', when: 'Open coding. Code review. QA and browser checks. Research on how code behaves.' },
+  { name: 'opus-xhigh', label: 'Opus 5.5', model: 'claude-opus-5-5[1m]', nesting: 'brief', byName: true, when: 'Research with a wide scope. Never for coding.' },
+  { name: 'sonnet-high', label: 'Sonnet 5.5', model: 'claude-sonnet-5-5[1m]', nesting: 'none', when: 'Exploration. Throwaway code that is not committed.' },
+  { name: 'sonnet-xhigh', label: 'Sonnet 5.5', model: 'claude-sonnet-5-5[1m]', nesting: 'none', byName: true, when: 'Exploration across many files.' },
+  { name: 'fable-medium', label: 'Fable 5.2', model: 'claude-fable-5-2[1m]', nesting: 'none', byName: true, when: 'Research and technical design that need heavy reasoning. Does not code or review code.' },
+  { name: 'fable-high', label: 'Fable 5.2', model: 'claude-fable-5-2[1m]', nesting: 'own', when: 'Design or plan review, with Astra. Research with the widest scope. Does not code or review code.' },
+  { name: 'fable-xhigh', label: 'Fable 5.2', model: 'claude-fable-5-2[1m]', nesting: 'own', when: 'The hardest design or plan review, with Astra. Does not code or review code.' },
+  { name: 'gpt-6.2-astra-medium', label: 'GPT-6.2 Astra', nesting: 'none', when: 'Second reviewer. Never dispatch it alone.' },
+  { name: 'gpt-6.2-astra-high', label: 'GPT-6.2 Astra', nesting: 'own', byName: true, when: 'A design or plan review at higher effort.' },
   // { name: 'gpt-6.2-astra-xhigh', label: 'GPT-6.2 Astra', nesting: 'own', byName: true, when: `Otherwise use ${AGENT_PREFIX}gpt-6.2-astra-medium in the review tag-team.` },
-  { name: 'haiku-medium', label: 'Haiku 5.5', model: 'claude-haiku-5-5[1m]', nesting: 'none', when: `Quick, cheap tasks. On par with ${AGENT_PREFIX}gpt-6-luna-medium. Not for production code.` },
-  { name: 'gpt-6-luna-medium', label: 'GPT-6 Luna', nesting: 'none', when: `Quick, cheap tasks. On par with ${AGENT_PREFIX}haiku-medium. Weak at coding.` },
-  { name: 'gpt-6.2-sol-xhigh', label: 'GPT-6.2 Sol', nesting: 'none', byName: true, when: 'Light or interim code review. Weak at coding.' },
+  { name: 'haiku-medium', label: 'Haiku 5.5', model: 'claude-haiku-5-5[1m]', nesting: 'none', when: 'Quick, cheap tasks. Not for production code.' },
+  { name: 'gpt-6-luna-medium', label: 'GPT-6 Luna', nesting: 'none', byName: true, when: 'Quick, cheap tasks. Weak at coding.' },
+  { name: 'gpt-6.2-sol-xhigh', label: 'GPT-6.2 Sol', nesting: 'none', when: 'Small settled coding.' },
   // { name: 'gpt-6.2-sol-high', label: 'GPT-6.2 Sol', nesting: 'none', byName: true, when: 'Light or interim code review. Weak at coding.' },
-  { name: 'gpt-6.1-terra-medium', label: 'GPT-6.1 Terra', nesting: 'none', byName: true, when: `Prose refinement of docs, comments and messages. Also on trial for exploration that needs no deep fact-finding, against ${AGENT_PREFIX}sonnet-high. Weak at hard coding.` },
-  // Gemini 4 Neon spells its thinking level in the model id (`gemini-4-neon-high`), so `model` repeats the
-  // full name instead of the derived `gemini-4-neon`. On trial from 2026-11-21, by name only.
-  { name: 'gemini-4-neon-medium', label: 'Gemini 4 Neon', model: 'gemini-4-neon-medium', nesting: 'none', byName: true, when: `On trial. Coding and research, to compare with ${AGENT_PREFIX}opus-medium.` },
-  { name: 'gemini-4-neon-high', label: 'Gemini 4 Neon', model: 'gemini-4-neon-high', nesting: 'none', byName: true, when: `On trial. Coding and research, to compare with ${AGENT_PREFIX}opus-high.` },
-  { name: 'gemini-4-neon-xhigh', label: 'Gemini 4 Neon', model: 'gemini-4-neon-xhigh', nesting: 'none', byName: true, when: `On trial. Hard research and design, to compare with ${AGENT_PREFIX}opus-xhigh and ${AGENT_PREFIX}fable-high.` },
+  { name: 'gpt-6.1-terra-medium', label: 'GPT-6.1 Terra', nesting: 'none', byName: true, when: 'Prose refinement of docs, comments and messages.' },
+  // Gemini 4 Neon includes the thinking level in the model ID.
+  { name: 'gemini-4-neon-medium', label: 'Gemini 4 Neon', model: 'gemini-4-neon-medium', nesting: 'none', byName: true, when: 'On trial. Coding and research.' },
+  { name: 'gemini-4-neon-high', label: 'Gemini 4 Neon', model: 'gemini-4-neon-high', nesting: 'none', byName: true, when: 'On trial. Coding, code review and research.' },
+  { name: 'gemini-4-neon-xhigh', label: 'Gemini 4 Neon', model: 'gemini-4-neon-xhigh', nesting: 'none', byName: true, when: 'On trial. Hard research and design.' },
 ];
 
-// Named once so an agent prompt and the policy block cannot drift apart on the
-// one rule that matters most.
+const ROLES = [
+  { role: 'Small settled coding', agents: ['gpt-6.2-sol-xhigh'], applies: 'A fix round with exact findings, a rebase, PR or CI feedback. New code only if the brief lists the files and functions to add, in 5 source files or fewer.' },
+  { role: 'Settled coding', agents: ['opus-medium'], applies: 'The brief settles the design and, for a bug, names the cause. Any size: split a large plan into parts.' },
+  { role: 'Open coding', agents: ['opus-high'], applies: 'The coder must decide a design question, find the cause of a bug, or write model text or an eval rubric.' },
+  { role: 'Throwaway code', agents: ['sonnet-high'], applies: 'Code that is not committed. If a bug in it can reach a user, it is Settled coding.' },
+  { role: 'Code review', agents: ['opus-high'], applies: 'A PR, a branch, a commit or a diff, by an agent that did not write the code.' },
+  { role: 'Second reviewer', agents: ['gpt-6.2-astra-medium'], applies: 'With the Code review agent, on the first review only: a risky change, or above about 400 source lines.' },
+  { role: 'Design or plan review', agents: ['fable-high', 'gpt-6.2-astra-medium'], applies: `Before code exists. For the hardest, name \`${AGENT_PREFIX}fable-xhigh\` in place of fable-high.` },
+  { role: 'Research', agents: ['opus-medium'], applies: `Fact-finding. Use \`${AGENT_PREFIX}opus-high\` to reason through how code behaves, and \`${AGENT_PREFIX}fable-high\` for the widest scope.` },
+  { role: 'QA and browser checks', agents: ['opus-high'], applies: 'Release QA and browser checks of a change.' },
+  { role: 'Exploration', agents: ['sonnet-high'], applies: `Locating code or summarising a module. Or the built-in \`Explore\` agent. Across many files, \`${AGENT_PREFIX}opus-medium\`.` },
+  { role: 'Quick, cheap tasks', agents: ['haiku-medium'], applies: 'Not for production code.' },
+];
+
+function modelFor({ name, model }) {
+  return model ?? name.slice(0, name.lastIndexOf('-'));
+}
+
+function renderRoles() {
+  const models = new Map(AGENTS.map(agent => [agent.name, modelFor(agent)]));
+  const lines = ['| Role | Agent | Model | Applies when |', '| --- | --- | --- | --- |'];
+  for (const { role, agents, applies } of ROLES) {
+    const types = agents.map(name => `\`${AGENT_PREFIX}${name}\``).join(' + ');
+    const ids = agents.map(name => {
+      const model = models.get(name);
+      if (!model) throw new Error(`unknown agent in role ${role}: ${name}`);
+      return `\`${model}\``;
+    }).join(' + ');
+    lines.push(`| ${role} | ${types} | ${ids} | ${applies} |`);
+  }
+  return lines.join('\n');
+}
+
+function renderRouting(routing) {
+  const startMarker = '<!-- roles:start (written by generate.mjs) -->\n';
+  const endMarker = '<!-- roles:end -->';
+  const start = routing.indexOf(startMarker);
+  const end = routing.indexOf(endMarker);
+  const tableStart = start + startMarker.length;
+  if (start < 0 || end < tableStart || start !== routing.lastIndexOf(startMarker) || end !== routing.lastIndexOf(endMarker)) {
+    throw new Error('invalid role table markers in hooks/routing.md');
+  }
+  return `${routing.slice(0, tableStart)}${renderRoles()}\n${routing.slice(end)}`;
+}
+
+// Preserve the dispatch rule in the prompt of each agent that can delegate.
 const EFFORT_RULE = `Use only the effort-named agent types (\`${AGENT_PREFIX}fable-*\`, \`${AGENT_PREFIX}opus-*\`, \`${AGENT_PREFIX}sonnet-*\`, \`${AGENT_PREFIX}haiku-*\`, \`${AGENT_PREFIX}gpt-*-*\`, \`${AGENT_PREFIX}gemini-*-*\`) — never dispatch a model directly, which silently inherits this session's effort.`;
 
 /** The paragraph that tells one agent whether it may launch agents of its own. */
@@ -110,28 +121,41 @@ function nestingParagraph(nesting) {
   }
 }
 
-/** The sentence every `byName` description opens with; subagents.md quotes it. */
-const BY_NAME = 'Use only when the user names it.';
+const BY_NAME = 'Not in the routing table. Use only when the user or a local override names it.';
+
+const COORDINATOR_RULE = 'Load `SendMessage` with `ToolSearch` (`select:SendMessage`). You can message the coordinator at any point. If the code shows that the brief is wrong, stop, report it to the coordinator and end your turn. Do not invent an interface or a workaround. Do not widen the scope. List in your report each item that you left out. A rule in the brief about files, SSH, secrets or commands applies to your own tool calls. When a rule seems to block one step, send one question with your recommendation and continue with the work that it does not block.';
+
+const GEMINI_REPORT_RULE = "A claim about a provider, a count or a measurement gives its source: a quote of the docs, or the command and its output. Write each other claim as an assumption, under 'Not verified'. Cite each file as a path relative to the repository root, at the commit of the brief.";
 
 /** One agent file, frontmatter and prompt. */
-function render({ name, label, model = name.slice(0, name.lastIndexOf('-')), when, nesting, byName = false }) {
+function render(agent) {
+  const { name, label, when, nesting, byName = false } = agent;
   const effort = name.slice(name.lastIndexOf('-') + 1);
+  const coordinator = /^(gpt|gemini)-/.test(name) ? `\n\n${COORDINATOR_RULE}` : '';
+  const report = name.startsWith('gemini-') ? `\n\n${GEMINI_REPORT_RULE}` : '';
   return `---
 name: ${name}
 description: ${label} at ${effort} effort. ${byName ? `${BY_NAME} ` : ''}${when}
-model: ${model}
+model: ${modelFor(agent)}
 effort: ${effort}
 ---
 
 You are an engineering subagent running on ${label} at ${effort} effort. The orchestrator gives you a complete brief. Do the work in the brief and nothing outside it. Use the skills the brief names. Report what you changed, what you verified, and any part of the brief you could not complete, with the reason.
 
-${nestingParagraph(nesting)}
+${nestingParagraph(nesting)}${coordinator}${report}
 `;
 }
 
 const check = process.argv.includes('--check');
+const routing = readFileSync(routingPath, 'utf8');
+const updatedRouting = renderRouting(routing);
 const expected = new Map();
 let stale = 0;
+
+if (check && routing !== updatedRouting) {
+  console.error('stale role table: hooks/routing.md');
+  stale = 1;
+}
 
 for (const agent of AGENTS) {
   // `: ` anywhere in the description would end the YAML key early and take the
@@ -154,17 +178,19 @@ for (const agent of AGENTS) {
   }
 }
 
-if (!check) for (const [file, body] of expected) writeFileSync(join(agentsDir, file), body);
+if (!check) {
+  for (const [file, body] of expected) writeFileSync(join(agentsDir, file), body);
+  if (routing !== updatedRouting) writeFileSync(routingPath, updatedRouting);
+}
 
-// Flag any other .md in there, so a renamed model does not leave a ghost agent
-// behind — a plugin ships what is on disk, not what this roster says.
+// Report agent files that the roster does not define. The plugin ships them too.
 for (const file of readdirSync(agentsDir)) {
   if (file.endsWith('.md') && !expected.has(file)) console.error(`not generated by this script: agents/${file}`);
 }
 
 if (check) {
-  if (!stale) console.log(`all ${expected.size} agent files up to date`);
+  if (!stale) console.log(`all ${expected.size} agent files and the role table are up to date`);
   process.exit(stale);
 }
-console.log(`wrote ${expected.size} agent files`);
+console.log(`wrote ${expected.size} agent files and refreshed the role table`);
 console.log('verify they loaded: run /agents in a new session (a stale file list means a parse error)');

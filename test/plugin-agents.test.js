@@ -1,28 +1,21 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-// Covers the `rikclaude-agents` Claude Code plugin (docs/agents.md): the
-// effort-pinned subagent definitions this repo ships as a plugin, the
-// marketplace entry that makes them installable, and the SessionStart hook that
-// carries the routing policy a plugin cannot ship as a CLAUDE.md.
-//
-// These are file-shape assertions, not behaviour: nothing here runs Claude Code.
-// What they protect is the part that fails silently — a stale generated file, a
-// manifest that stopped parsing, a hook pointing at a path that moved, or an
-// agent reference written WITHOUT the `rikclaude-agents:` prefix. The last one
-// is the whole point of the plugin: plugin agents are namespaced, so a bare name
-// in a rule names nothing, and the caller falls back to dispatching a model
-// directly at whatever effort the session is on.
+// Check the plugin files and run the SessionStart command without Claude Code.
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 const pluginRoot = `${repoRoot}plugins/rikclaude-agents/`;
 const agentsDir = `${pluginRoot}agents/`;
+const routingPath = `${pluginRoot}hooks/routing.md`;
 
 const AGENT_PREFIX = 'rikclaude-agents:';
 const EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
+const COORDINATOR_PARAGRAPH = 'Load `SendMessage` with `ToolSearch` (`select:SendMessage`). You can message the coordinator at any point. If the code shows that the brief is wrong, stop, report it to the coordinator and end your turn. Do not invent an interface or a workaround. Do not widen the scope. List in your report each item that you left out. A rule in the brief about files, SSH, secrets or commands applies to your own tool calls. When a rule seems to block one step, send one question with your recommendation and continue with the work that it does not block.';
+const GEMINI_REPORT_PARAGRAPH = "A claim about a provider, a count or a measurement gives its source: a quote of the docs, or the command and its output. Write each other claim as an assumption, under 'Not verified'. Cite each file as a path relative to the repository root, at the commit of the brief.";
 
 const agentFiles = readdirSync(agentsDir).filter(f => f.endsWith('.md')).sort();
 
@@ -41,16 +34,43 @@ function parseAgent(text) {
 
 // ── the generator is the source of truth ─────────────────────────────────────
 
-test('generate.mjs --check passes against the committed agent files', () => {
+test('generate.mjs --check passes against the agent files and role table', () => {
   const r = spawnSync(process.execPath, [`${pluginRoot}generate.mjs`, '--check'], { encoding: 'utf8' });
   assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
-  // Any .md the roster did not produce is reported on stderr and would ship as
-  // a ghost agent, so treat it as a failure here even though --check does not.
-  assert.equal(r.stderr.trim(), '', r.stderr);
+  // The generator reports extra agent files on stderr without setting a nonzero exit code.
+  assert.equal(r.stderr, '');
 });
 
 test('the roster is not empty', () => {
   assert.ok(agentFiles.length > 0);
+});
+
+test('the role table names plugin agents and uses their pinned models', () => {
+  const routing = readFileSync(routingPath, 'utf8');
+  const table = /<!-- roles:start \(written by generate\.mjs\) -->\n([\s\S]+?)\n<!-- roles:end -->/.exec(routing);
+  assert.ok(table, 'role table is missing');
+  const [header, separator, ...rows] = table[1].split('\n');
+  const cells = line => line.split('|').slice(1, -1).map(cell => cell.trim());
+  assert.deepEqual(cells(header), ['Role', 'Agent', 'Model', 'Applies when']);
+  assert.deepEqual(cells(separator), ['---', '---', '---', '---']);
+  assert.ok(rows.length > 0, 'role table is empty');
+
+  for (const row of rows) {
+    const fields = cells(row);
+    assert.equal(fields.length, 4, row);
+    const [role, agentCell, modelCell] = fields;
+    const agents = agentCell.split(' + ');
+    const models = modelCell.split(' + ');
+    assert.equal(agents.length, models.length, role);
+    for (const [index, agent] of agents.entries()) {
+      assert.match(agent, /^`[^`]+`$/, role);
+      assert.ok(agent.startsWith(`\`${AGENT_PREFIX}`), `${role}: unprefixed agent ${agent}`);
+      const file = `${agent.slice(1 + AGENT_PREFIX.length, -1)}.md`;
+      assert.ok(agentFiles.includes(file), `${role}: missing agent ${file}`);
+      const { front } = parseAgent(readFileSync(`${agentsDir}${file}`, 'utf8'));
+      assert.equal(models[index], `\`${front.model}\``, `${role}: model for ${agent}`);
+    }
+  }
 });
 
 // ── manifests ────────────────────────────────────────────────────────────────
@@ -90,13 +110,43 @@ test('hooks.json parses and every path it names exists', () => {
       // A `command` hook is the one that runs at launch and whose plain stdout
       // Claude Code adds to the session context.
       assert.equal(hook.type, 'command');
+      assert.equal(hook.timeout, 5);
       commands++;
       const paths = [...hook.command.matchAll(/\$\{CLAUDE_PLUGIN_ROOT\}\/([^\s"']+)/g)].map(m => m[1]);
-      assert.ok(paths.length > 0, 'hook command names no plugin file');
+      assert.ok(paths.includes('hooks/routing.md'), 'hook command does not name the routing policy');
       for (const p of paths) assert.ok(existsSync(`${pluginRoot}${p}`), `hook points at a missing file: ${p}`);
     }
   }
   assert.equal(commands, 1, 'one hook is enough; every session pays for each');
+});
+
+test('SessionStart prints the policy before the local override and skips missing files', () => {
+  const hooks = JSON.parse(readFileSync(`${pluginRoot}hooks/hooks.json`, 'utf8'));
+  const { command } = hooks.hooks.SessionStart[0].hooks[0];
+  const routing = readFileSync(routingPath, 'utf8');
+  const override = '# Local trial overrides\n\n| Role | Change | When | Report |\n| --- | --- | --- | --- |\n| Research | Trial another agent | This session | Compare findings |\n';
+  const home = mkdtempSync(join(repoRoot, '.rikclaude-agents-test-'));
+  const missingPluginRoot = join(home, 'missing-plugin');
+  function runHook(root, stdout) {
+    const r = spawnSync('/bin/sh', ['-c', command], {
+      encoding: 'utf8',
+      env: { ...process.env, CLAUDE_PLUGIN_ROOT: root, HOME: home },
+    });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stderr, '');
+    assert.equal(r.stdout, stdout);
+  }
+
+  try {
+    runHook(pluginRoot, routing);
+    runHook(missingPluginRoot, '');
+    mkdirSync(join(home, '.claude'));
+    writeFileSync(join(home, '.claude', 'rikclaude-agents.local.md'), override);
+    runHook(pluginRoot, routing + override);
+    runHook(missingPluginRoot, override);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 // ── agent frontmatter ────────────────────────────────────────────────────────
@@ -104,24 +154,32 @@ test('hooks.json parses and every path it names exists', () => {
 for (const file of agentFiles) {
   test(`${file} has usable frontmatter`, () => {
     const { front } = parseAgent(readFileSync(`${agentsDir}${file}`, 'utf8'));
-    // Claude Code falls back to the filename when `name` is missing, and to a
-    // generic description when the frontmatter does not parse — both silently,
-    // so assert rather than rely on it.
+    // Claude Code can fall back to the filename or a generic description when the frontmatter is invalid.
     assert.equal(front.name, file.replace(/\.md$/, ''));
     assert.ok(front.model, 'no model');
     assert.ok(EFFORTS.has(front.effort), `effort ${JSON.stringify(front.effort)} is not one of ${[...EFFORTS].join('|')}`);
     assert.ok(front.description, 'no description');
-    // `: ` would close the YAML key early and take the rest of the frontmatter
-    // with it.
+    // `: ` breaks the YAML frontmatter.
     assert.ok(!front.description.includes(': '), "description contains ': '");
     assert.ok(front.name.endsWith(`-${front.effort}`), 'name must be <model>-<effort>');
-    // The name spells the model family; the frontmatter may pin a version of it
-    // and the 1M window (`opus-high` → `claude-opus-5-5[1m]`, `sonnet-high` → `claude-sonnet-5-5[1m]`,
-    // `fable-high` → `fable[1m]`).
-    const family = front.name.slice(0, -`-${front.effort}`.length);
-    const model = front.model.replace(/\[1m\]$/, '');
-    assert.ok(model === family || model.startsWith(`claude-${family}-`), `model ${front.model} does not match name ${front.name}`);
+    if (front.name.startsWith('gemini-')) {
+      assert.equal(front.model, front.name, 'the Gemini model ID includes the effort');
+    } else {
+      const family = front.name.slice(0, -`-${front.effort}`.length);
+      const model = front.model.replace(/\[1m\]$/, '');
+      assert.ok(model === family || model.startsWith(`claude-${family}-`), `model ${front.model} does not match name ${front.name}`);
+    }
     assert.ok(!/["']/.test(front.model), 'model must be unquoted');
+  });
+
+  test(`${file} has the required prompt paragraphs`, () => {
+    const { prompt } = parseAgent(readFileSync(`${agentsDir}${file}`, 'utf8'));
+    const paragraphs = prompt.trim().split('\n\n');
+    const hasCoordinator = /^(gpt|gemini)-/.test(file);
+    const isGemini = file.startsWith('gemini-');
+    assert.equal(paragraphs.length, isGemini ? 4 : hasCoordinator ? 3 : 2);
+    assert.equal(paragraphs.indexOf(COORDINATOR_PARAGRAPH), hasCoordinator ? 2 : -1);
+    assert.equal(paragraphs.indexOf(GEMINI_REPORT_PARAGRAPH), isGemini ? 3 : -1);
   });
 }
 
@@ -159,11 +217,24 @@ for (const file of agentFiles) {
   });
 }
 
-test('the injected policy block names every agent with the plugin prefix', () => {
-  const text = readFileSync(`${pluginRoot}hooks/subagents.md`, 'utf8');
-  assert.deepEqual(bareUses(text), [], 'bare agent name in hooks/subagents.md');
-  // The two rules the block exists for. Losing either silently restores the
-  // effort-less dispatch.
+test('the injected policy uses the plugin prefix for dispatch targets', () => {
+  const text = readFileSync(routingPath, 'utf8');
+  // These two bare names are examples of what not to dispatch.
+  const dispatchRules = text
+    .replace(/a bare name such as\s+`opus-high` resolves to nothing/, '')
+    .replace(/in place of fable-high\./, '');
+  assert.deepEqual(bareUses(dispatchRules), [], 'bare agent name in hooks/routing.md');
   assert.match(text, /inherits this session's effort/);
-  assert.match(text, /`model` parameter/);
+  assert.match(text, /`model` parameter with an agent type: it replaces the agent's model and keeps its effort/);
+});
+
+test('the routing policy keeps the Gemini effort rule', () => {
+  // `--effort` has no effect on a Gemini model, so a child session that passes
+  // only the flag runs at the effort its model id names.
+  const routing = readFileSync(routingPath, 'utf8');
+  assert.match(routing, /A Gemini model takes its effort only from its model id\./);
+  for (const file of agentFiles.filter(f => f.startsWith('gemini-'))) {
+    const { front } = parseAgent(readFileSync(`${agentsDir}${file}`, 'utf8'));
+    assert.equal(front.model, file.slice(0, -'.md'.length), `${file} must pin the effort in its model id`);
+  }
 });

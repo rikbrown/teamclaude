@@ -1,6 +1,6 @@
 ---
 name: haiku-medium
-description: Haiku 5.5 at medium effort. Quick, cheap tasks. On par with rikclaude-agents:gpt-6-luna-medium. Not for production code.
+description: Haiku 5.5 at medium effort. Quick, cheap tasks. Not for production code.
 model: claude-haiku-5-5[1m]
 effort: medium
 ---

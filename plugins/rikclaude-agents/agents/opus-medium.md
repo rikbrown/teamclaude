@@ -1,6 +1,6 @@
 ---
 name: opus-medium
-description: Opus 5.5 at medium effort. Default for coding when the brief settles the design and, for a bug, names the cause, e.g. a planned feature or fix, a dependency update, a narrow fix from PR feedback, or internal tooling. Planned work comes here, whatever its size; split a large plan into parts. For less well-defined coding, use rikclaude-agents:opus-high. Also the default for fact-finding and research, and exploration across many files or naming conventions, where rikclaude-agents:sonnet-high is too shallow.
+description: Opus 5.5 at medium effort. Settled coding. The default for research.
 model: claude-opus-5-5[1m]
 effort: medium
 ---

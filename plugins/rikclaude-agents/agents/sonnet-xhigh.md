@@ -1,6 +1,6 @@
 ---
 name: sonnet-xhigh
-description: Sonnet 5.5 at xhigh effort. Use only when the user names it. Otherwise use rikclaude-agents:opus-medium for exploration across many files and for internal tooling.
+description: Sonnet 5.5 at xhigh effort. Not in the routing table. Use only when the user or a local override names it. Exploration across many files.
 model: claude-sonnet-5-5[1m]
 effort: xhigh
 ---

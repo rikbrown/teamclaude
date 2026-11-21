@@ -1,6 +1,6 @@
 ---
 name: opus-high
-description: Opus 5.5 at high effort. Coding that is less well defined. The brief leaves a design decision or the cause of a bug open, the change spans packages or changes the exports of a shared package, or the result needs judgement, e.g. text that a model reads, checked by evals. Also code review of a PR, a branch, a commit or a diff, by an agent that did not write the code; for the riskiest changes, dispatch it together with rikclaude-agents:gpt-6.2-astra-medium. Also release QA and browser checks of a change, research that must reason through how code behaves, and prose review of docs that Opus did not write.
+description: Opus 5.5 at high effort. Open coding. Code review. QA and browser checks. Research on how code behaves.
 model: claude-opus-5-5[1m]
 effort: high
 ---

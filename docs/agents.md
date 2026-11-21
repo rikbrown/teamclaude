@@ -25,7 +25,7 @@ An agent **definition** pins both, in its frontmatter:
 ```yaml
 ---
 name: gpt-6.2-astra-high
-description: GPT-6.2 Astra at high effort. Engineering sidekick, on par with Fable. …
+description: GPT-6.2 Astra at high effort. Not in the routing table. Use only when the user or a local override names it. A design or plan review at higher effort.
 model: gpt-6.2-astra
 effort: high
 ---
@@ -61,27 +61,28 @@ parse.
 
 ## The roster
 
-Descriptions in `plugins/rikclaude-agents/agents/` are authoritative — the orchestrator reads them
-at the moment it picks an agent, and they say more than this table does.
+Use the [routing table](../plugins/rikclaude-agents/hooks/routing.md#who-does-what) to choose an agent.
+Each description names its role. The roster includes these model and effort pairs:
 
-| Model | Agents | Shape of the work |
-| --- | --- | --- |
-| `claude-opus-5-5[1m]` | `opus-medium`, `opus-high`, `opus-xhigh` | The coding, at `medium` by default: the brief settles the design and, for a bug, names the cause; planned work goes there whatever its size. `high` for less well-defined coding: an open design decision or bug cause, a change across packages or to a shared package's exports, or a result that needs judgement, such as model text checked by evals. No coding at `xhigh`. `medium` is also the default for research and exploration that spans many files. Code review, release QA and browser checks, research that must reason through how code behaves, and prose review of docs Opus did not write, at `high`. Wide research at `xhigh` |
-| `claude-sonnet-5-5[1m]` | `sonnet-high`, `sonnet-xhigh` | Exploration without deep fact-finding, and throwaway code that is not committed, at `high`. Never committed code. `xhigh` by name only |
-| `claude-fable-5-2[1m]` | `fable-medium`, `fable-high`, `fable-xhigh` | Research and design at `medium`. At `high` (`xhigh` for the hardest), the Fable half of the design, plan and architecture review tag-team. Does not code or review code |
-| `gpt-6.2-astra` | `gpt-6.2-astra-medium`, `gpt-6.2-astra-high` | `medium` is the Astra half of the design review tag-team, and the second reviewer with `opus-high` for the riskiest code review. Never dispatched alone. `high` by name only |
-| `claude-haiku-5-5[1m]` | `haiku-medium` | Quick, cheap tasks, on par with Luna |
-| `gpt-6-luna` | `gpt-6-luna-medium` | Quick, cheap tasks, on par with Haiku |
-| `gpt-6.2-sol` | `gpt-6.2-sol-xhigh` | By name only. Light or interim code review |
-| `gpt-6.1-terra` | `gpt-6.1-terra-medium` | By name only. Prose refinement of docs, comments and messages. On trial for exploration against `sonnet-high` |
-| `gemini-4-neon-medium`, `gemini-4-neon-high`, `gemini-4-neon-xhigh` | `gemini-4-neon-medium`, `gemini-4-neon-high`, `gemini-4-neon-xhigh` | By name only. On trial for coding and research against `opus-medium` and `opus-high`; `xhigh` for hard research and design against `opus-xhigh` and `fable-high`. Gemini spells the thinking level in the model id, so the roster sets `model` to the full name |
+| Model | Agents |
+| --- | --- |
+| `claude-opus-5-5[1m]` | `opus-medium`, `opus-high`, `opus-xhigh` |
+| `claude-sonnet-5-5[1m]` | `sonnet-high`, `sonnet-xhigh` |
+| `claude-fable-5-2[1m]` | `fable-medium`, `fable-high`, `fable-xhigh` |
+| `gpt-6.2-astra` | `gpt-6.2-astra-medium`, `gpt-6.2-astra-high` |
+| `claude-haiku-5-5[1m]` | `haiku-medium` |
+| `gpt-6-luna` | `gpt-6-luna-medium` |
+| `gpt-6.2-sol` | `gpt-6.2-sol-xhigh` |
+| `gpt-6.1-terra` | `gpt-6.1-terra-medium` |
+| `gemini-4-neon-medium`, `gemini-4-neon-high`, `gemini-4-neon-xhigh` | `gemini-4-neon-medium`, `gemini-4-neon-high`, `gemini-4-neon-xhigh` |
 
-"By name only" agents open their description with "Use only when the user names it.", set by the
-roster's `byName` flag, so the orchestrator never picks them on its own judgement.
+Use an agent outside the routing table only when the user or a local override names it. The `byName` flag adds
+this restriction to its description before the role text.
 
-Each prompt also carries a **nesting rule** — whether that agent may launch agents of its own, only
-when its brief says so, or not at all. Without it, a subagent that reaches the routing policy takes
-"delegate liberally" as an instruction to itself, and a two-line task grows a tree.
+Each prompt tells the agent if it can launch subagents. GPT and Gemini prompts also tell the agent how to
+contact the coordinator, report a problem in the brief, and stay within the brief. Gemini prompts also require
+sources for claims about providers, counts, and measurements. Gemini agents label other claims as assumptions
+under `Not verified` and cite files by path from the repository root at the commit of the brief.
 
 Every `gpt-*` name has to exist in your fleet's [`customModels`](configuration.md) and be served by
 a sidecar that knows it, or the dispatch reaches a model id nothing answers. See
@@ -92,21 +93,22 @@ subscription. The trial uses [antigravity-claude-proxy](https://github.com/badri
 as a backend account (`upstream` set to the proxy, `accessToken` set to the proxy's `API_KEY`). That proxy
 holds the Google sign-in and picks the account itself, so TeamClaude does not see the Google quota yet.
 
+A Gemini model takes its effort only from its model id, so each `gemini-*` agent pins the full id, such as
+`gemini-4-neon-high`. The `effort` of the agent file and the `--effort` flag of a child session do not change it.
+The routing policy states this rule for a child session.
+
 ## The routing policy
 
-Knowing the agents exist is half of it. Which one to reach for, when to batch reviews, and the
-`model`-parameter trap above are policy that spans the whole roster, and a plugin cannot ship a
-`CLAUDE.md` — one at a plugin root is not loaded as project context.
+The [routing policy](../plugins/rikclaude-agents/hooks/routing.md) tells the orchestrator which agent to use.
+Claude Code does not load a plugin's `CLAUDE.md` as project context. The `SessionStart` command hook in
+`hooks/hooks.json` prints `hooks/routing.md` instead. Claude Code adds the output to the session context at launch,
+after `/clear`, and after compaction. The hook skips missing files and exits 0.
 
-So it arrives as a **`SessionStart` command hook**. Claude Code adds a hook's plain stdout to the
-session context on `SessionStart` (one of only four events it does that for), and a `command` hook
-on that event runs at launch, so the policy is there from the first turn. `hooks/hooks.json` runs
-one `cat` of `hooks/subagents.md` and always exits 0, so a missing or unreadable file costs the
-session nothing. No matcher, so it also fires after `/clear` and after a compaction, where the
-policy would otherwise be lost.
+## Local routing overrides
 
-Read it — it is short, and it is injected into every session you have:
-[`plugins/rikclaude-agents/hooks/subagents.md`](../plugins/rikclaude-agents/hooks/subagents.md).
+Use `~/.claude/rikclaude-agents.local.md` to trial a routing change before it goes into the plugin.
+Start the file with `# Local trial overrides`. Add a table with the columns Role, Change, When, and Report.
+The hook prints this file after the policy. Its rows take precedence over the role table.
 
 ## Namespacing, and your old agent files
 
@@ -163,23 +165,18 @@ install a plugin that comes from an external source on their behalf — it repor
 installed and prints the `claude plugin install` line to run. So this removes a step, not all of
 them; say so when you hand it to people.
 
-## Changing the roster
+## Changing the roster or routing
 
-`plugins/rikclaude-agents/generate.mjs` holds the `AGENTS` array and is the single source of truth
-for the files, the description text and the nesting rule. Edit it, then:
+Edit `AGENTS` in `plugins/rikclaude-agents/generate.mjs` to change the roster, descriptions, or nesting rules.
+Edit `ROLES` to change the role table. Then run:
 
 ```bash
-node plugins/rikclaude-agents/generate.mjs           # rewrite agents/
-node plugins/rikclaude-agents/generate.mjs --check   # exit 1 if any file is stale or missing
+node plugins/rikclaude-agents/generate.mjs           # rewrite agents/ and the role table
+node plugins/rikclaude-agents/generate.mjs --check   # exit 1 if generated content is stale or missing
 ```
 
-`--check` also names any `.md` in `agents/` the script did not write, so a renamed model cannot
-leave a ghost agent shipping behind it. `test/plugin-agents.test.js` runs `--check` in CI, so an
-edit that was not regenerated fails the build.
-
-Keep the roster to efforts somebody would actually choose between: every agent costs the
-orchestrator its description text at pick time. Commented-out rows in `AGENTS` are the ones that
-did not earn their place.
+`--check` also reports any extra `.md` file in `agents/`. The plugin would ship those files too.
+`test/plugin-agents.test.js` runs `--check` in CI.
 
 Claude Code announces agents by name only, so an edited description reaches the orchestrator in a
 **new** session, not the one you edited it in.

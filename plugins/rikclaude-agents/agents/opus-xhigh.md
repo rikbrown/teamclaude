@@ -1,6 +1,6 @@
 ---
 name: opus-xhigh
-description: Opus 5.5 at xhigh effort. Research with a wide scope only. Never for coding, also when the design or the cause of a bug is open; use rikclaude-agents:opus-high.
+description: Opus 5.5 at xhigh effort. Not in the routing table. Use only when the user or a local override names it. Research with a wide scope. Never for coding.
 model: claude-opus-5-5[1m]
 effort: xhigh
 ---

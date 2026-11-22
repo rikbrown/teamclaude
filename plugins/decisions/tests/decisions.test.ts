@@ -1,6 +1,16 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { EMPTY_LEDGER, CLOSED_TTL_MS, apply, decisionText, normaliseId, prune } from '../hooks/ledger'
+import {
+  EMPTY_LEDGER,
+  CLOSED_TTL_MS,
+  apply,
+  decisionText,
+  listText,
+  normaliseId,
+  parseRequest,
+  prune,
+} from '../hooks/ledger'
+import type { ListQuery } from '../hooks/ledger'
 import type { Ledger } from '../types'
 
 const TOOL = 'mcp__decisions__decisions'
@@ -75,6 +85,66 @@ test('list text names the options and the recommendation of an open decision', a
   expect(normaliseId('D1a')).toBe(null)
 })
 
+// D1–D8 ruled with rulings `a1`–`a8`, D9 open.
+const longLedger = () => {
+  let { ledger } = applied(EMPTY_LEDGER, raise(['One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine']))
+  for (let index = 1; index <= 8; index += 1) {
+    ledger = applied(ledger, { action: 'rule', items: [{ id: `D${index}`, ruling: `a${index}` }] }).ledger
+  }
+
+  return ledger
+}
+
+const query = (input: Record<string, unknown>): ListQuery => {
+  const request = parseRequest({ action: 'list', ...input })
+  if ('error' in request || request.action !== 'list') throw new Error('not a list request')
+
+  return request.query
+}
+
+test('list shows the open decisions in full and the 5 latest closed ones in one line', async () => {
+  expect(listText(longLedger(), query({}))).toBe(
+    [
+      'D9 [open] Nine\nWhy Nine matters.\n- D9a: Yes\n- D9b: No\nRecommendation: D9a (Yes)',
+      'Latest closed (5 of 8):\nD8 [ruled] Eight · Ruling: a8\nD7 [ruled] Seven · Ruling: a7\n' +
+        'D6 [ruled] Six · Ruling: a6\nD5 [ruled] Five · Ruling: a5\nD4 [ruled] Four · Ruling: a4',
+      '3 older closed: list with before: "D4". To read a decision in full: list with ids, such as ids: ["D4"].',
+    ].join('\n\n'),
+  )
+})
+
+test('list with before pages through the older closed decisions', async () => {
+  const ledger = longLedger()
+  expect(listText(ledger, query({ before: 'D4', limit: 2 }))).toBe(
+    'Closed before D4 (2 of 8):\nD3 [ruled] Three · Ruling: a3\nD2 [ruled] Two · Ruling: a2\n\n' +
+      '1 older closed: list with before: "D2". To read a decision in full: list with ids, such as ids: ["D2"].',
+  )
+  expect(listText(ledger, query({ before: 'd2' }))).toBe('Closed before D2 (1 of 8):\nD1 [ruled] One · Ruling: a1')
+  expect(listText(ledger, query({ before: 'D1' }))).toBe('No closed decisions before D1.')
+})
+
+test('list with ids gives each decision in full and names the missing ones', async () => {
+  expect(listText(longLedger(), query({ ids: ['D2', 'D40'] }))).toBe(
+    'D2 [ruled] Two\nWhy Two matters.\n- D2a: Yes\n- D2b: No\nRecommendation: D2a (Yes)\nRuling: a2\n\n' +
+      "D40 is not in this worktree's ledger. A closed decision leaves it 7 days after its last change.",
+  )
+  expect(listText(EMPTY_LEDGER, query({ ids: ['D1'] }))).toBe('The ledger of this worktree is empty.')
+})
+
+test('list without open decisions says so and refuses bad arguments', async () => {
+  const { ledger } = applied(EMPTY_LEDGER, raise(['One']))
+  const withdrawn = applied(ledger, { action: 'withdraw', items: [{ id: 'D1', ruling: 'superseded' }] }).ledger
+  expect(listText(withdrawn, query({}))).toBe(
+    'No open decisions.\n\nLatest closed (1 of 1):\nD1 [withdrawn] One · Reason: superseded',
+  )
+  expect(parseRequest({ action: 'list', ids: [] })).toEqual({ error: expect.stringMatching(/^ids must be/) })
+  expect(parseRequest({ action: 'list', ids: ['D1a'] })).toEqual({ error: expect.stringMatching(/^ids must be/) })
+  expect(parseRequest({ action: 'list', ids: ['D1'], before: 'D3' })).toEqual({ error: expect.stringMatching(/not both/) })
+  expect(parseRequest({ action: 'list', before: 'soon' })).toEqual({ error: expect.stringMatching(/^before must be/) })
+  expect(parseRequest({ action: 'list', limit: 0 })).toEqual({ error: expect.stringMatching(/^limit must be/) })
+  expect(parseRequest({ action: 'list', limit: 2.5 })).toEqual({ error: expect.stringMatching(/^limit must be/) })
+})
+
 test('the tool stores the ledger of the session root', async ($, on) => {
   mock.store(on)
   mock.clock(on)
@@ -90,6 +160,10 @@ test('the tool stores the ledger of the session root', async ($, on) => {
 
   const listed = await $.tool.call({ tool: TOOL, action: 'list' })
   expect(listed.result).toEqual(expect.stringMatching(/^D1 \[open\] One\n[\s\S]*\n\nD2 \[open\] Two\n/))
+  const one = await $.tool.call({ tool: TOOL, action: 'list', ids: ['D2'] })
+  expect(one.result).toEqual(expect.stringMatching(/^D2 \[open\] Two\n/))
+  const wrong = await $.tool.call({ tool: TOOL, action: 'list', limit: 0 })
+  expect(wrong).toEqual(expect.objectContaining({ deny: expect.stringMatching(/^limit must be/) }))
 
   const refused = await $.tool.call({ tool: TOOL, action: 'rule', items: [{ id: 'D7', ruling: 'a' }] })
   expect(refused).toEqual(expect.objectContaining({ deny: expect.stringMatching(/^D7 is not in/) }))

@@ -28,6 +28,7 @@ import {
   parseRequest,
   prune,
   recommendationText,
+  listText,
   resultText,
 } from './ledger'
 import type { Item } from './ledger'
@@ -91,8 +92,9 @@ and returns them. Use only these IDs. Name an option by ID and key, such as D3a.
 - update: change a decision when you refine it. Give the id and the changed fields.
 - rule: record the person's ruling when they give it.
 - withdraw: close a decision that no longer applies. Give the reason in ruling.
-- list: return every decision of this worktree, with the full text of the open ones. Use it after a compaction, and \
-before you name an open ID that you did not raise in this context.
+- list: return the open decisions of this worktree in full, and the 5 latest closed ones in one line each. Use it \
+after a compaction, and before you name an open ID that you did not raise in this context. Give ids to read given \
+decisions in full, of any status. Give before, and optionally limit, to page through older closed decisions.
 
 The transcript shows each raised decision in full at the call. Do not repeat the body in your reply: name the IDs.`
 
@@ -100,6 +102,18 @@ const INPUT_SCHEMA = {
   type: 'object',
   properties: {
     action: { type: 'string', enum: [...ACTIONS] },
+    ids: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'list: the decisions to return in full, such as ["D12"]. Not with before or limit.',
+    },
+    before: { type: 'string', description: 'list: return only the closed decisions below this ID, such as D38.' },
+    limit: {
+      type: 'integer',
+      minimum: 1,
+      maximum: 100,
+      description: 'list: the number of closed decisions. 5 by default, 20 with before.',
+    },
     items: {
       type: 'array',
       items: {
@@ -413,11 +427,12 @@ export const register: Register = on => {
   on('tool.call', { tool: TOOL }, async ($, e) => {
     const request = parseRequest(e as unknown as Record<string, unknown>)
     if ('error' in request) return { deny: request.error }
+    if (request.action === 'list') return { result: listText(await load($), request.query) }
     const now = await $.clock.now()
     const current = await load($)
     const applied = apply(current, request, e.agentId === undefined ? e.tool_use_id : null, now)
     if ('error' in applied) return { deny: applied.error }
-    if (request.action !== 'list') await save($, applied.ledger)
+    await save($, applied.ledger)
     if (request.action === 'raise') await openPane($, false)
 
     return { result: resultText(request.action, applied.touched) }

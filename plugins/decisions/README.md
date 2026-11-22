@@ -11,6 +11,8 @@ up the transcript, and keeps the answers that Claude gives you easy to find.
   `▸ Ruled` or `▸ Withdrawn` heading. Click a row to scroll the transcript to where Claude last raised or changed it,
   and to show or hide its full text. Click an option to put `D3a ` in the prompt. The pane closes when the last open
   decision is ruled or withdrawn.
+- The tool's `list` gives Claude the open decisions in full and the 5 latest closed ones in one line each. Claude asks
+  for older closed decisions with `before`, and for a decision in full with `ids`.
 - `/decisions` shows or hides the pane. `/decisions D3` shows D3 and jumps to it.
 
 ## Replies

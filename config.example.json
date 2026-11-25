@@ -86,6 +86,13 @@
         "adminKey": "sk-ant-admin01-your-admin-key",
         "refreshMinutes": 15
       }
+    },
+    {
+      "name": "gemini",
+      "type": "apikey",
+      "upstream": "http://127.0.0.1:18080",
+      "quotaProvider": "antigravity",
+      "apiKey": "your-antigravity-proxy-api-key"
     }
   ],
   "routes": [

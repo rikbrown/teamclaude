@@ -31,11 +31,13 @@ const RESPONSE_LIMIT = 64 * 1024;
  * a bar for it and fall back to text for everything else. `windows` carries the
  * same utilization per machine-readable window when the provider reports
  * distinct ones, so /teamclaude/quota can bucket it; a balance-only provider
- * has none.
+ * has none. `accounts` carries per-upstream-account readings for a proxy that
+ * pools several accounts behind one local endpoint (antigravity).
  *
  * @typedef {{ utilization: number, resetAt: number|null }} BackendQuotaWindow
  * @typedef {{ fiveHour?: BackendQuotaWindow, weekly?: BackendQuotaWindow, monthly?: BackendQuotaWindow }} BackendQuotaWindows
- * @typedef {{ label: string, text: string, utilization: number|null, at: number, windows?: BackendQuotaWindows }} BackendQuota
+ * @typedef {{ email: string, enabled: boolean, tier: string|null, status: string, error?: string, pools: { gemini?: BackendQuotaWindows, '3p'?: BackendQuotaWindows } }} BackendQuotaAccount
+ * @typedef {{ label: string, text: string, utilization: number|null, at: number, windows?: BackendQuotaWindows, accounts?: BackendQuotaAccount[] }} BackendQuota
  */
 
 // Z.ai publishes the coding plan's windows at /api/monitor/usage/quota/limit:
@@ -238,12 +240,125 @@ const KIMI = {
   },
 };
 
+// Antigravity local proxy (`antigravity-claude-proxy`): pools one or more
+// Google accounts behind a loopback upstream, so it is matched by explicit
+// `accounts[].quotaProvider: "antigravity"` rather than host. GET
+// /v1/account-quotas returns each account's Gemini (`id: "gemini"`) and
+// Claude+GPT (`id: "3p"`) pools with `remainingFraction` (0-1) and ISO
+// `resetTime`. TeamClaude's top-level windows reflect the best usable Google
+// account (lowest weekly utilization, then lowest 5-hour), since the proxy
+// fails over across them; every account is kept in `accounts` for the TUI
+// Gemini panel.
+const ANTIGRAVITY_STATUSES = new Set(['ok', 'disabled', 'invalid', 'error']);
+
+const cleanFraction = (/** @type {number} */ n) =>
+  Math.min(1, Math.max(0, Math.round(n * 1e12) / 1e12));
+
+/** @param {any} w @returns {BackendQuotaWindow|null} */
+function antigravityWindow(w) {
+  if (!w || typeof w !== 'object') return null;
+  const raw = w.remainingFraction;
+  // Number(null) and Number('') are 0, which would invert to 100% used.
+  const rem = raw === null || raw === undefined || raw === '' || typeof raw === 'boolean' ? NaN : Number(raw);
+  if (!Number.isFinite(rem)) return null;
+  const reset = typeof w.resetTime === 'string' && w.resetTime ? Date.parse(w.resetTime) : NaN;
+  return {
+    utilization: cleanFraction(1 - rem),
+    resetAt: Number.isFinite(reset) && reset > 0 ? reset : null,
+  };
+}
+
+/** @param {any} group @returns {BackendQuotaWindows|null} */
+function antigravityGroupWindows(group) {
+  const fiveHour = antigravityWindow(group?.windows?.fiveHour);
+  const weekly = antigravityWindow(group?.windows?.weekly);
+  if (!fiveHour && !weekly) return null;
+  /** @type {BackendQuotaWindows} */
+  const windows = {};
+  if (fiveHour) windows.fiveHour = fiveHour;
+  if (weekly) windows.weekly = weekly;
+  return windows;
+}
+
+const ANTIGRAVITY = {
+  id: 'antigravity',
+  path: '/v1/account-quotas',
+  parse(/** @type {any} */ body) {
+    if (!body || typeof body !== 'object' || Array.isArray(body) || !Array.isArray(body.accounts)) return null;
+    if (body.accounts.length === 0 && typeof body.fetchedAt !== 'string') return null;
+    /** @type {BackendQuotaAccount[]} */
+    const accounts = [];
+    for (const entry of body.accounts) {
+      if (!entry || typeof entry !== 'object' || typeof entry.email !== 'string') continue;
+      const email = safeLine(entry.email, 64);
+      if (!email) continue;
+      const enabled = entry.enabled === true;
+      const rawStatus = typeof entry.status === 'string' ? entry.status.trim().toLowerCase() : '';
+      const status = ANTIGRAVITY_STATUSES.has(rawStatus) ? rawStatus : safeLine(rawStatus || 'error', 16);
+      const tier = entry.tier != null && entry.tier !== '' ? safeLine(String(entry.tier), 16) : null;
+      const error = entry.error != null && entry.error !== '' ? safeLine(String(entry.error), 120) : undefined;
+      /** @type {{ gemini?: BackendQuotaWindows, '3p'?: BackendQuotaWindows }} */
+      const pools = {};
+      for (const group of Array.isArray(entry.groups) ? entry.groups : []) {
+        if (!group || typeof group !== 'object') continue;
+        if (group.id === 'gemini') {
+          const w = antigravityGroupWindows(group);
+          if (w) pools.gemini = w;
+        } else if (group.id === '3p') {
+          const w = antigravityGroupWindows(group);
+          if (w) pools['3p'] = w;
+        }
+      }
+      accounts.push({
+        email,
+        enabled,
+        tier,
+        status,
+        ...(error ? { error } : {}),
+        pools,
+      });
+    }
+    if (body.accounts.length > 0 && accounts.length === 0) return null;
+
+    const usable = accounts.filter(a => a.status === 'ok' && a.enabled);
+    const withGemini = usable.filter(a => a.pools.gemini && (a.pools.gemini.fiveHour || a.pools.gemini.weekly));
+    withGemini.sort((a, b) => {
+      const aWk = a.pools.gemini?.weekly?.utilization ?? Number.POSITIVE_INFINITY;
+      const bWk = b.pools.gemini?.weekly?.utilization ?? Number.POSITIVE_INFINITY;
+      if (aWk !== bWk) return aWk - bWk;
+      const a5h = a.pools.gemini?.fiveHour?.utilization ?? Number.POSITIVE_INFINITY;
+      const b5h = b.pools.gemini?.fiveHour?.utilization ?? Number.POSITIVE_INFINITY;
+      return a5h - b5h;
+    });
+    const best = withGemini[0]?.pools.gemini ?? null;
+    if (!best) {
+      const text = accounts.length === 0 ? 'no accounts'
+        : usable.length === 0 ? 'no usable accounts'
+        : 'no quota yet';
+      return { label: 'Plan', text, utilization: null, accounts };
+    }
+    /** @type {BackendQuotaWindows} */
+    const windows = {};
+    const parts = [];
+    for (const [key, name] of /** @type {const} */ ([['fiveHour', '5h'], ['weekly', 'week']])) {
+      const w = best[key];
+      if (!w) continue;
+      windows[key] = { utilization: w.utilization, resetAt: w.resetAt };
+      const until = w.resetAt ? formatUntil(w.resetAt - Date.now()) : '';
+      parts.push(`${name} ${Math.round(w.utilization * 100)}%${until ? ` (resets ${until})` : ''}`);
+    }
+    const utilization = Math.max(...Object.values(windows).map(w => w.utilization));
+    return { label: 'Plan', text: parts.join(' · '), utilization, windows, accounts };
+  },
+};
+
 /**
  * @typedef {Object} BackendQuotaProvider
- * @property {string} host  the upstream host this entry answers for (exact match)
+ * @property {string} [id]  explicit opt-in key (`accounts[].quotaProvider`), matched regardless of host
+ * @property {string} [host]  the upstream host this entry answers for (exact or subdomain match)
  * @property {string} path  the quota endpoint, resolved against the upstream origin
  * @property {(credential: string) => Record<string, string>} [headers]  the auth header shape, when it is not `Authorization: Bearer`
- * @property {(body: any) => ({ label: string, text: string, utilization: number|null, windows?: BackendQuotaWindows } | null)} parse  the normalized reading, or null for a reply it does not recognize
+ * @property {(body: any) => ({ label: string, text: string, utilization: number|null, windows?: BackendQuotaWindows, accounts?: BackendQuotaAccount[] } | null)} parse  the normalized reading, or null for a reply it does not recognize
  * @property {{ url: (upstream: string) => string, parse: (body: any) => ({ amount: number, text: string } | null) }} [balance]  a pay-as-you-go balance endpoint, fetched best-effort after the quota one
  */
 
@@ -336,18 +451,64 @@ const PROVIDERS = [
   { host: 'api.kimi.ai', ...KIMI },
   { host: 'api.moonshot.ai', ...moonshot('$') },
   { host: 'api.moonshot.cn', ...moonshot('¥') },
+  // Local antigravity-claude-proxy: loopback host, so matched only by explicit
+  // `accounts[].quotaProvider: "antigravity"`.
+  ANTIGRAVITY,
 ];
 
+/** Explicit `accounts[].quotaProvider` values accepted in config. */
+export const KNOWN_QUOTA_PROVIDERS = PROVIDERS
+  .map(p => p.id)
+  .filter(/** @returns {id is string} */ (id) => typeof id === 'string');
+
 /**
- * The provider entry for an upstream URL, or null when we know of none.
+ * The account's `quotaProvider` setting, validated and normalized, or null.
+ * A value that cannot be used is dropped with one line saying why, the way
+ * accountSwitchThreshold, accountRouting and accountCredit do; both the
+ * constructor and config reload come through here.
+ *
+ * @param {Record<string, any>|null|undefined} acct
+ * @returns {string|null}
+ */
+export function accountQuotaProvider(acct) {
+  const raw = acct?.quotaProvider;
+  if (raw == null || raw === '') return null;
+  const say = (/** @type {string} */ why) => {
+    console.log(`[TeamClaude] Account "${safeLine(acct?.name, 64)}": ignoring quotaProvider — ${why}`);
+    return null;
+  };
+  if (typeof raw !== 'string') {
+    return say(`it must be a string (supported: ${KNOWN_QUOTA_PROVIDERS.join(', ')})`);
+  }
+  const id = raw.trim().toLowerCase();
+  if (!id) return null;
+  if (!KNOWN_QUOTA_PROVIDERS.includes(id)) {
+    return say(`unknown provider "${safeLine(id, 32)}" (supported: ${KNOWN_QUOTA_PROVIDERS.join(', ')})`);
+  }
+  if (!acct?.upstream) {
+    return say('it requires an `upstream` URL on the account');
+  }
+  return id;
+}
+
+/**
+ * The provider entry for an upstream URL (and optional explicit `quotaProvider`),
+ * or null when we know of none. An explicit `quotaProvider` selects by id
+ * regardless of host; otherwise the upstream host is matched against PROVIDERS.
  *
  * @param {string|null|undefined} upstream
+ * @param {string|null|undefined} [quotaProvider]
  */
-export function providerFor(upstream) {
+export function providerFor(upstream, quotaProvider = null) {
+  if (quotaProvider != null && quotaProvider !== '') {
+    if (typeof quotaProvider !== 'string') return null;
+    const id = quotaProvider.trim().toLowerCase();
+    return PROVIDERS.find(p => p.id === id) || null;
+  }
   if (!upstream || typeof upstream !== 'string') return null;
   let host;
   try { host = new URL(upstream).host.toLowerCase(); } catch { return null; }
-  return PROVIDERS.find(p => host === p.host || host.endsWith(`.${p.host}`)) || null;
+  return PROVIDERS.find(p => p.host && (host === p.host || host.endsWith(`.${p.host}`))) || null;
 }
 
 /**
@@ -356,7 +517,9 @@ export function providerFor(upstream) {
  * @param {Record<string, any>|null|undefined} account
  */
 export function hasBackendQuota(account) {
-  return !!account?.upstream && !!providerFor(account.upstream);
+  if (!account?.upstream || typeof account.upstream !== 'string') return false;
+  try { new URL(account.upstream); } catch { return false; }
+  return !!providerFor(account.upstream, account.quotaProvider);
 }
 
 /**
@@ -369,10 +532,11 @@ export function hasBackendQuota(account) {
  * @param {{ fetchImpl?: Function, timeoutMs?: number }} [opts]
  */
 export async function fetchBackendQuota(account, { fetchImpl = proxyFetch, timeoutMs = 10_000 } = {}) {
-  const provider = providerFor(account?.upstream);
-  if (!provider || !account?.credential) return null;
+  const provider = providerFor(account?.upstream, account?.quotaProvider);
+  if (!provider || !account?.upstream || !account?.credential) return null;
 
-  const url = new URL(provider.path, account.upstream).toString();
+  let url;
+  try { url = new URL(provider.path, account.upstream).toString(); } catch { return null; }
   const signal = AbortSignal.timeout(timeoutMs);
   const headers = {
     Accept: 'application/json',

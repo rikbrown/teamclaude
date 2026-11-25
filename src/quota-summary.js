@@ -578,6 +578,59 @@ export function fleetAggregate(accounts, { thresholdFor = null, now = Date.now()
 }
 
 /**
+ * Headroom for a route backed by a multi-account local proxy (antigravity),
+ * where one TeamClaude account fronts one or more Google accounts and fails
+ * over across whichever has quota. `quota.backend.windows` already holds the
+ * best usable Google account's Gemini windows, and `quota.backend.accounts`
+ * gives the usable seat count (`status === 'ok'` and `enabled === true`).
+ *
+ * Returns null when the route has no such proxy with a reading yet, leaving
+ * the caller's existing `no counted seat` result untouched.
+ *
+ * @param {Array<any>} members
+ * @param {number} now
+ * @returns {{ counted: number, total: number, bucket: string|null, value: FleetBucket|null }|null}
+ */
+function backendProxyRouteHeadroom(members, now) {
+  const proxies = members.filter(a => a && !a.disabled && a.quotaProvider === 'antigravity' && Array.isArray(a.quota?.backend?.accounts));
+  if (!proxies.length) return null;
+  let counted = 0;
+  let total = 0;
+  for (const a of proxies) {
+    const list = a.quota.backend.accounts;
+    total += list.length;
+    counted += list.filter((/** @type {any} */ g) => g?.status === 'ok' && g?.enabled === true).length;
+  }
+  if (counted === 0) return { counted: 0, total, bucket: null, value: null };
+  /** @type {{ bucket: string, value: FleetBucket }|null} */
+  let binding = null;
+  for (const [bucket, key] of /** @type {const} */ ([['unified7d', 'weekly'], ['unified5h', 'fiveHour']])) {
+    /** @type {{ utilization: number, resetAt: number|null }|null} */
+    let best = null;
+    for (const a of proxies) {
+      const w = a.quota?.backend?.windows?.[key];
+      if (!w || typeof w.utilization !== 'number' || !Number.isFinite(w.utilization)) continue;
+      if (w.resetAt != null && w.resetAt <= now) continue;
+      const u = Math.min(1, Math.max(0, w.utilization));
+      if (!best || u < best.utilization) best = { utilization: u, resetAt: w.resetAt ?? null };
+    }
+    if (!best) continue;
+    /** @type {FleetBucket} */
+    const value = {
+      utilization: clean(best.utilization),
+      remaining: clean(Math.max(0, 1 - best.utilization)),
+      spentWeight: clean(best.utilization * counted),
+      capacityWeight: clean(counted),
+      remainingWeight: clean(Math.max(0, (1 - best.utilization) * counted)),
+      knownAccounts: counted,
+      nextResetAt: best.resetAt,
+    };
+    if (!binding || value.utilization > binding.value.utilization) binding = { bucket, value };
+  }
+  return { counted, total, bucket: binding?.bucket ?? null, value: binding?.value ?? null };
+}
+
+/**
  * What stops each route first.
  *
  * A route holds no quota of its own — it spends its members' buckets — so the
@@ -632,6 +685,18 @@ export function routeHeadroom(accounts, routes, { thresholdFor = null, now = Dat
       if (account) members.push(account);
     }
     const pool = countedPool(members);
+    if (pool.counted === 0) {
+      const proxy = backendProxyRouteHeadroom(members, now);
+      if (proxy) {
+        return {
+          name: route?.name ?? '',
+          counted: proxy.counted,
+          total: proxy.total,
+          bucket: proxy.bucket,
+          value: proxy.value,
+        };
+      }
+    }
     const family = routeFamily(route || {});
     const candidates = family
       ? [FAMILY_WEEKLY[family], 'unified7d', 'unified5h']

@@ -21,6 +21,7 @@ import { parseRoutingUrl, describeRouting, routingToUrl, isRoutingFailure } from
 import { isSelfProxy } from './upstream-proxy.js';
 import { envVar } from './brand.js';
 import { accountCredit, emptyCreditState, recordCreditUsage, rollCreditCycle, creditView, exportCreditState, restoreCreditState } from './api-credit.js';
+import { accountQuotaProvider } from './backend-quota.js';
 import { STEER_MAX_MS, STEER_REDEEM_RETRY_MS, SteerError, canRedeemOn, formatSteerLeft } from './steer.js';
 /** @typedef {import('./session-tracker.js').Observation} Observation */
 /** @typedef {import('./steer.js').Steer} Steer */
@@ -632,6 +633,10 @@ function makeAccount(acct, index, listener = null) {
     // between providers keeps saying the same thing.
     autoRedeemReset: acct.autoRedeemReset !== false,
     upstream: acct.upstream || null,
+    // Explicit backend quota provider id (e.g. "antigravity" for a local
+    // antigravity-claude-proxy whose loopback host cannot match by domain).
+    // Validated here and on reload; see backend-quota.js.
+    quotaProvider: accountQuotaProvider(acct),
     modelMap: acct.modelMap || null,
     // Fields to drop from request bodies for this account (third-party upstreams
     // that reject e.g. `context_management`). See server.js stripBodyFields.
@@ -7613,6 +7618,9 @@ export class AccountManager {
         // Prepaid API credit, present only with accounts[].credit. Built field
         // by field (creditView): the admin key behind it never leaves the account.
         ...(a.creditConfig ? { credit: this.creditStatus(a) } : {}),
+        // Opt-in backend quota provider id (e.g. "antigravity"), present only
+        // when configured so attach mode renders the same provider panel.
+        ...(a.quotaProvider ? { quotaProvider: a.quotaProvider } : {}),
       })),
     };
   }

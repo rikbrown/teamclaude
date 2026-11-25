@@ -774,6 +774,117 @@ function barColor(ratio, resetTs, windowMs, threshold) {
 }
 
 /**
+ * Same burn-rate/fill thresholds as barColor, as foreground paint for compact
+ * readouts without background bars (the Gemini panel).
+ * @param {number} ratio
+ * @param {number|null|undefined} resetTs
+ * @param {number|null} windowMs
+ * @param {number|null} threshold
+ */
+function barFgColor(ratio, resetTs, windowMs, threshold) {
+  const c = barColor(ratio, resetTs, windowMs, threshold);
+  if (c === BAR_GREEN) return green;
+  if (c === BAR_YELLOW) return yellow;
+  if (c === BAR_ORANGE) return (/** @type {string} */ s) => fg('38;5;208', s);
+  return red;
+}
+
+const GEMINI_3P_LABEL = 'Claude+GPT pool';
+const GEMINI_NAME_MIN = 12;
+const GEMINI_NAME_MAX = 24;
+const GEMINI_SES_RST_W = 6;
+// `Ses ` (4) + pct (4) + ` · ` (3) + rst (6) = 17.
+const GEMINI_SES_W = 17;
+// `Ses  16% · 3h22m   Wk  4% · 6d22h` -> 17 + 2 + 15 = 34.
+const GEMINI_METRICS_W = 34;
+
+/**
+ * Format one pool (Gemini or 3p) as `Ses  16% · 3h22m   Wk  4% · 6d22h`,
+ * using the same percentage/reset formatting and pace-aware colour thresholds
+ * as Anthropic and Codex rows. When `dimmed` is true (the informational 3p
+ * pool), the entire readout is dimmed.
+ * @param {{ fiveHour?: { utilization: number, resetAt: number|null }, weekly?: { utilization: number, resetAt: number|null } }|null|undefined} pool
+ * @param {boolean} dimmed
+ * @param {number} maxW
+ */
+function formatGeminiPool(pool, dimmed, maxW) {
+  const ses = bwLive(pool?.fiveHour);
+  const wk = bwLive(pool?.weekly);
+  if (!ses && !wk) return dimmed ? '' : dim('–');
+  const paintSes = ses
+    ? (() => {
+      const pct = `${Math.round(ses.utilization * 100)}%`.padStart(4);
+      const rst = rpad(formatReset(ses.resetAt) || '–', GEMINI_SES_RST_W);
+      if (dimmed) return dim(`Ses ${pct} · ${rst}`);
+      return `Ses ${barFgColor(ses.utilization, ses.resetAt, FIVE_HOUR_MS, null)(pct)} ${dim(`· ${rst}`)}`;
+    })()
+    : dim(rpad('Ses    –', GEMINI_SES_W));
+  const paintWk = wk
+    ? (() => {
+      const pct = `${Math.round(wk.utilization * 100)}%`.padStart(3);
+      const rst = formatReset(wk.resetAt) || '–';
+      if (dimmed) return dim(`Wk ${pct} · ${rst}`);
+      return `Wk ${barFgColor(wk.utilization, wk.resetAt, SEVEN_DAY_MS, null)(pct)} ${dim(`· ${rst}`)}`;
+    })()
+    : dim('Wk   –');
+  if (maxW >= GEMINI_METRICS_W) return `${paintSes}  ${paintWk}`;
+  if (maxW >= GEMINI_SES_W) return (ses ? paintSes : paintWk).trimEnd();
+  return '';
+}
+
+/**
+ * Allocate `avail` columns across N panes stage by stage, the same way
+ * _splitLayout shares room between two panes: every pane reaches stage k
+ * before any starts stage k+1, a partial stage split pro rata.
+ * @param {number[][]} stagesList
+ * @param {number} avail
+ * @returns {number[]|null}
+ */
+function allocatePaneWidths(stagesList, avail) {
+  const widths = stagesList.map(s => s[0]);
+  const floorSum = widths.reduce((a, b) => a + b, 0);
+  if (floorSum > avail) return null;
+  const maxStages = Math.max(...stagesList.map(s => s.length));
+  for (let k = 1; k < maxStages; k++) {
+    const wants = stagesList.map((s, i) => Math.max(0, s[Math.min(k, s.length - 1)] - widths[i]));
+    const totalWant = wants.reduce((a, b) => a + b, 0);
+    if (totalWant <= 0) continue;
+    const room = avail - widths.reduce((a, b) => a + b, 0);
+    if (room < totalWant) {
+      let given = 0;
+      for (let i = 0; i < widths.length; i++) {
+        const share = i === widths.length - 1
+          ? room - given
+          : Math.round(room * wants[i] / totalWant);
+        widths[i] += share;
+        given += share;
+      }
+      break;
+    }
+    for (let i = 0; i < widths.length; i++) widths[i] += wants[i];
+  }
+  return widths;
+}
+
+/**
+ * Join rendered pane columns side by side with PANE_GUTTER.
+ * @param {Array<{ width: number, lines: string[] }>} columns
+ * @returns {string[]}
+ */
+function joinPaneColumns(columns) {
+  const height = Math.max(0, ...columns.map(c => c.lines.length));
+  const sep = dim(PANE_GUTTER);
+  const out = [];
+  for (let r = 0; r < height; r++) {
+    out.push(columns.map((c, idx) => {
+      const cell = c.lines[r] ?? '';
+      return idx < columns.length - 1 ? fitLine(cell, c.width) : cell;
+    }).join(sep));
+  }
+  return out;
+}
+
+/**
  * Render a progress bar using background colors with text overlaid.
  * The label (e.g. "Ses 2h30m" or "45%") is drawn on top of the bar.
  * windowMs is the bucket's rolling-window length; when known, the color tracks
@@ -3958,9 +4069,100 @@ export class TUI {
     return left.complete && right.complete ? { leftW, rightW, left, right } : null;
   }
 
+  /** Google accounts reported by any antigravity local proxy with a reading.
+   *  Empty before the first reading or when no account sets quotaProvider. */
+  _geminiAccounts() {
+    /** @type {Array<any>} */
+    const list = [];
+    for (const a of this.am.accounts) {
+      if (a?.quotaProvider !== 'antigravity') continue;
+      const accts = a.quota?.backend?.accounts;
+      if (Array.isArray(accts) && accts.length > 0) list.push(...accts);
+    }
+    return list;
+  }
+
+  /** Column budget and growth stages [floor, ideal] for the Gemini panel.
+   *  @param {Array<any>} accounts */
+  _geminiMetrics(accounts) {
+    const has3p = accounts.some(g =>
+      g.status === 'ok' && g.enabled === true
+      && (bwLive(g.pools?.['3p']?.fiveHour) || bwLive(g.pools?.['3p']?.weekly)));
+    const maxName = Math.max(
+      GEMINI_NAME_MIN,
+      ...accounts.map(g => vw(g.email || '')),
+      has3p ? vw(GEMINI_3P_LABEL) : 0,
+    );
+    const tierW = Math.max(5, Math.min(10, ...accounts.map(g => {
+      const usable = g.status === 'ok' && g.enabled === true;
+      const tag = usable ? (g.tier || '') : (g.enabled === false ? 'disabled' : (g.status || 'error'));
+      return vw(tag);
+    })));
+    const idealNameW = Math.min(GEMINI_NAME_MAX, maxName);
+    const fixed = 8 + tierW; // `  ► ` (4) + `  ` (2) + tierW + `  ` (2)
+    return {
+      tierW,
+      idealNameW,
+      fixed,
+      stages: [fixed + GEMINI_NAME_MIN + GEMINI_METRICS_W, fixed + idealNameW + GEMINI_METRICS_W],
+    };
+  }
+
+  /** Render the `Gemini` panel: title plus one row per Google account, with the
+   *  Claude+GPT (`3p`) pool dimmed on a second line when present.
+   *  @param {Array<any>} accounts
+   *  @param {number} W */
+  _geminiPaneLines(accounts, W) {
+    const { tierW, idealNameW, fixed, stages } = this._geminiMetrics(accounts);
+    let nameW;
+    let metricsW;
+    if (W >= stages[0]) {
+      nameW = Math.min(idealNameW, W - fixed - GEMINI_METRICS_W);
+      metricsW = Math.max(0, W - fixed - nameW);
+    } else if (W >= fixed + 8 + GEMINI_METRICS_W) {
+      nameW = Math.max(8, W - fixed - GEMINI_METRICS_W);
+      metricsW = GEMINI_METRICS_W;
+    } else {
+      nameW = Math.max(8, Math.min(idealNameW, W - fixed - GEMINI_SES_W));
+      metricsW = Math.max(0, W - fixed - nameW);
+    }
+    const clamp = (/** @type {string} */ line) => (vw(line) > W ? fitLine(line, W) : line);
+    const lines = [paneTitle('Gemini', W)];
+    for (const g of accounts) {
+      const usable = g.status === 'ok' && g.enabled === true;
+      const email = rpad(truncate(g.email || '', nameW), nameW);
+      if (usable) {
+        const tier = gray(rpad(truncate(g.tier || '', tierW), tierW));
+        const metrics = formatGeminiPool(g.pools?.gemini, false, metricsW);
+        const tail = metrics ? `  ${metrics}` : '';
+        lines.push(clamp(`  ${green('►')} ${email}  ${tier}${tail}`));
+        const pool3p = g.pools?.['3p'];
+        if (pool3p && (bwLive(pool3p.fiveHour) || bwLive(pool3p.weekly))) {
+          const metrics3p = formatGeminiPool(pool3p, true, metricsW);
+          if (metrics3p) {
+            const label3p = dim(rpad(truncate(GEMINI_3P_LABEL, nameW), nameW));
+            lines.push(clamp(`    ${label3p}  ${' '.repeat(tierW)}  ${metrics3p}`));
+          }
+        }
+      } else {
+        const isDisabled = g.status === 'disabled' || g.enabled === false;
+        const statusWord = isDisabled ? 'disabled' : (g.status || 'error');
+        const statusCell = rpad(truncate(statusWord, tierW), tierW);
+        const paintedStatus = isDisabled ? gray(statusCell)
+          : (statusWord === 'error' || statusWord === 'invalid') ? red(statusCell)
+          : yellow(statusCell);
+        const paintedEmail = isDisabled ? gray(email) : email;
+        const errText = g.error && metricsW > 0 ? `  ${dim(truncate(g.error, metricsW))}` : '';
+        lines.push(clamp(`    ${paintedEmail}  ${paintedStatus}${errText}`));
+      }
+    }
+    return lines;
+  }
+
   /**
-   * The account rows, composed against `W` columns: two provider panes when the
-   * pool has two providers and `W` fits both, else one list.
+   * The account rows, composed against `W` columns: provider panes side by side
+   * when `W` fits them (including the `Gemini` panel when an antigravity proxy
+   * has reported accounts), else stacked in one list.
    *
    * W IS NOT ALWAYS THE TERMINAL. In the split view the rows own the left
    * column and the fleet panel the right, so this is handed the width the rows
@@ -3980,21 +4182,96 @@ export class TUI {
     const lines = [];
     const current = this._currentRows();
     const groups = this._providerGroups();
-    const split = groups.length === 2 ? this._splitLayout(groups, W) : null;
-    if (split) {
-      const [a, b] = groups;
-      lines.push(paneTitle(PROVIDERS[a.provider].label, split.leftW) + dim(PANE_GUTTER) + paneTitle(PROVIDERS[b.provider].label, split.rightW));
-      const left = a.indices.flatMap(i => this._rowLines(i, split.left, current, steered));
-      const right = b.indices.flatMap(i => this._rowLines(i, split.right, current, steered));
-      for (let r = 0; r < Math.max(left.length, right.length); r++) {
-        lines.push(fitLine(left[r] ?? '', split.leftW) + dim(PANE_GUTTER) + (right[r] ?? ''));
+    const gemini = this._geminiAccounts();
+
+    if (!gemini.length) {
+      const split = groups.length === 2 ? this._splitLayout(groups, W) : null;
+      if (split) {
+        const [a, b] = groups;
+        lines.push(paneTitle(PROVIDERS[a.provider].label, split.leftW) + dim(PANE_GUTTER) + paneTitle(PROVIDERS[b.provider].label, split.rightW));
+        const left = a.indices.flatMap(i => this._rowLines(i, split.left, current, steered));
+        const right = b.indices.flatMap(i => this._rowLines(i, split.right, current, steered));
+        for (let r = 0; r < Math.max(left.length, right.length); r++) {
+          lines.push(fitLine(left[r] ?? '', split.leftW) + dim(PANE_GUTTER) + (right[r] ?? ''));
+        }
+      } else {
+        lines.push('');
+        const order = this._displayOrder();
+        const layout = this._listLayout(order, W);
+        for (const i of order) lines.push(...this._rowLines(i, layout, current, steered));
       }
-    } else {
-      lines.push('');
-      const order = this._displayOrder();
-      const layout = this._listLayout(order, W);
-      for (const i of order) lines.push(...this._rowLines(i, layout, current, steered));
+      return lines;
     }
+
+    if (groups.length === 0) return this._geminiPaneLines(gemini, W);
+
+    const gutterW = vw(PANE_GUTTER);
+    const gStages = this._geminiMetrics(gemini).stages;
+    const renderGroupPane = (/** @type {{ provider: keyof typeof PROVIDERS, indices: number[] }} */ g, /** @type {any} */ layout, /** @type {number} */ width) => [
+      paneTitle(PROVIDERS[g.provider].label, width),
+      ...g.indices.flatMap(i => this._rowLines(i, layout, current, steered)),
+    ];
+
+    if (groups.length === 1) {
+      const [a] = groups;
+      const avail = W - gutterW;
+      const sa = this._listLayout(a.indices, avail, { pane: a.provider, measure: true }).stages;
+      const widths = allocatePaneWidths([sa, gStages], avail);
+      if (widths) {
+        const [leftW, rightW] = widths;
+        const left = this._listLayout(a.indices, leftW, { pane: a.provider });
+        if (left.complete) {
+          return joinPaneColumns([
+            { width: leftW, lines: renderGroupPane(a, left, leftW) },
+            { width: rightW, lines: this._geminiPaneLines(gemini, rightW) },
+          ]);
+        }
+      }
+    } else if (groups.length === 2) {
+      const [a, b] = groups;
+      // Wide terminal: all three provider panes side by side.
+      const avail3 = W - 2 * gutterW;
+      const sa3 = this._listLayout(a.indices, avail3, { pane: a.provider, measure: true }).stages;
+      const sb3 = this._listLayout(b.indices, avail3, { pane: b.provider, measure: true }).stages;
+      const widths3 = allocatePaneWidths([sa3, sb3, gStages], avail3);
+      if (widths3) {
+        const [wA, wB, wG] = widths3;
+        const lA = this._listLayout(a.indices, wA, { pane: a.provider });
+        const lB = this._listLayout(b.indices, wB, { pane: b.provider });
+        if (lA.complete && lB.complete) {
+          return joinPaneColumns([
+            { width: wA, lines: renderGroupPane(a, lA, wA) },
+            { width: wB, lines: renderGroupPane(b, lB, wB) },
+            { width: wG, lines: this._geminiPaneLines(gemini, wG) },
+          ]);
+        }
+      }
+      // Mid-width terminal: primary provider on the left, second provider and
+      // Gemini stacked in the right pane under the same gutter.
+      const avail2 = W - gutterW;
+      const sa2 = this._listLayout(a.indices, avail2, { pane: a.provider, measure: true }).stages;
+      const sb2 = this._listLayout(b.indices, avail2, { pane: b.provider, measure: true }).stages;
+      const sr2 = sb2.map((v, k) => Math.max(v, gStages[Math.min(k, gStages.length - 1)]));
+      const widths2 = allocatePaneWidths([sa2, sr2], avail2);
+      if (widths2) {
+        const [leftW, rightW] = widths2;
+        const left = this._listLayout(a.indices, leftW, { pane: a.provider });
+        const right = this._listLayout(b.indices, rightW, { pane: b.provider });
+        if (left.complete && right.complete) {
+          return joinPaneColumns([
+            { width: leftW, lines: renderGroupPane(a, left, leftW) },
+            { width: rightW, lines: [...renderGroupPane(b, right, rightW), '', ...this._geminiPaneLines(gemini, rightW)] },
+          ]);
+        }
+      }
+    }
+
+    // Narrow fallback: single-column account list followed by the Gemini panel.
+    lines.push('');
+    const order = this._displayOrder();
+    const layout = this._listLayout(order, W);
+    for (const i of order) lines.push(...this._rowLines(i, layout, current, steered));
+    lines.push('', ...this._geminiPaneLines(gemini, W));
     return lines;
   }
 
@@ -4027,7 +4304,11 @@ export class TUI {
    * @returns {{panelW: number, leftW: number}}
    */
   _fleetSplit(W) {
-    const floor = this._listLayout(this._displayOrder(), W, { measure: true }).stages[0];
+    const order = this._displayOrder();
+    const gemini = this._geminiAccounts();
+    const floor = order.length
+      ? this._listLayout(order, W, { measure: true }).stages[0]
+      : (gemini.length ? this._geminiMetrics(gemini).stages[0] : 0);
     const want = Math.min(FLEET_PANEL_MAX, Math.max(FLEET_PANEL_MIN, Math.round(W / 3)));
     const panelW = Math.min(want, W - FLEET_GUTTER - floor);
     return panelW >= FLEET_PANEL_MIN

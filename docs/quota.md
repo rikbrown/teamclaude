@@ -348,7 +348,7 @@ The reading is normalized to `{ label, text, utilization }`, with a `windows` ma
 
 With `synthesizeQuotaHeaders: true` the probed 5-hour and weekly windows are also stated to the client as `anthropic-ratelimit-unified-*` headers, so Claude Code shows them in its own `rate_limits` like an Anthropic account's. A monthly window has no such header and is only on `GET /teamclaude/quota`. See [configuration](configuration.md).
 
-Provider support lives entirely in `src/backend-quota.js`, matched by the host of the account's `upstream`. Adding one is a single entry there (a path and a parse function, plus a header shape when the provider's monitor wants something other than a bearer, plus an optional balance hook); the prober, the quota field and the renderer never name a provider. Supported today:
+Provider support lives entirely in `src/backend-quota.js`, matched by the host of the account's `upstream` (or by explicit `accounts[].quotaProvider` when the upstream runs on loopback). Adding one is a single entry there (a path and a parse function, plus a header shape when the provider's monitor wants something other than a bearer, plus an optional balance hook); the prober, the quota field and the renderer never name a provider. Supported today:
 
 - **DeepSeek** — the account balance, as money.
 - **NanoGPT** (`api.nano-gpt.com`) — the subscription's daily and weekly token windows in one reading: the bar is the fuller of the two, the text names each with its reset, and NanoGPT's own billing advice is appended when it is not the ordinary case:
@@ -368,6 +368,7 @@ Provider support lives entirely in `src/backend-quota.js`, matched by the host o
   ```
 - **Kimi for Coding** (`api.kimi.com`, `api.kimi.ai`) — whichever of the 5-hour, weekly and monthly windows the plan reports, in one reading. Plans differ here (newer ones drop the weekly window for a monthly one), so any of the three may be absent, and an absent one is never filled in from Kimi's legacy counters. Kimi's ratio pools lag behind an active session and can read zero while the legacy counters move; a zero ratio beside a moved counter with the same reset is treated as a placeholder and the counter wins.
 - **Moonshot Open Platform** (`api.moonshot.ai`, `api.moonshot.cn`) — the pay-as-you-go balance, as money in the region's currency.
+- **Antigravity** (`accounts[].quotaProvider: "antigravity"`) — a local `antigravity-claude-proxy` pooling one or more Google accounts behind a loopback `upstream`. Reads `GET {upstream}/v1/account-quotas` with bearer auth. Top-level `windows` carry the Gemini group (`id: "gemini"`) of the best usable Google account (`status: "ok"` and `enabled: true` — lowest weekly utilization, then lowest 5-hour), which feeds the `Routes` panel with the usable Google account count. Every Google account (including its informational `3p` Claude+GPT pool and any disabled/error entries) is shown in the TUI's `Gemini` panel once the first reading arrives.
 
 ## Prepaid API credit
 

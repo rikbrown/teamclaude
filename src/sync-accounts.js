@@ -6,6 +6,7 @@ import { ensureAccountIds } from './account-id.js';
 import { accountSwitchThreshold, accountAllowsExtraUsage, accountRouting, normalizeHeadersTimeoutMs } from './account-manager.js';
 import { localListener } from './upstream-proxy.js';
 import { accountCredit } from './api-credit.js';
+import { accountQuotaProvider } from './backend-quota.js';
 
 /**
  * Sync accounts from disk config: add new accounts and refresh credentials
@@ -182,6 +183,7 @@ export async function syncAccountsFromDisk(diskConfig, memConfig, accountManager
     if (mgr.upstream !== (diskAcct.upstream || null)
       || mgr.messageThreads !== (diskAcct.messageThreads === true)) mgr.threadRefusalReported = false;
     mgr.upstream = diskAcct.upstream || null;
+    mgr.quotaProvider = accountQuotaProvider(diskAcct);
     mgr.modelMap = diskAcct.modelMap || null;
     // Read per request like the two above (server.js rewriteRequestBody), and
     // missing from this sync until #374: an edit waited for a restart.
@@ -199,6 +201,7 @@ export async function syncAccountsFromDisk(diskConfig, memConfig, accountManager
     // the same shape a hand edit produces.
     if (cfgAcct) {
       if (diskAcct.upstream) cfgAcct.upstream = diskAcct.upstream; else delete cfgAcct.upstream;
+      if (diskAcct.quotaProvider != null) cfgAcct.quotaProvider = diskAcct.quotaProvider; else delete cfgAcct.quotaProvider;
       if (diskAcct.modelMap) cfgAcct.modelMap = diskAcct.modelMap; else delete cfgAcct.modelMap;
       if (diskAcct.stripRequestFields) cfgAcct.stripRequestFields = diskAcct.stripRequestFields; else delete cfgAcct.stripRequestFields;
       if (diskAcct.messageThreads === true) cfgAcct.messageThreads = true; else delete cfgAcct.messageThreads;

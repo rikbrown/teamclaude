@@ -30,6 +30,57 @@ const text = (value, max, fallback = '') => {
 const NAME_MAX = 64;
 const LABEL_MAX = 32;
 
+const sanitizeBackendWindow = (/** @type {any} */ w) => {
+  if (!w || typeof w !== 'object') return null;
+  const u = typeof w.utilization === 'number' && Number.isFinite(w.utilization) ? Math.min(1, Math.max(0, w.utilization)) : null;
+  if (u == null) return null;
+  const resetAt = typeof w.resetAt === 'number' && Number.isFinite(w.resetAt) && w.resetAt > 0 ? w.resetAt : null;
+  return { utilization: u, resetAt };
+};
+
+const sanitizeBackendWindows = (/** @type {any} */ ws) => {
+  if (!ws || typeof ws !== 'object') return null;
+  /** @type {Record<string, { utilization: number, resetAt: number|null }>} */
+  const out = {};
+  for (const key of ['fiveHour', 'weekly', 'monthly']) {
+    const w = sanitizeBackendWindow(ws[key]);
+    if (w) out[key] = w;
+  }
+  return Object.keys(out).length ? out : null;
+};
+
+const sanitizeBackendQuota = (/** @type {any} */ b) => {
+  if (!b || typeof b !== 'object' || Array.isArray(b)) return null;
+  const windows = sanitizeBackendWindows(b.windows);
+  const accounts = Array.isArray(b.accounts)
+    ? b.accounts.filter(/** @param {any} g */ g => g && typeof g === 'object').map(/** @param {any} g */ g => {
+      /** @type {Record<string, any>} */
+      const pools = {};
+      const gemini = sanitizeBackendWindows(g.pools?.gemini);
+      const thirdParty = sanitizeBackendWindows(g.pools?.['3p']);
+      if (gemini) pools.gemini = gemini;
+      if (thirdParty) pools['3p'] = thirdParty;
+      const err = g.error == null ? undefined : text(g.error, 120) || undefined;
+      return {
+        email: text(g.email, NAME_MAX, '?'),
+        enabled: g.enabled === true,
+        tier: g.tier == null ? null : text(g.tier, 16) || null,
+        status: text(g.status, 16, 'error'),
+        ...(err ? { error: err } : {}),
+        pools,
+      };
+    })
+    : undefined;
+  return {
+    label: text(b.label, LABEL_MAX, 'Plan'),
+    text: text(b.text, 200),
+    utilization: typeof b.utilization === 'number' && Number.isFinite(b.utilization) ? Math.min(1, Math.max(0, b.utilization)) : null,
+    at: typeof b.at === 'number' && Number.isFinite(b.at) ? b.at : 0,
+    ...(windows ? { windows } : {}),
+    ...(accounts ? { accounts } : {}),
+  };
+};
+
 // Addresses that reach this machine. A server bound to one of these exempts
 // loopback clients from the proxy-key gate, which changes what a 401 can mean.
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', 'localhost']);
@@ -310,7 +361,11 @@ export class RemoteAccountManager {
       // Already password-masked by the server; still a payload string drawn
       // into the frame, so it gets the same scrub as everything else.
       routing: a?.routing == null ? a?.routing : text(a.routing, 128),
-      quota: { ...(a?.quota || {}) },
+      ...(a?.quotaProvider ? { quotaProvider: text(a.quotaProvider, LABEL_MAX) || null } : {}),
+      quota: {
+        ...(a?.quota || {}),
+        ...(a?.quota?.backend !== undefined ? { backend: sanitizeBackendQuota(a.quota.backend) } : {}),
+      },
       // Prepaid credit: its currency, source and error text are drawn into the
       // row, so the view is rebuilt from known fields rather than spread.
       credit: sanitizeCreditView(a?.credit),

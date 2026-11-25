@@ -24,7 +24,8 @@ import { sanitizeText, safeLine } from './safe-text.js';
 // The setting rules live in one module; the CLI, the MCP tools and this screen
 // all read them from there, so they cannot drift apart (#426).
 import { MAX_PROBE_SECONDS, ROUTE_COLORS } from './config-ops.js';
-import { isLocalUpstream, providerForPath } from './provider.js';
+import { isLocalUpstream, isQuotaConduit, providerForPath } from './provider.js';
+import { isUsableAntigravityAccount } from './backend-quota.js';
 import { canRedeemOn, formatSteerLeft } from './steer.js';
 import { ThroughputMeter, requestRate, formatRate } from './throughput.js';
 import { formatSpend } from './pricing.js';
@@ -789,6 +790,12 @@ function barFgColor(ratio, resetTs, windowMs, threshold) {
   return red;
 }
 
+/** @param {import('./backend-quota.js').BackendQuotaAccount} account */
+function geminiTag(account) {
+  if (isUsableAntigravityAccount(account)) return account.tier || '';
+  return account.status === 'disabled' || account.enabled === false ? 'disabled' : (account.status || 'error');
+}
+
 const GEMINI_3P_LABEL = 'Claude+GPT pool';
 const GEMINI_NAME_MIN = 12;
 const GEMINI_NAME_MAX = 24;
@@ -840,7 +847,7 @@ function formatGeminiPool(pool, dimmed, maxW) {
  * @param {number} avail
  * @returns {number[]|null}
  */
-function allocatePaneWidths(stagesList, avail) {
+export function allocatePaneWidths(stagesList, avail) {
   const widths = stagesList.map(s => s[0]);
   const floorSum = widths.reduce((a, b) => a + b, 0);
   if (floorSum > avail) return null;
@@ -851,14 +858,15 @@ function allocatePaneWidths(stagesList, avail) {
     if (totalWant <= 0) continue;
     const room = avail - widths.reduce((a, b) => a + b, 0);
     if (room < totalWant) {
-      let given = 0;
-      for (let i = 0; i < widths.length; i++) {
-        const share = i === widths.length - 1
-          ? room - given
-          : Math.round(room * wants[i] / totalWant);
-        widths[i] += share;
-        given += share;
-      }
+      // Give each growing pane its whole columns, then give spare columns to
+      // the largest remainders. Equal remainders keep pane order.
+      const shares = wants.flatMap((want, i) => {
+        if (want <= 0) return [];
+        const product = room * want;
+        return [{ i, whole: Math.floor(product / totalWant), remainder: product % totalWant }];
+      }).sort((a, b) => b.remainder - a.remainder);
+      const spare = room - shares.reduce((sum, { whole }) => sum + whole, 0);
+      shares.forEach(({ i, whole }, rank) => { widths[i] += whole + (rank < spare ? 1 : 0); });
       break;
     }
     for (let i = 0; i < widths.length; i++) widths[i] += wants[i];
@@ -4075,7 +4083,7 @@ export class TUI {
     /** @type {Array<any>} */
     const list = [];
     for (const a of this.am.accounts) {
-      if (a?.quotaProvider !== 'antigravity') continue;
+      if (a?.quotaProvider !== 'antigravity' || a.disabled) continue;
       const accts = a.quota?.backend?.accounts;
       if (Array.isArray(accts) && accts.length > 0) list.push(...accts);
     }
@@ -4086,18 +4094,14 @@ export class TUI {
    *  @param {Array<any>} accounts */
   _geminiMetrics(accounts) {
     const has3p = accounts.some(g =>
-      g.status === 'ok' && g.enabled === true
+      isUsableAntigravityAccount(g)
       && (bwLive(g.pools?.['3p']?.fiveHour) || bwLive(g.pools?.['3p']?.weekly)));
     const maxName = Math.max(
       GEMINI_NAME_MIN,
       ...accounts.map(g => vw(g.email || '')),
       has3p ? vw(GEMINI_3P_LABEL) : 0,
     );
-    const tierW = Math.max(5, Math.min(10, ...accounts.map(g => {
-      const usable = g.status === 'ok' && g.enabled === true;
-      const tag = usable ? (g.tier || '') : (g.enabled === false ? 'disabled' : (g.status || 'error'));
-      return vw(tag);
-    })));
+    const tierW = Math.min(10, Math.max(5, ...accounts.map(g => vw(geminiTag(g)))));
     const idealNameW = Math.min(GEMINI_NAME_MAX, maxName);
     const fixed = 8 + tierW; // `  ► ` (4) + `  ` (2) + tierW + `  ` (2)
     return {
@@ -4129,10 +4133,11 @@ export class TUI {
     const clamp = (/** @type {string} */ line) => (vw(line) > W ? fitLine(line, W) : line);
     const lines = [paneTitle('Gemini', W)];
     for (const g of accounts) {
-      const usable = g.status === 'ok' && g.enabled === true;
+      const usable = isUsableAntigravityAccount(g);
+      const tag = geminiTag(g);
       const email = rpad(truncate(g.email || '', nameW), nameW);
       if (usable) {
-        const tier = gray(rpad(truncate(g.tier || '', tierW), tierW));
+        const tier = gray(rpad(truncate(tag, tierW), tierW));
         const metrics = formatGeminiPool(g.pools?.gemini, false, metricsW);
         const tail = metrics ? `  ${metrics}` : '';
         lines.push(clamp(`  ${green('►')} ${email}  ${tier}${tail}`));
@@ -4145,11 +4150,10 @@ export class TUI {
           }
         }
       } else {
-        const isDisabled = g.status === 'disabled' || g.enabled === false;
-        const statusWord = isDisabled ? 'disabled' : (g.status || 'error');
-        const statusCell = rpad(truncate(statusWord, tierW), tierW);
+        const isDisabled = tag === 'disabled';
+        const statusCell = rpad(truncate(tag, tierW), tierW);
         const paintedStatus = isDisabled ? gray(statusCell)
-          : (statusWord === 'error' || statusWord === 'invalid') ? red(statusCell)
+          : (tag === 'error' || tag === 'invalid') ? red(statusCell)
           : yellow(statusCell);
         const paintedEmail = isDisabled ? gray(email) : email;
         const errText = g.error && metricsW > 0 ? `  ${dim(truncate(g.error, metricsW))}` : '';
@@ -4412,7 +4416,7 @@ export class TUI {
     const now = Date.now();
     return this.am.accounts
       .map((/** @type {any} */ _, /** @type {number} */ i) => i)
-      .filter(i => !isLocalUpstream(this.am.accounts[i]))
+      .filter(i => !isQuotaConduit(this.am.accounts[i]))
       .sort((/** @type {number} */ x, /** @type {number} */ y) => {
         const px = PROVIDER_ORDER.indexOf(providerOf(this.am.accounts[x]));
         const py = PROVIDER_ORDER.indexOf(providerOf(this.am.accounts[y]));
@@ -4688,9 +4692,8 @@ export class TUI {
 
   /** Manager indices of the rows the operator can arrange, in drawn order.
    *
-   *  Every account except the locally-served ones. _displayOrder already leaves
-   *  those out (they draw as conduit lines, not rows), so they hold no position
-   *  and their array slots are simply stepped over.
+   *  _displayOrder leaves backend conduits out of the account rows, so they
+   *  hold no position and their array slots are simply stepped over.
    *
    *  Always in the arranged order, whatever `accountSort` says: a move
    *  renumbers every account from this list, so a sorted list here would

@@ -1,5 +1,6 @@
 import { creditView } from './api-credit.js';
-import { providerOf, isLocalUpstream } from './provider.js';
+import { providerOf, isQuotaConduit } from './provider.js';
+import { bestAntigravityAccount, isUsableAntigravityAccount } from './backend-quota.js';
 import { resolveMaxUsage, spendCapReached } from './model.js';
 
 /** Resolve a subscription's quota capacity relative to a Claude Pro account. */
@@ -454,12 +455,11 @@ function routableNames(routes) {
  *
  *   - A disabled seat is skipped entirely — it is not spendable, so it belongs
  *     in neither the capacity nor the tally.
- *   - A local backend is not a seat at all and is skipped before either rule.
+ *   - A backend conduit is not a seat at all and is skipped before either rule.
  *     It is a translating proxy in front of another vendor: it holds no
  *     subscription, its token is a placeholder, and it has no quota of its own
- *     to pool. The account table already draws it as a readout below the rows
- *     rather than among them (see _displayOrder in tui.js), and the same
- *     reasoning applies harder here — priced it would invent capacity, and left
+ *     to pool. The account table excludes it from the provider rows (see
+ *     _displayOrder in tui.js). Here, priced it would invent capacity, and left
  *     unpriced it would sit in `total` as a seat the fleet is missing, which is
  *     the one thing that tally is for saying.
  *   - A seat this build cannot price is skipped but still counted, so
@@ -481,7 +481,7 @@ function countedPool(accounts, include = null) {
   let total = 0;
   let counted = 0;
   for (const account of accounts || []) {
-    if (!account || account.disabled || isLocalUpstream(account)) continue;
+    if (!account || account.disabled || isQuotaConduit(account)) continue;
     total++;
     if (account.maxSpend != null && spendCapReached(account.maxSpend, account.quota?.spend)) continue;
     if (include && !include(account)) continue;
@@ -505,7 +505,7 @@ const providerRank = (id) => {
 /**
  * Usable headroom across the fleet, one aggregate per provider pool.
  *
- * MEMBERSHIP is countedPool's — disabled seats out, local backends out,
+ * MEMBERSHIP is countedPool's — disabled seats out, backend conduits out,
  * unpriceable seats out of the figures but in the tally — plus one rule of its
  * own when `routes` is given: a seat no route will send traffic to contributes
  * nothing spendable, so it is excluded from the capacity and left in `total`,
@@ -552,7 +552,7 @@ export function fleetAggregate(accounts, { thresholdFor = null, now = Date.now()
   /** @type {Map<string, Array<any>>} */
   const byProvider = new Map();
   for (const account of accounts || []) {
-    if (!account || account.disabled || isLocalUpstream(account)) continue;
+    if (!account || account.disabled || isQuotaConduit(account)) continue;
     const provider = providerOf(account);
     const list = byProvider.get(provider);
     if (list) list.push(account);
@@ -578,11 +578,9 @@ export function fleetAggregate(accounts, { thresholdFor = null, now = Date.now()
 }
 
 /**
- * Headroom for a route backed by a multi-account local proxy (antigravity),
- * where one TeamClaude account fronts one or more Google accounts and fails
- * over across whichever has quota. `quota.backend.windows` already holds the
- * best usable Google account's Gemini windows, and `quota.backend.accounts`
- * gives the usable seat count (`status === 'ok'` and `enabled === true`).
+ * Headroom for a route backed by one or more antigravity proxies. Count the
+ * usable Google accounts across the proxies, then choose one seat from their
+ * live Gemini windows. The best seat from a probe can change as windows expire.
  *
  * Returns null when the route has no such proxy with a reading yet, leaving
  * the caller's existing `no counted seat` result untouched.
@@ -594,40 +592,33 @@ export function fleetAggregate(accounts, { thresholdFor = null, now = Date.now()
 function backendProxyRouteHeadroom(members, now) {
   const proxies = members.filter(a => a && !a.disabled && a.quotaProvider === 'antigravity' && Array.isArray(a.quota?.backend?.accounts));
   if (!proxies.length) return null;
-  let counted = 0;
-  let total = 0;
-  for (const a of proxies) {
-    const list = a.quota.backend.accounts;
-    total += list.length;
-    counted += list.filter((/** @type {any} */ g) => g?.status === 'ok' && g?.enabled === true).length;
-  }
-  if (counted === 0) return { counted: 0, total, bucket: null, value: null };
-  /** @type {{ bucket: string, value: FleetBucket }|null} */
-  let binding = null;
-  for (const [bucket, key] of /** @type {const} */ ([['unified7d', 'weekly'], ['unified5h', 'fiveHour']])) {
-    /** @type {{ utilization: number, resetAt: number|null }|null} */
-    let best = null;
-    for (const a of proxies) {
-      const w = a.quota?.backend?.windows?.[key];
-      if (!w || typeof w.utilization !== 'number' || !Number.isFinite(w.utilization)) continue;
-      if (w.resetAt != null && w.resetAt <= now) continue;
-      const u = Math.min(1, Math.max(0, w.utilization));
-      if (!best || u < best.utilization) best = { utilization: u, resetAt: w.resetAt ?? null };
-    }
-    if (!best) continue;
-    /** @type {FleetBucket} */
-    const value = {
-      utilization: clean(best.utilization),
-      remaining: clean(Math.max(0, 1 - best.utilization)),
-      spentWeight: clean(best.utilization * counted),
+  /** @type {import('./backend-quota.js').BackendQuotaAccount[]} */
+  const accounts = proxies.flatMap(a => a.quota.backend.accounts);
+  const usable = accounts.filter(isUsableAntigravityAccount);
+  const counted = usable.length;
+  const total = accounts.length;
+  const best = bestAntigravityAccount(usable, now);
+  const weekly = best?.windows.weekly;
+  const fiveHour = best?.windows.fiveHour;
+  const weekBinds = weekly && (!fiveHour || weekly.utilization >= fiveHour.utilization);
+  const window = weekBinds ? weekly : fiveHour;
+  if (!window) return { counted, total, bucket: null, value: null };
+  const utilization = window.utilization;
+  const remaining = 1 - utilization;
+  return {
+    counted,
+    total,
+    bucket: weekBinds ? 'unified7d' : 'unified5h',
+    value: {
+      utilization: clean(utilization),
+      remaining: clean(remaining),
+      spentWeight: clean(utilization * counted),
       capacityWeight: clean(counted),
-      remainingWeight: clean(Math.max(0, (1 - best.utilization) * counted)),
+      remainingWeight: clean(remaining * counted),
       knownAccounts: counted,
-      nextResetAt: best.resetAt,
-    };
-    if (!binding || value.utilization > binding.value.utilization) binding = { bucket, value };
-  }
-  return { counted, total, bucket: binding?.bucket ?? null, value: binding?.value ?? null };
+      nextResetAt: window.resetAt,
+    },
+  };
 }
 
 /**

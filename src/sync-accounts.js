@@ -180,10 +180,13 @@ export async function syncAccountsFromDisk(diskConfig, memConfig, accountManager
     // different backend, needs to be told again that continues are refused;
     // otherwise their only signal stays silent. Read before the assignments
     // below, which are what it compares against.
-    if (mgr.upstream !== (diskAcct.upstream || null)
+    const upstream = diskAcct.upstream || null;
+    const quotaProvider = accountQuotaProvider(diskAcct);
+    if (mgr.upstream !== upstream
       || mgr.messageThreads !== (diskAcct.messageThreads === true)) mgr.threadRefusalReported = false;
-    mgr.upstream = diskAcct.upstream || null;
-    mgr.quotaProvider = accountQuotaProvider(diskAcct);
+    if (mgr.upstream !== upstream || mgr.quotaProvider !== quotaProvider) mgr.quota.backend = null;
+    mgr.upstream = upstream;
+    mgr.quotaProvider = quotaProvider;
     mgr.modelMap = diskAcct.modelMap || null;
     // Read per request like the two above (server.js rewriteRequestBody), and
     // missing from this sync until #374: an edit waited for a restart.

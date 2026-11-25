@@ -5,8 +5,10 @@ import {
   hasBackendQuota,
   fetchBackendQuota,
   accountQuotaProvider,
+  bestAntigravityAccount,
 } from '../src/backend-quota.js';
 import { AccountManager } from '../src/account-manager.js';
+import { Prober } from '../src/prober.js';
 import { syncAccountsFromDisk } from '../src/sync-accounts.js';
 
 // Antigravity local proxy (`antigravity-claude-proxy`): runs on loopback so it
@@ -29,6 +31,16 @@ const okFetch = (body, status = 200) => async () => ({
   status,
   json: async () => body,
 });
+
+function googleAccount(email, windows, over = {}) {
+  return { email, enabled: true, status: 'ok', groups: [{ id: 'gemini', windows }], ...over };
+}
+
+const remaining = (remainingFraction, resetAt) => ({
+  remainingFraction,
+  ...(resetAt == null ? {} : { resetTime: iso(resetAt) }),
+});
+const parse = (accounts) => providerFor(UPSTREAM, 'antigravity').parse({ accounts });
 
 function captureLogs(fn) {
   const logs = [];
@@ -99,6 +111,30 @@ test('AccountManager and syncAccountsFromDisk load, validate, and live-sync quot
   assert.equal(am.accounts[0].quotaProvider, 'antigravity');
   assert.equal(mem.accounts[0].quotaProvider, 'antigravity');
 });
+
+for (const [field, value] of [['upstream', 'http://127.0.0.1:18081'], ['quotaProvider', null]]) {
+  test(`reloading ${field} clears the reading and discards an in-flight probe`, async () => {
+    const config = { name: 'gemini', type: 'apikey', apiKey: 'ak', upstream: UPSTREAM, quotaProvider: 'antigravity' };
+    const mem = { accounts: [{ ...config }] };
+    const am = new AccountManager([config]);
+    const reading = { ...parse([googleAccount('a@gmail.com', { weekly: remaining(0.8) })]), at: now };
+    am.applyBackendQuota(0, reading);
+    await syncAccountsFromDisk({ accounts: [{ ...config }] }, mem, am);
+    assert.equal(am.accounts[0].quota.backend, reading, 'an unchanged binding keeps the reading');
+
+    let finishProbe;
+    const prober = new Prober(am, { backendFn: () => new Promise(resolve => { finishProbe = resolve; }) });
+    const probe = prober.probeAll();
+    assert.equal(prober.getStatus().accounts[0].status, 'running');
+    await syncAccountsFromDisk({ accounts: [{ ...config, [field]: value }] }, mem, am);
+    assert.equal(am.accounts[0].quota.backend, null, 'reload clears the old reading before the probe returns');
+
+    finishProbe(reading);
+    await probe;
+    assert.equal(am.accounts[0].quota.backend, null, 'the old probe must not restore the reading');
+    assert.equal(prober.getStatus().accounts[0].status, field === 'upstream' ? 'never' : 'not-applicable');
+  });
+}
 
 test('endpoint is called at {upstream}/v1/account-quotas with Bearer credential', async () => {
   let seen = null;
@@ -269,6 +305,47 @@ test('two usable accounts pick the best by lowest weekly, then lowest 5-hour', a
   assert.equal(r2.utilization, 0.2);
 });
 
+test('an account that can serve beats a lower weekly reading with exhausted five-hour quota', () => {
+  const reading = parse([
+    googleAccount('exhausted@gmail.com', { weekly: remaining(0.99), fiveHour: remaining(0) }),
+    googleAccount('healthy@gmail.com', { weekly: remaining(0.7), fiveHour: remaining(0.6) }),
+  ]);
+  assert.deepEqual(reading.windows, reading.accounts[1].pools.gemini);
+  assert.equal(reading.utilization, 0.4);
+  assert.equal(reading.text, '5h 40% · week 30%');
+});
+
+test('a missing weekly window compares as the five-hour reading', () => {
+  const reading = parse([
+    googleAccount('exhausted@gmail.com', { weekly: remaining(0), fiveHour: remaining(0.95) }),
+    googleAccount('higher-week@gmail.com', { weekly: remaining(0.7), fiveHour: remaining(0.98) }),
+    googleAccount('no-week@gmail.com', { fiveHour: remaining(0.75) }),
+  ]);
+  assert.deepEqual(reading.windows, { fiveHour: { utilization: 0.25, resetAt: null } });
+  assert.equal(reading.text, '5h 25%');
+});
+
+test('expired windows do not rank or appear in the top-level reading', () => {
+  const reading = parse([
+    googleAccount('expired@gmail.com', { weekly: remaining(0.99, now) }),
+    googleAccount('live@gmail.com', { weekly: remaining(1, now), fiveHour: remaining(0) }),
+  ]);
+  const best = bestAntigravityAccount(reading.accounts, now);
+  assert.equal(best.account.email, 'live@gmail.com');
+  assert.deepEqual(best.windows, { fiveHour: { utilization: 1, resetAt: null } });
+  assert.deepEqual(reading.windows, best.windows);
+  assert.equal(reading.accounts[1].pools.gemini.weekly.resetAt, now, 'keep the original per-account window');
+});
+
+test('a weekly tie with no five-hour windows keeps the first account', () => {
+  const reading = parse([
+    googleAccount('first@gmail.com', { weekly: remaining(0.8, WK_RESET) }),
+    googleAccount('second@gmail.com', { weekly: remaining(0.8) }),
+  ]);
+  assert.equal(bestAntigravityAccount(reading.accounts, now).account.email, 'first@gmail.com');
+  assert.deepEqual(reading.windows, { weekly: { utilization: 0.2, resetAt: WK_RESET } });
+});
+
 test('disabled, invalid, and error accounts never win as best, but stay in accounts[] for the panel', async () => {
   const body = {
     fetchedAt: iso(now),
@@ -382,6 +459,26 @@ test('missing windows, missing reset times, clamping, and safeLine scrubbing', a
   assert.deepEqual(r.windows, { weekly: { utilization: 0, resetAt: null } });
   assert.equal(r.utilization, 0);
   assert.equal(r.text, 'week 0%');
+});
+
+test('only finite numbers and non-blank numeric strings make quota windows', () => {
+  const badFractions = ['', '   ', [], [0.7], {}, true, Infinity, 'Infinity'];
+  const reading = parse(badFractions.map((fraction, i) => googleAccount(`a${i}@gmail.com`, {
+    fiveHour: remaining(fraction),
+    weekly: remaining(' 0.75 '),
+  })));
+  for (const account of reading.accounts) {
+    assert.deepEqual(account.pools.gemini, { weekly: { utilization: 0.25, resetAt: null } }, account.email);
+  }
+});
+
+test('escape-only status and tier fall back to error and null after scrubbing', () => {
+  const reading = parse([
+    googleAccount('a@gmail.com', { weekly: remaining(1) }, { status: '\x1b[31m\x1b[2J', tier: '\x1b[1m' }),
+  ]);
+  assert.equal(reading.accounts[0].status, 'error');
+  assert.equal(reading.accounts[0].tier, null);
+  assert.equal(reading.text, 'no usable accounts');
 });
 
 test('unrecognized bodies and HTTP errors fail cleanly', async () => {

@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { AccountManager } from '../src/account-manager.js';
+import { providerFor } from '../src/backend-quota.js';
 import { RemoteAccountManager } from '../src/tui-remote.js';
 import { fleetAggregate, routeHeadroom } from '../src/quota-summary.js';
-import { TUI } from '../src/tui.js';
+import { allocatePaneWidths, TUI } from '../src/tui.js';
 
 const strip = s => s.replace(/\x1b\[[0-9;]*m/g, '');
 const HOUR = 3600_000;
@@ -25,59 +26,37 @@ function geminiAccount(over = {}) {
   };
 }
 
+function googleAccount(email, windows, over = {}) {
+  return { email, enabled: true, tier: 'ultra', status: 'ok', groups: [{ id: 'gemini', windows }], ...over };
+}
+
+function wireWindow(utilization, resetAt = null) {
+  return { remainingFraction: 1 - utilization, resetTime: resetAt == null ? null : new Date(resetAt).toISOString() };
+}
+
+function parseReading(now, accounts) {
+  const reading = providerFor(UPSTREAM, 'antigravity').parse({ accounts });
+  assert.ok(reading);
+  return { ...reading, at: now };
+}
+
 function sampleReading(now = Date.now()) {
-  const sesReset = now + 3 * HOUR + 22 * 60_000;
-  const wkReset = now + 6 * DAY + 22 * HOUR;
-  const p3SesReset = now + 4 * HOUR + 43 * 60_000;
-  const p3WkReset = now + 6 * DAY + 23 * HOUR;
-  return {
-    label: 'Plan',
-    text: '5h 16% (resets 3h22m) · week 4% (resets 6d22h)',
-    utilization: 0.16,
-    at: now,
-    windows: {
-      fiveHour: { utilization: 0.16, resetAt: sesReset },
-      weekly: { utilization: 0.04, resetAt: wkReset },
-    },
-    accounts: [
-      {
-        email: 'a@gmail.com',
-        enabled: true,
-        tier: 'ultra',
-        status: 'ok',
-        pools: {
-          gemini: {
-            fiveHour: { utilization: 0.16, resetAt: sesReset },
-            weekly: { utilization: 0.04, resetAt: wkReset },
-          },
-          '3p': {
-            fiveHour: { utilization: 0.06, resetAt: p3SesReset },
-            weekly: { utilization: 0.03, resetAt: p3WkReset },
-          },
-        },
-      },
-      {
-        email: 'b@gmail.com',
-        enabled: true,
-        tier: 'ultra',
-        status: 'ok',
-        pools: {
-          gemini: {
-            fiveHour: { utilization: 0, resetAt: null },
-            weekly: { utilization: 0, resetAt: null },
-          },
-        },
-      },
-      {
-        email: 'c@gmail.com',
-        enabled: true,
-        tier: 'ultra',
-        status: 'error',
-        error: 'HTTP 503',
-        pools: {},
-      },
-    ],
-  };
+  return parseReading(now, [
+    googleAccount('a@gmail.com', null, {
+      groups: [
+        { id: 'gemini', windows: {
+          fiveHour: wireWindow(0.16, now + 3 * HOUR + 22 * 60_000),
+          weekly: wireWindow(0.04, now + 6 * DAY + 22 * HOUR),
+        } },
+        { id: '3p', windows: {
+          fiveHour: wireWindow(0.06, now + 4 * HOUR + 43 * 60_000),
+          weekly: wireWindow(0.03, now + 6 * DAY + 23 * HOUR),
+        } },
+      ],
+    }),
+    googleAccount('b@gmail.com', { fiveHour: wireWindow(0), weekly: wireWindow(0) }),
+    googleAccount('c@gmail.com', null, { status: 'error', error: 'HTTP 503' }),
+  ]);
 }
 
 function tuiFor(am, routes = []) {
@@ -161,9 +140,22 @@ test('Gemini panel renders each Google account, dimmed 3p pool, dash for missing
 
   // The Claude+GPT pool line is dimmed, and error status is painted red.
   const line3p = rawLines.find(l => strip(l).includes('Claude+GPT pool'));
-  assert.ok(line3p.includes('\x1b[2m'), 'Claude+GPT pool row should be dimmed');
+  assert.match(line3p, /\x1b\[2mClaude\+GPT pool *\x1b\[0m/);
+  assert.match(line3p, /\x1b\[2mSes +6% · 4h43m *\x1b\[0m +\x1b\[2mWk +3% · 6d23h\x1b\[0m/);
   const errLine = rawLines.find(l => strip(l).includes('c@gmail.com'));
   assert.ok(errLine.includes('\x1b[31merror'), 'error status should be red');
+});
+
+test('Gemini shows both disabled and invalid status tags in full', () => {
+  const am = new AccountManager([geminiAccount()]);
+  am.applyBackendQuota(0, parseReading(Date.now(), [
+    googleAccount('good@gmail.com', { weekly: wireWindow(0.04) }, { tier: 'pro' }),
+    googleAccount('off@gmail.com', null, { status: 'disabled', enabled: true }),
+    googleAccount('bad@gmail.com', null, { status: 'invalid', error: 'token revoked' }),
+  ]));
+  const lines = tuiFor(am)._accountLines(80).map(strip).join('\n');
+  assert.match(lines, /off@gmail\.com +disabled\b/);
+  assert.match(lines, /bad@gmail\.com +invalid +token revoked/);
 });
 
 test('Gemini panel never overflows column budget across Anthropic+Codex+Gemini and narrow widths', () => {
@@ -194,91 +186,132 @@ test('Gemini panel never overflows column budget across Anthropic+Codex+Gemini a
   assert.match(wide[0], /Anthropic.*│\s+Codex.*│\s+Gemini/, 'ultrawide renders all three panes side by side');
 });
 
-test('routeHeadroom and Routes panel count usable Google accounts and report binding window without entering fleetAggregate', () => {
+test('pane widths stay within their stage limits from 150 to 260 columns', () => {
+  const stages = [[60, 67, 95], [55, 62, 95], [50, 50, 55]];
+  // One spare column, tied between the first two panes; the third cannot grow yet.
+  assert.deepEqual(allocatePaneWidths(stages, 166), [61, 55, 50]);
+  // More room starts the next stage. The pane with the largest remainder wins it.
+  assert.deepEqual(allocatePaneWidths(stages, 180), [67, 63, 50]);
+  for (let width = 150; width <= 260; width++) {
+    const widths = allocatePaneWidths(stages, width);
+    if (width < 165) {
+      assert.equal(widths, null);
+      continue;
+    }
+    assert.equal(widths.reduce((sum, w) => sum + w, 0), Math.min(width, 245));
+    const stage = width < 179 ? 1 : 2;
+    for (let i = 0; i < stages.length; i++) {
+      const [floor, ceiling] = [stages[i][stage - 1], stages[i][stage]];
+      assert.ok(widths[i] >= floor && widths[i] <= ceiling, `pane ${i} at ${width}: ${widths[i]} not in [${floor}, ${ceiling}]`);
+    }
+  }
+});
+
+test('routeHeadroom and Routes panel count usable Google accounts and report their binding window', () => {
   const now = Date.now();
   const wkReset = now + 6 * DAY + 22 * HOUR;
   const sesReset = now + 3 * HOUR + 22 * 60_000;
   const routes = [makeRoute('gemini', ['gemini'])];
+  const am = new AccountManager([geminiAccount()]);
+  const tui = tuiFor(am, routes);
+  const readRoute = () => routeHeadroom(am.accounts, routes, { thresholdFor: () => 0.98, now })[0];
+  const renderRoute = () => tui._routeLines(50, routes, () => 0.98, now).map(strip).find(l => l.includes('gemini'));
+  const notUsable = googleAccount('c@gmail.com', null, { status: 'error', error: 'HTTP 503' });
 
-  // One usable Google account where weekly (4%) binds over 5h (0%).
-  const am1 = new AccountManager([geminiAccount()]);
-  am1.applyBackendQuota(0, {
-    label: 'Plan',
-    text: '5h 0% · week 4% (resets 6d22h)',
-    utilization: 0.04,
-    at: now,
-    windows: {
-      fiveHour: { utilization: 0, resetAt: null },
-      weekly: { utilization: 0.04, resetAt: wkReset },
-    },
-    accounts: [{
-      email: 'a@gmail.com',
-      enabled: true,
-      tier: 'ultra',
-      status: 'ok',
-      pools: { gemini: { fiveHour: { utilization: 0, resetAt: null }, weekly: { utilization: 0.04, resetAt: wkReset } } },
-    }],
-  });
+  am.applyBackendQuota(0, parseReading(now, [
+    googleAccount('a@gmail.com', { fiveHour: wireWindow(0), weekly: wireWindow(0.04, wkReset) }),
+  ]));
+  assert.deepEqual(fleetAggregate(am.accounts, { now }), []);
+  const weekly = readRoute();
+  assert.equal(weekly.counted, 1);
+  assert.equal(weekly.bucket, 'unified7d');
+  assert.equal(weekly.value.utilization, 0.04);
+  assert.equal(weekly.value.nextResetAt, wkReset);
+  assert.match(renderRoute(), /gemini\s+Wk\s+4%\s+6d22h\s+1 seat/);
 
-  // Never enters fleetAggregate (local backend stays out of Anthropic pool).
-  assert.deepEqual(fleetAggregate(am1.accounts, { now }), []);
+  am.applyBackendQuota(0, parseReading(now, [
+    googleAccount('a@gmail.com', { fiveHour: wireWindow(0.16, sesReset), weekly: wireWindow(0.04, wkReset) }),
+    googleAccount('b@gmail.com', { fiveHour: wireWindow(0.1), weekly: wireWindow(0.12) }),
+    notUsable,
+  ]));
+  const session = readRoute();
+  assert.equal(session.counted, 2);
+  assert.equal(session.total, 3);
+  assert.equal(session.bucket, 'unified5h');
+  assert.equal(session.value.utilization, 0.16);
+  assert.match(renderRoute(), /gemini\s+Ses\s+16%\s+3h22m\s+2 seats/);
 
-  const [entry1] = routeHeadroom(am1.accounts, routes, { thresholdFor: () => 0.98, now });
-  assert.equal(entry1.counted, 1);
-  assert.equal(entry1.bucket, 'unified7d');
-  assert.equal(entry1.value.utilization, 0.04);
-  assert.equal(entry1.value.nextResetAt, wkReset);
+  am.applyBackendQuota(0, parseReading(now, [notUsable]));
+  const empty = readRoute();
+  assert.equal(empty.counted, 0);
+  assert.equal(empty.value, null);
+  assert.match(renderRoute(), /gemini\s+no counted seat/);
+});
 
-  const tui1 = tuiFor(am1, routes);
-  const routeLine1 = tui1._routeLines(50, routes, () => 0.98, now).map(strip).find(l => l.includes('gemini'));
-  assert.match(routeLine1, /gemini\s+Wk\s+4%\s+6d22h\s+1 seat/);
+test('Routes takes both windows from the same Google account across two proxies', () => {
+  const now = Date.now();
+  const reset = now + HOUR;
+  const am = new AccountManager([geminiAccount(), geminiAccount({ name: 'gemini-b' })]);
+  const routes = [makeRoute('gemini', ['gemini', 'gemini-b'])];
+  am.applyBackendQuota(0, parseReading(now, [
+    googleAccount('a@gmail.com', { fiveHour: wireWindow(0.8, reset), weekly: wireWindow(0.1) }),
+  ]));
+  am.applyBackendQuota(1, parseReading(now, [
+    googleAccount('b@gmail.com', { fiveHour: wireWindow(0.05), weekly: wireWindow(0.25) }),
+  ]));
 
-  // Two usable Google accounts + one error account -> 2 seats, binding 5h (16% > 4%).
-  am1.applyBackendQuota(0, sampleReading(now));
-  const [entry2] = routeHeadroom(am1.accounts, routes, { thresholdFor: () => 0.98, now });
-  assert.equal(entry2.counted, 2);
-  assert.equal(entry2.bucket, 'unified5h');
-  assert.equal(entry2.value.utilization, 0.16);
-  const routeLine2 = tui1._routeLines(50, routes, () => 0.98, now).map(strip).find(l => l.includes('gemini'));
-  assert.match(routeLine2, /gemini\s+Ses\s+16%\s+3h22m\s+2 seats/);
+  const [route] = routeHeadroom(am.accounts, routes, { now });
+  assert.equal(route.counted, 2);
+  assert.equal(route.bucket, 'unified5h');
+  assert.equal(route.value.utilization, 0.8);
+  assert.equal(route.value.nextResetAt, reset);
+});
 
-  // Zero usable Google accounts (all disabled/error) -> no counted seat.
-  am1.applyBackendQuota(0, {
-    label: 'Plan',
-    text: 'no usable accounts',
-    utilization: null,
-    at: now,
-    accounts: [
-      { email: 'c@gmail.com', enabled: true, tier: 'ultra', status: 'error', error: 'HTTP 503', pools: {} },
-    ],
-  });
-  const [entry0] = routeHeadroom(am1.accounts, routes, { thresholdFor: () => 0.98, now });
-  assert.equal(entry0.counted, 0);
-  assert.equal(entry0.value, null);
-  const routeLine0 = tui1._routeLines(50, routes, () => 0.98, now).map(strip).find(l => l.includes('gemini'));
-  assert.match(routeLine0, /gemini\s+no counted seat/);
+test('Routes reselects a seat when the best stored window expires', () => {
+  const now = Date.now();
+  const expires = now + HOUR;
+  const liveReset = now + DAY;
+  const am = new AccountManager([geminiAccount()]);
+  const routes = [makeRoute('gemini', ['gemini'])];
+  const first = googleAccount('a@gmail.com', { fiveHour: wireWindow(0.1, expires) });
+  const second = googleAccount('b@gmail.com', { weekly: wireWindow(0.4, liveReset) });
+  const reading = parseReading(now, [first, second]);
+  assert.equal(reading.windows.fiveHour.resetAt, expires);
+  am.applyBackendQuota(0, reading);
 
-  // Expired window is ignored rather than reporting stale utilization.
-  am1.applyBackendQuota(0, {
-    label: 'Plan',
-    text: '5h 80%',
-    utilization: 0.8,
-    at: now - 6 * HOUR,
-    windows: { fiveHour: { utilization: 0.8, resetAt: now - 1000 } },
-    accounts: [{
-      email: 'a@gmail.com',
-      enabled: true,
-      tier: 'ultra',
-      status: 'ok',
-      pools: { gemini: { fiveHour: { utilization: 0.8, resetAt: now - 1000 } } },
-    }],
-  });
-  const [entryExpired] = routeHeadroom(am1.accounts, routes, { thresholdFor: () => 0.98, now });
-  assert.equal(entryExpired.counted, 1);
-  assert.equal(entryExpired.value, null);
-  const routeLineExpired = tui1._routeLines(50, routes, () => 0.98, now).map(strip).find(l => l.includes('gemini'));
-  assert.match(routeLineExpired, /gemini\s+no quota yet/);
-  assert.ok(sesReset > now);
+  const [route] = routeHeadroom(am.accounts, routes, { now: expires });
+  assert.equal(route.counted, 2);
+  assert.equal(route.bucket, 'unified7d');
+  assert.equal(route.value.utilization, 0.4);
+  assert.equal(route.value.nextResetAt, liveReset);
+
+  am.applyBackendQuota(0, parseReading(now, [first]));
+  const expiredLine = tuiFor(am, routes)._routeLines(50, routes, () => 0.98, expires).map(strip).find(l => l.includes('gemini'));
+  assert.match(expiredLine, /gemini\s+no quota yet/);
+});
+
+test('disabled TeamClaude proxies do not display their Google accounts', () => {
+  const am = new AccountManager([geminiAccount(), geminiAccount({ name: 'gemini-off', disabled: true })]);
+  const now = Date.now();
+  am.applyBackendQuota(0, parseReading(now, [googleAccount('live@gmail.com', { weekly: wireWindow(0.2) })]));
+  am.applyBackendQuota(1, parseReading(now, [googleAccount('off@gmail.com', { weekly: wireWindow(0) })]));
+  const lines = tuiFor(am)._accountLines(80).map(strip).join('\n');
+  assert.match(lines, /live@gmail\.com/);
+  assert.doesNotMatch(lines, /off@gmail\.com/);
+});
+
+test('remote antigravity proxies show Google quota, not an Anthropic row or seat', () => {
+  const am = new AccountManager([
+    oauth('claude@example.com', { rateLimitTier: 'default_claude_max_20x' }),
+    geminiAccount({ name: 'remote-proxy', upstream: 'https://proxy.example.test' }),
+  ]);
+  const now = Date.now();
+  am.applyBackendQuota(1, parseReading(now, [googleAccount('a@gmail.com', { weekly: wireWindow(0.2) })]));
+  const lines = tuiFor(am)._accountLines(160).map(strip).join('\n');
+  assert.match(lines, /Anthropic.*│\s+Gemini/);
+  assert.match(lines, /claude@example\.com.*│\s+► a@gmail\.com/);
+  assert.doesNotMatch(lines, /remote-proxy/);
+  assert.deepEqual(fleetAggregate(am.accounts, { now }).map(a => [a.provider, a.total, a.counted]), [['anthropic', 1, 1]]);
 });
 
 test('attach mode carries quotaProvider and scrubs quota.backend.accounts off the wire', () => {

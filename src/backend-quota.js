@@ -246,10 +246,8 @@ const KIMI = {
 // /v1/account-quotas returns each account's Gemini (`id: "gemini"`) and
 // Claude+GPT (`id: "3p"`) pools with `remainingFraction` (0-1) and ISO
 // `resetTime`. TeamClaude's top-level windows reflect the best usable Google
-// account (lowest weekly utilization, then lowest 5-hour), since the proxy
-// fails over across them; every account is kept in `accounts` for the TUI
-// Gemini panel.
-const ANTIGRAVITY_STATUSES = new Set(['ok', 'disabled', 'invalid', 'error']);
+// account that can serve, since the proxy fails over across them; every
+// account is kept in `accounts` for the TUI Gemini panel.
 
 const cleanFraction = (/** @type {number} */ n) =>
   Math.min(1, Math.max(0, Math.round(n * 1e12) / 1e12));
@@ -258,8 +256,8 @@ const cleanFraction = (/** @type {number} */ n) =>
 function antigravityWindow(w) {
   if (!w || typeof w !== 'object') return null;
   const raw = w.remainingFraction;
-  // Number(null) and Number('') are 0, which would invert to 100% used.
-  const rem = raw === null || raw === undefined || raw === '' || typeof raw === 'boolean' ? NaN : Number(raw);
+  const rem = typeof raw === 'number' ? raw
+    : typeof raw === 'string' && raw.trim() ? Number(raw) : NaN;
   if (!Number.isFinite(rem)) return null;
   const reset = typeof w.resetTime === 'string' && w.resetTime ? Date.parse(w.resetTime) : NaN;
   return {
@@ -280,6 +278,44 @@ function antigravityGroupWindows(group) {
   return windows;
 }
 
+/** @param {BackendQuotaAccount|null|undefined} account */
+export function isUsableAntigravityAccount(account) {
+  return account?.status === 'ok' && account.enabled === true;
+}
+
+/**
+ * Choose one usable seat with live Gemini quota. A seat with headroom beats
+ * one that cannot serve; within those groups, prefer the lower weekly reading,
+ * then the lower 5-hour reading. Keep the first account on a tie.
+ * @param {BackendQuotaAccount[]} accounts
+ * @param {number} now
+ * @returns {{ account: BackendQuotaAccount, windows: BackendQuotaWindows }|null}
+ */
+export function bestAntigravityAccount(accounts, now) {
+  /** @type {{ account: BackendQuotaAccount, windows: BackendQuotaWindows, canServe: boolean, week: number, session: number }|null} */
+  let best = null;
+  for (const account of accounts) {
+    if (!isUsableAntigravityAccount(account)) continue;
+    /** @type {BackendQuotaWindows} */
+    const windows = {};
+    for (const key of /** @type {const} */ (['weekly', 'fiveHour'])) {
+      const w = account.pools.gemini?.[key];
+      if (w && (w.resetAt == null || w.resetAt > now)) windows[key] = w;
+    }
+    if (!windows.weekly && !windows.fiveHour) continue;
+    const week = windows.weekly?.utilization ?? windows.fiveHour?.utilization ?? 1;
+    const session = windows.fiveHour?.utilization ?? week;
+    const canServe = week < 1 && session < 1;
+    if (best) {
+      if (canServe !== best.canServe) {
+        if (!canServe) continue;
+      } else if (week !== best.week ? week > best.week : session >= best.session) continue;
+    }
+    best = { account, windows, canServe, week, session };
+  }
+  return best && { account: best.account, windows: best.windows };
+}
+
 const ANTIGRAVITY = {
   id: 'antigravity',
   path: '/v1/account-quotas',
@@ -294,8 +330,8 @@ const ANTIGRAVITY = {
       if (!email) continue;
       const enabled = entry.enabled === true;
       const rawStatus = typeof entry.status === 'string' ? entry.status.trim().toLowerCase() : '';
-      const status = ANTIGRAVITY_STATUSES.has(rawStatus) ? rawStatus : safeLine(rawStatus || 'error', 16);
-      const tier = entry.tier != null && entry.tier !== '' ? safeLine(String(entry.tier), 16) : null;
+      const status = safeLine(rawStatus, 16) || 'error';
+      const tier = entry.tier == null ? null : safeLine(String(entry.tier), 16) || null;
       const error = entry.error != null && entry.error !== '' ? safeLine(String(entry.error), 120) : undefined;
       /** @type {{ gemini?: BackendQuotaWindows, '3p'?: BackendQuotaWindows }} */
       const pools = {};
@@ -320,31 +356,20 @@ const ANTIGRAVITY = {
     }
     if (body.accounts.length > 0 && accounts.length === 0) return null;
 
-    const usable = accounts.filter(a => a.status === 'ok' && a.enabled);
-    const withGemini = usable.filter(a => a.pools.gemini && (a.pools.gemini.fiveHour || a.pools.gemini.weekly));
-    withGemini.sort((a, b) => {
-      const aWk = a.pools.gemini?.weekly?.utilization ?? Number.POSITIVE_INFINITY;
-      const bWk = b.pools.gemini?.weekly?.utilization ?? Number.POSITIVE_INFINITY;
-      if (aWk !== bWk) return aWk - bWk;
-      const a5h = a.pools.gemini?.fiveHour?.utilization ?? Number.POSITIVE_INFINITY;
-      const b5h = b.pools.gemini?.fiveHour?.utilization ?? Number.POSITIVE_INFINITY;
-      return a5h - b5h;
-    });
-    const best = withGemini[0]?.pools.gemini ?? null;
+    const now = Date.now();
+    const best = bestAntigravityAccount(accounts, now);
     if (!best) {
       const text = accounts.length === 0 ? 'no accounts'
-        : usable.length === 0 ? 'no usable accounts'
+        : !accounts.some(isUsableAntigravityAccount) ? 'no usable accounts'
         : 'no quota yet';
       return { label: 'Plan', text, utilization: null, accounts };
     }
-    /** @type {BackendQuotaWindows} */
-    const windows = {};
+    const { windows } = best;
     const parts = [];
     for (const [key, name] of /** @type {const} */ ([['fiveHour', '5h'], ['weekly', 'week']])) {
-      const w = best[key];
+      const w = windows[key];
       if (!w) continue;
-      windows[key] = { utilization: w.utilization, resetAt: w.resetAt };
-      const until = w.resetAt ? formatUntil(w.resetAt - Date.now()) : '';
+      const until = w.resetAt ? formatUntil(w.resetAt - now) : '';
       parts.push(`${name} ${Math.round(w.utilization * 100)}%${until ? ` (resets ${until})` : ''}`);
     }
     const utilization = Math.max(...Object.values(windows).map(w => w.utilization));

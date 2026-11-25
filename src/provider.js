@@ -306,3 +306,9 @@ export function isLocalUpstream(account) {
   const host = hostname.replace(/^\[|\]$/g, '').toLowerCase(); // URL brackets IPv6
   return host === 'localhost' || host === '::1' || /^127\./.test(host);
 }
+
+/** A proxy account fronts another backend rather than holding a seat of its own.
+ * @param {any} account */
+export function isQuotaConduit(account) {
+  return account?.quotaProvider === 'antigravity' || isLocalUpstream(account);
+}

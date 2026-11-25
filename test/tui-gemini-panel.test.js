@@ -114,7 +114,7 @@ test('before the first reading, or without quotaProvider, display is unchanged (
   assert.ok(routeLines2.some(l => l.includes('gemini') && l.includes('no counted seat')));
 });
 
-test('Gemini panel renders each Google account, dimmed 3p pool, dash for missing reset, and errors', () => {
+test('Gemini panel draws a session and weekly bar for each Google account, and errors', () => {
   const now = Date.now();
   const am = new AccountManager([
     oauth('claude@example.com', { rateLimitTier: 'default_claude_max_20x' }),
@@ -127,6 +127,7 @@ test('Gemini panel renders each Google account, dimmed 3p pool, dash for missing
   am.applyBackendQuota(1, sampleReading(now));
 
   const tui = tuiFor(am);
+  tui.config.quotaBarPercent = true;
   const rawLines = tui._accountLines(160);
   const plain = rawLines.map(strip);
   const joined = plain.join('\n');
@@ -134,14 +135,13 @@ test('Gemini panel renders each Google account, dimmed 3p pool, dash for missing
   // Anthropic and Gemini sit side-by-side behind the pane gutter.
   assert.match(plain[0], /Anthropic.*│\s+Gemini/);
   assert.match(joined, /│\s+► a@gmail\.com\s+ultra\s+Ses\s+16% · 3h22m\s+Wk\s+4% · 6d22h/);
-  assert.match(joined, /│\s+Claude\+GPT pool\s+Ses\s+6% · 4h43m\s+Wk\s+3% · 6d23h/);
-  assert.match(joined, /│\s+► b@gmail\.com\s+ultra\s+Ses\s+0% · –\s+Wk\s+0% · –/);
+  assert.match(joined, /│\s+► b@gmail\.com\s+ultra\s+Ses\s+0%\s+Wk\s+0%/);
   assert.match(joined, /│\s+c@gmail\.com\s+error\s+HTTP 503/);
 
-  // The Claude+GPT pool line is dimmed, and error status is painted red.
-  const line3p = rawLines.find(l => strip(l).includes('Claude+GPT pool'));
-  assert.match(line3p, /\x1b\[2mClaude\+GPT pool *\x1b\[0m/);
-  assert.match(line3p, /\x1b\[2mSes +6% · 4h43m *\x1b\[0m +\x1b\[2mWk +3% · 6d23h\x1b\[0m/);
+  // The readings are drawn as background bars, like the Anthropic and Codex rows.
+  const rowA = rawLines.find(l => strip(l).includes('a@gmail.com'));
+  assert.match(rowA, /Ses \x1b\[4\d;30m/, 'session bar has a coloured fill');
+  assert.match(rowA, /Wk \x1b\[4\d;30m/, 'weekly bar has a coloured fill');
   const errLine = rawLines.find(l => strip(l).includes('c@gmail.com'));
   assert.ok(errLine.includes('\x1b[31merror'), 'error status should be red');
 });
@@ -331,5 +331,4 @@ test('attach mode carries quotaProvider and scrubs quota.backend.accounts off th
   const panel = tui._accountLines(80).map(strip).join('\n');
   assert.match(panel, /Gemini/);
   assert.match(panel, /a@gmail\.com/);
-  assert.match(panel, /Claude\+GPT pool/);
 });

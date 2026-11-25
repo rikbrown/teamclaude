@@ -774,70 +774,17 @@ function barColor(ratio, resetTs, windowMs, threshold) {
   return ratio < 0.7 ? BAR_GREEN : ratio < 0.9 ? BAR_YELLOW : BAR_RED;
 }
 
-/**
- * Same burn-rate/fill thresholds as barColor, as foreground paint for compact
- * readouts without background bars (the Gemini panel).
- * @param {number} ratio
- * @param {number|null|undefined} resetTs
- * @param {number|null} windowMs
- * @param {number|null} threshold
- */
-function barFgColor(ratio, resetTs, windowMs, threshold) {
-  const c = barColor(ratio, resetTs, windowMs, threshold);
-  if (c === BAR_GREEN) return green;
-  if (c === BAR_YELLOW) return yellow;
-  if (c === BAR_ORANGE) return (/** @type {string} */ s) => fg('38;5;208', s);
-  return red;
-}
-
 /** @param {import('./backend-quota.js').BackendQuotaAccount} account */
 function geminiTag(account) {
   if (isUsableAntigravityAccount(account)) return account.tier || '';
   return account.status === 'disabled' || account.enabled === false ? 'disabled' : (account.status || 'error');
 }
 
-const GEMINI_3P_LABEL = 'Claude+GPT pool';
 const GEMINI_NAME_MIN = 12;
 const GEMINI_NAME_MAX = 24;
-const GEMINI_SES_RST_W = 6;
-// `Ses ` (4) + pct (4) + ` · ` (3) + rst (6) = 17.
-const GEMINI_SES_W = 17;
-// `Ses  16% · 3h22m   Wk  4% · 6d22h` -> 17 + 2 + 15 = 34.
-const GEMINI_METRICS_W = 34;
-
-/**
- * Format one pool (Gemini or 3p) as `Ses  16% · 3h22m   Wk  4% · 6d22h`,
- * using the same percentage/reset formatting and pace-aware colour thresholds
- * as Anthropic and Codex rows. When `dimmed` is true (the informational 3p
- * pool), the entire readout is dimmed.
- * @param {{ fiveHour?: { utilization: number, resetAt: number|null }, weekly?: { utilization: number, resetAt: number|null } }|null|undefined} pool
- * @param {boolean} dimmed
- * @param {number} maxW
- */
-function formatGeminiPool(pool, dimmed, maxW) {
-  const ses = bwLive(pool?.fiveHour);
-  const wk = bwLive(pool?.weekly);
-  if (!ses && !wk) return dimmed ? '' : dim('–');
-  const paintSes = ses
-    ? (() => {
-      const pct = `${Math.round(ses.utilization * 100)}%`.padStart(4);
-      const rst = rpad(formatReset(ses.resetAt) || '–', GEMINI_SES_RST_W);
-      if (dimmed) return dim(`Ses ${pct} · ${rst}`);
-      return `Ses ${barFgColor(ses.utilization, ses.resetAt, FIVE_HOUR_MS, null)(pct)} ${dim(`· ${rst}`)}`;
-    })()
-    : dim(rpad('Ses    –', GEMINI_SES_W));
-  const paintWk = wk
-    ? (() => {
-      const pct = `${Math.round(wk.utilization * 100)}%`.padStart(3);
-      const rst = formatReset(wk.resetAt) || '–';
-      if (dimmed) return dim(`Wk ${pct} · ${rst}`);
-      return `Wk ${barFgColor(wk.utilization, wk.resetAt, SEVEN_DAY_MS, null)(pct)} ${dim(`· ${rst}`)}`;
-    })()
-    : dim('Wk   –');
-  if (maxW >= GEMINI_METRICS_W) return `${paintSes}  ${paintWk}`;
-  if (maxW >= GEMINI_SES_W) return (ses ? paintSes : paintWk).trimEnd();
-  return '';
-}
+// Every column of a usable row but the name and the two bars:
+// `  ► ` (4) + `  ` + tier + `  ` + `Ses ` (4) + `  Wk ` (5).
+const geminiFixedW = (/** @type {number} */ tierW) => 17 + tierW;
 
 /**
  * Allocate `avail` columns across N panes stage by stage, the same way
@@ -4093,62 +4040,45 @@ export class TUI {
   /** Column budget and growth stages [floor, ideal] for the Gemini panel.
    *  @param {Array<any>} accounts */
   _geminiMetrics(accounts) {
-    const has3p = accounts.some(g =>
-      isUsableAntigravityAccount(g)
-      && (bwLive(g.pools?.['3p']?.fiveHour) || bwLive(g.pools?.['3p']?.weekly)));
-    const maxName = Math.max(
-      GEMINI_NAME_MIN,
-      ...accounts.map(g => vw(g.email || '')),
-      has3p ? vw(GEMINI_3P_LABEL) : 0,
-    );
+    const maxName = Math.max(GEMINI_NAME_MIN, ...accounts.map(g => vw(g.email || '')));
     const tierW = Math.min(10, Math.max(5, ...accounts.map(g => vw(geminiTag(g)))));
     const idealNameW = Math.min(GEMINI_NAME_MAX, maxName);
-    const fixed = 8 + tierW; // `  ► ` (4) + `  ` (2) + tierW + `  ` (2)
+    const fixed = geminiFixedW(tierW);
+    // The same growth order as the Codex pane: bars at their floor first, then
+    // whole names, then bars up to BAR_MAX.
     return {
       tierW,
       idealNameW,
       fixed,
-      stages: [fixed + GEMINI_NAME_MIN + GEMINI_METRICS_W, fixed + idealNameW + GEMINI_METRICS_W],
+      stages: [
+        fixed + GEMINI_NAME_MIN + 2 * PANE_BAR_FLOOR,
+        fixed + idealNameW + 2 * PANE_BAR_FLOOR,
+        fixed + idealNameW + 2 * BAR_MAX,
+      ],
     };
   }
 
-  /** Render the `Gemini` panel: title plus one row per Google account, with the
-   *  Claude+GPT (`3p`) pool dimmed on a second line when present.
+  /** Render the `Gemini` panel: title plus one row per Google account, with a
+   *  session bar and a weekly bar for its Gemini pool.
    *  @param {Array<any>} accounts
    *  @param {number} W */
   _geminiPaneLines(accounts, W) {
-    const { tierW, idealNameW, fixed, stages } = this._geminiMetrics(accounts);
-    let nameW;
-    let metricsW;
-    if (W >= stages[0]) {
-      nameW = Math.min(idealNameW, W - fixed - GEMINI_METRICS_W);
-      metricsW = Math.max(0, W - fixed - nameW);
-    } else if (W >= fixed + 8 + GEMINI_METRICS_W) {
-      nameW = Math.max(8, W - fixed - GEMINI_METRICS_W);
-      metricsW = GEMINI_METRICS_W;
-    } else {
-      nameW = Math.max(8, Math.min(idealNameW, W - fixed - GEMINI_SES_W));
-      metricsW = Math.max(0, W - fixed - nameW);
-    }
+    const { tierW, idealNameW, fixed } = this._geminiMetrics(accounts);
+    const nameW = Math.max(8, Math.min(idealNameW, W - fixed - 2 * PANE_BAR_FLOOR));
+    const barW = Math.max(BAR_MIN, Math.min(BAR_MAX, Math.floor((W - fixed - nameW) / 2)));
+    const pctInBar = this.config?.quotaBarPercent === true;
     const clamp = (/** @type {string} */ line) => (vw(line) > W ? fitLine(line, W) : line);
     const lines = [paneTitle('Gemini', W)];
     for (const g of accounts) {
-      const usable = isUsableAntigravityAccount(g);
       const tag = geminiTag(g);
       const email = rpad(truncate(g.email || '', nameW), nameW);
-      if (usable) {
+      if (isUsableAntigravityAccount(g)) {
         const tier = gray(rpad(truncate(tag, tierW), tierW));
-        const metrics = formatGeminiPool(g.pools?.gemini, false, metricsW);
-        const tail = metrics ? `  ${metrics}` : '';
-        lines.push(clamp(`  ${green('►')} ${email}  ${tier}${tail}`));
-        const pool3p = g.pools?.['3p'];
-        if (pool3p && (bwLive(pool3p.fiveHour) || bwLive(pool3p.weekly))) {
-          const metrics3p = formatGeminiPool(pool3p, true, metricsW);
-          if (metrics3p) {
-            const label3p = dim(rpad(truncate(GEMINI_3P_LABEL, nameW), nameW));
-            lines.push(clamp(`    ${label3p}  ${' '.repeat(tierW)}  ${metrics3p}`));
-          }
-        }
+        const ses = bwLive(g.pools?.gemini?.fiveHour);
+        const wk = bwLive(g.pools?.gemini?.weekly);
+        const sesBar = bar(ses?.utilization, barW, ses?.resetAt, FIVE_HOUR_MS, null, pctInBar);
+        const wkBar = bar(wk?.utilization, barW, wk?.resetAt, SEVEN_DAY_MS, null, pctInBar);
+        lines.push(clamp(`  ${green('►')} ${email}  ${tier}  Ses ${sesBar}  Wk ${wkBar}`));
       } else {
         const isDisabled = tag === 'disabled';
         const statusCell = rpad(truncate(tag, tierW), tierW);
@@ -4156,7 +4086,8 @@ export class TUI {
           : (tag === 'error' || tag === 'invalid') ? red(statusCell)
           : yellow(statusCell);
         const paintedEmail = isDisabled ? gray(email) : email;
-        const errText = g.error && metricsW > 0 ? `  ${dim(truncate(g.error, metricsW))}` : '';
+        const errW = W - (8 + nameW + tierW) - 2;
+        const errText = g.error && errW > 0 ? `  ${dim(truncate(g.error, errW))}` : '';
         lines.push(clamp(`    ${paintedEmail}  ${paintedStatus}${errText}`));
       }
     }

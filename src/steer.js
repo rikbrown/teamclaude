@@ -46,7 +46,7 @@ import { providerOf, DEFAULT_PROVIDER } from './provider.js';
  * on: 'redeemed' (spent), 'unknown' (no verdict read over a request that may
  * have spent), 'nothing-held' (nothing to spend, so asking again cannot help),
  * 'not-now' (nothing spent, and `retryAt` says when asking again could change
- * that), 'cancelled' (the steer ended before the spend).
+ * that), 'cancelled' (the steer stopped the spend before it was sent).
  *
  * @typedef {Object} SteerRedeemResult
  * @property {boolean} redeemed

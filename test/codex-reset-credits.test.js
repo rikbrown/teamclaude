@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { AccountManager } from '../src/account-manager.js';
-import { createDefaultConfig } from '../src/config.js';
+import { createDefaultConfig, createStatePersister } from '../src/config.js';
 import { accountBadges } from '../src/dashboard.js';
 import { createProxyServer } from '../src/server.js';
 import { renderStatus, resetCreditLine, RESET_CREDIT_MAX_AGE_MS } from '../src/status-renderer.js';
@@ -1160,6 +1160,37 @@ test('the status line says how old the reading is', () => {
 // switch, the account's exemption and the dry-pool justification are skipped,
 // and every safeguard is kept.
 
+test('Codex pool requests make their own shared attempt after a concurrent steer answers not-now', async () => {
+  const { am, redeemer, calls } = poolHarness({ accounts: [codex('a', { disabled: true }), codex('b')] });
+  const [a, b] = am.accounts;
+  const steer = redeemer.redeemForSteer(a);
+  const [declined, first, second] = await Promise.all([
+    steer,
+    redeemer.maybeRedeemForPool([b]),
+    redeemer.maybeRedeemForPool([b]),
+  ]);
+  assert.equal(declined.outcome, 'not-now');
+  assert.equal(first.redeemed, true);
+  assert.equal(second.redeemed, true);
+  assert.deepEqual(calls.consume, ['b']);
+});
+
+test('only a Codex pool request offered the steer target can use its concurrent redemption', async () => {
+  const { am, redeemer, calls } = poolHarness();
+  const [a, b] = am.accounts;
+  const steer = redeemer.redeemForSteer(a);
+  const [spent, offered, other] = await Promise.all([
+    steer,
+    redeemer.maybeRedeemForPool([a]),
+    redeemer.maybeRedeemForPool([b]),
+  ]);
+  assert.equal(spent.redeemed, true);
+  assert.equal(offered.redeemed, true);
+  assert.equal(other.redeemed, false);
+  assert.match(other.reason, /cooling down/);
+  assert.deepEqual(calls.consume, ['a']);
+});
+
 test('a steer\'s --redeem spends a credit with the fleet unarmed, the account exempt and a sibling serving', async () => {
   const { am, redeemer, calls } = harness({ accounts: [codex('t', { autoRedeemReset: false }), codex('ok')], config: {} });
   assert.equal((await redeemer.maybeRedeemForPool([am.accounts[0]])).redeemed, false, 'the dry-pool path refuses');
@@ -1215,6 +1246,33 @@ test('a steer\'s --redeem spends no Codex credit on an account a reset would not
   assert.equal(r.outcome, 'not-now');
   assert.match(r.reason, /would not put it back in service while it is disabled/);
   assert.equal(calls.details + calls.consume, 0);
+});
+
+test('a failed state write stops a steer from spending and leaves it armed for a retry', async (t) => {
+  const now = Date.now();
+  t.mock.method(Date, 'now', () => now);
+  const logs = [];
+  t.mock.method(console, 'log', line => logs.push(line));
+  const { am, redeemer, calls } = harness({ config: {} });
+  const [account] = am.accounts;
+  const failedIds = [];
+  am.onSteersChanged(createStatePersister(() => am.exportSteers(), { save: async steers => {
+    if (steers[0]?.redeemRequestId) {
+      failedIds.push(steers[0].redeemRequestId);
+      throw new Error('synthetic disk failure');
+    }
+  } }));
+  am.setSteerRedeemer((target, opts) => redeemer.redeemForSteer(target, opts));
+  am.setSteer(account.index, { redeem: true });
+  am.getActiveAccount(null, null, null, 'at-the-wall', 'codex');
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(failedIds.length, 1, 'the attempted mid-spend write failed');
+  assert.equal(calls.consume, 0, 'no irreversible request was sent');
+  assert.equal(logs.filter(line => /state could not be saved, so its reset was not spent/.test(line)).length, 1);
+  assert.deepEqual(am.exportSteers().map(s => [s.redeem, s.phase, s.retryAt, s.redeemRequestId]), [
+    [true, 'active', now + 30 * 60_000, null],
+  ]);
 });
 
 test('a steer\'s Codex consume waits for beforeSpend with its key, and stops on false', async () => {

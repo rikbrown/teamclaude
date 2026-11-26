@@ -488,7 +488,7 @@ test('a steer is written as mid-spend before its claim goes out, and a restart f
   const target = am.accounts[indexOf(am, 't')];
   /** @type {any[]} */
   let saved = [];
-  am.onSteersChanged(async () => { saved = JSON.parse(JSON.stringify(am.exportSteers())); });
+  am.onSteersChanged(async () => { saved = JSON.parse(JSON.stringify(am.exportSteers())); return true; });
   /** @type {any[]} */
   let atClaim = [];
   am.setSteerRedeemer(async (_account, { beforeSpend }) => {

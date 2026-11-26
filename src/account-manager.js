@@ -1023,7 +1023,7 @@ export class AccountManager {
     // Told when a steer starts, ends or changes phase, so the state file holds
     // it at once rather than at the next minute's save. It answers with the
     // write, which the --redeem path awaits before its irreversible request.
-    /** @type {(() => (void|Promise<void>))|null} */
+    /** @type {(() => Promise<boolean>)|null} */
     this._onSteersChanged = null;
     // Injectable for tests (mirrors Prober's probeFn); defaults to the real
     // OAuth token refresh.
@@ -5057,8 +5057,8 @@ export class AccountManager {
   }
 
   /** Set a callback told whenever a steer starts, ends or changes phase; it
-   * may answer with a promise that settles once the change is on disk.
-   * @param {(() => (void|Promise<void>))|null} fn */
+   * answers true if the write succeeded and false if it failed.
+   * @param {(() => Promise<boolean>)|null} fn */
   onSteersChanged(fn) {
     this._onSteersChanged = fn;
   }
@@ -5228,7 +5228,8 @@ export class AccountManager {
    * state file as mid-spend, and the write is awaited: a restart from then on
    * finds a steer whose spend may have landed and does not start another (see
    * restoreSteers). It is also the last moment a steer cleared or replaced
-   * during the attempt can stop the spend, which it does by answering false.
+   * during the attempt can stop the spend. The hook answers false if the steer
+   * is no longer current or the write failed.
    * @param {Steer} steer
    */
   _redeemOnSteer(steer) {
@@ -5238,10 +5239,16 @@ export class AccountManager {
     console.log(`[TeamClaude] Steer to "${name}": its week is spent — redeeming its banked reset, as --redeem asked`);
     const redeemer = this._steerRedeemer;
     const current = () => this._steers.get(steer.provider) === steer;
+    let stateSaveFailed = false;
     const beforeSpend = async (/** @type {{ requestId: string }} */ { requestId }) => {
       if (!current()) return false;
       steer.redeemRequestId = requestId;
-      await this._onSteersChanged?.();
+      if (await this._onSteersChanged?.() === false) {
+        steer.redeemRequestId = null;
+        stateSaveFailed = true;
+        if (current()) console.log(`[TeamClaude] Steer to "${name}": its state could not be saved, so its reset was not spent`);
+        return false;
+      }
       return current();
     };
     steer.attempt = Promise.resolve()
@@ -5250,7 +5257,7 @@ export class AccountManager {
       // A throw tells us nothing about whether the claim went out, so it is
       // read the way an unanswered claim is.
       .then(r => r, (/** @type {any} */ err) => ({ redeemed: false, reason: err?.message || String(err), outcome: 'unknown' }))
-      .then(r => this._afterSteerAttempt(steer, /** @type {SteerRedeemResult} */ (r)));
+      .then(r => this._afterSteerAttempt(steer, /** @type {SteerRedeemResult} */ (r), stateSaveFailed));
   }
 
   /**
@@ -5266,8 +5273,9 @@ export class AccountManager {
    * wall upstream is waiting for.
    * @param {Steer} steer
    * @param {SteerRedeemResult} r
+   * @param {boolean} stateSaveFailed
    */
-  _afterSteerAttempt(steer, r) {
+  _afterSteerAttempt(steer, r, stateSaveFailed) {
     const outcome = r?.redeemed ? 'redeemed' : (r?.outcome ?? 'unknown');
     const why = safeLine(r?.reason || 'no reason given', 120);
     const id = steer.redeemRequestId ? ` (request id ${safeLine(steer.redeemRequestId, 64)})` : '';
@@ -5276,13 +5284,16 @@ export class AccountManager {
       return this._endSteer(steer, `its week was spent, but the redemption got no answer (${why}), so a reset may have been spent — check the account${id}`);
     }
     if (outcome === 'nothing-held') return this._endSteer(steer, `its week was spent, but it holds nothing to redeem: ${why}`);
-    // 'not-now', and 'cancelled', whose steer is no longer the one in force.
+    // 'not-now' and 'cancelled' spent nothing. A cancellation for a failed
+    // save retries with the usual back-off, but an old steer stays gone.
     if (this._steers.get(steer.provider) !== steer) return null;
     const now = Date.now();
     steer.phase = 'active';
     steer.redeemRequestId = null;
     steer.retryAt = Number.isFinite(r?.retryAt) && /** @type {number} */ (r.retryAt) > now ? /** @type {number} */ (r.retryAt) : now + STEER_REDEEM_RETRY_MS;
-    console.log(`[TeamClaude] Steer to "${safeLine(steer.account.name, 64)}": no reset was redeemed yet — ${why}; the steer stays, and asks again in ${formatSteerLeft(steer.retryAt - now)}`);
+    if (!stateSaveFailed) {
+      console.log(`[TeamClaude] Steer to "${safeLine(steer.account.name, 64)}": no reset was redeemed yet — ${why}; the steer stays, and asks again in ${formatSteerLeft(steer.retryAt - now)}`);
+    }
     this._onSteersChanged?.();
     return null;
   }

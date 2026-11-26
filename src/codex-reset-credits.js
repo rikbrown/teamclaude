@@ -501,6 +501,10 @@ export class ResetCreditRedeemer {
     // out, and only one of them should spend anything about it.
     /** @type {Promise<RedeemResult>|null} */
     this.inFlight = null;
+    this.inFlightIsSteer = false;
+    // A steer reset can answer only a refusal that was offered its account.
+    /** @type {WeakMap<RedeemResult, Record<string, any>>} */
+    this.answeredFor = new WeakMap();
     // reset-actions holds this across the fresh read and the manual consume.
     this.manualInFlight = false;
     /** @type {number|null} */
@@ -646,7 +650,15 @@ export class ResetCreditRedeemer {
     // decision about the fleet rather than one per request. A per-account guard
     // alone would not do: two refusals could walk the same candidate list and
     // reach different accounts on it, and spend a credit on each.
-    if (this.inFlight) return this.inFlight;
+    if (this.inFlight) {
+      if (!this.inFlightIsSteer) return this.inFlight;
+      // A steer judged only its own target. Use its answer only if it spent
+      // on an offered account; otherwise make or join a dry-pool attempt.
+      const earlier = await this.inFlight;
+      const account = this.answeredFor.get(earlier);
+      if (earlier.redeemed && account && accounts.includes(account)) return earlier;
+      return this.maybeRedeemForPool(accounts);
+    }
     const attempt = this._attempt(accounts).finally(() => { this.inFlight = null; });
     this.inFlight = attempt;
     return attempt;
@@ -772,12 +784,12 @@ export class ResetCreditRedeemer {
    * idempotency key, the token refresh and the budget.
    *
    * Serialised with the dry-pool attempts on the same slot, so the two never
-   * consume at once: this one waits out a pool attempt in flight, and a dry-pool
-   * refusal arriving meanwhile joins this one.
+   * consume at once. A dry-pool refusal waits for this attempt, but only uses
+   * its answer if it redeemed on an account the refusal was offered.
    *
    * The answer carries an `outcome` the steer acts on (see SteerRedeemResult),
    * and `beforeSpend` is awaited right before the consume: the steer saves
-   * itself as mid-spend there, and answers false when it ended meanwhile.
+   * itself as mid-spend there, and answers false if it ended or the write failed.
    *
    * @param {Record<string, any>} account
    * @param {{ beforeSpend?: ((claim: { requestId: string }) => Promise<boolean>)|null }} [opts]
@@ -785,8 +797,11 @@ export class ResetCreditRedeemer {
    */
   async redeemForSteer(account, { beforeSpend = null } = {}) {
     while (this.inFlight) await this.inFlight.catch(() => {});
-    const attempt = this._attemptForSteer(account, beforeSpend).finally(() => { if (this.inFlight === attempt) this.inFlight = null; });
+    const attempt = this._attemptForSteer(account, beforeSpend).finally(() => {
+      if (this.inFlight === attempt) { this.inFlight = null; this.inFlightIsSteer = false; }
+    });
     this.inFlight = attempt;
+    this.inFlightIsSteer = true;
     return attempt;
   }
 
@@ -835,7 +850,12 @@ export class ResetCreditRedeemer {
       const usage = timeoutMs > 0 ? await this.usageFn(account, { timeoutMs }).catch(() => null) : null;
       if (usage && !usage.error) this.am.applyCodexUsageData(account.index, usage);
     }
-    if (result.redeemed) return { ...result, outcome: 'redeemed' };
+    if (result.redeemed) {
+      /** @type {RedeemResult} */
+      const answer = { ...result, outcome: 'redeemed' };
+      this.answeredFor.set(answer, account);
+      return answer;
+    }
     if (result.uncertain) return { ...result, outcome: 'unknown' };
     if (result.outcome) return result;
     // `no_credit` says there is nothing to spend; anything else, not yet.

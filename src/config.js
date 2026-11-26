@@ -85,30 +85,37 @@ export async function saveState(state) {
 /**
  * One writer and at most one pending snapshot, read only when its write starts.
  * Each caller waits for the batch containing its request, including final saves.
+ * The batch answers true if its write succeeds and false if it fails.
  * @param {() => any} readState
  * @param {{save?: (state: any) => Promise<void>, onError?: (err: any) => void}} [opts]
+ * @returns {() => Promise<boolean>}
  */
 export function createStatePersister(readState, { save = saveState, onError = () => {} } = {}) {
-  /** @typedef {{promise: Promise<void>, resolve: () => void}} Batch */
+  /** @typedef {{promise: Promise<boolean>, resolve: (saved: boolean) => void}} Batch */
   /** @type {Batch|null} */
   let active = null;
   /** @type {Batch|null} */
   let pending = null;
   /** @returns {Batch} */
   const batch = () => {
+    /** @type {Batch['resolve']} */
     let resolve = () => {};
-    /** @type {Promise<void>} */
+    /** @type {Promise<boolean>} */
     const promise = new Promise(done => { resolve = done; });
     return { promise, resolve };
   };
   /** @param {Batch} current */
   const start = async current => {
     active = current;
-    try { await save(readState()); }
-    catch (err) { onError(err); }
-    finally {
+    let saved = false;
+    try {
+      await save(readState());
+      saved = true;
+    } catch (err) {
+      try { onError(err); } catch { /* A failed error report must not reject the save. */ }
+    } finally {
       active = null;
-      current.resolve();
+      current.resolve(saved);
       if (pending) {
         const next = pending;
         pending = null;

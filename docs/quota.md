@@ -136,16 +136,31 @@ The burn-rate forecast answers for one account. The fleet forecast ([#550](https
 "fleetForecast": { "allOutAt": 1780000000000, "firstBackAt": 1780014400000, "boundBy": "weekly", "ratePerDay": 1.38 }
 ```
 
-`allOutAt` is the first moment every account is blocked (the current time when they all already are), and `firstBackAt` the first moment after it that one is usable again; both are ms epoch. `boundBy` is the bucket that blocks most of the fleet at `allOutAt`: `weekly` or `5h`. `ratePerDay` is the fleet's measured weekly spend, in shares of one account's week per day (`1.38` uses 138% of a week per day, spread over the accounts).
+`allOutAt` is the first moment every account is blocked (the current time when they all already are), and `firstBackAt` the first moment after it that one is usable again; both are ms epoch. `boundBy` is the bucket that blocks most of the fleet at `allOutAt`: `weekly` or `5h`. `ratePerDay` is the fleet's measured weekly spend, in shares of an average account's week per day (`1.38` uses 138% of a week per day, spread over the accounts).
+
+`fleetTimeline` in the same status is the week ahead from the same simulation:
+
+```json
+"fleetTimeline": {
+  "from": 1780000000000, "to": 1780604800000,
+  "accounts": { "alice": [{ "at": 1780000000000, "usable": true, "bucket": null }, { "at": 1780090000000, "usable": false, "bucket": "weekly" }] },
+  "outages": [{ "from": 1780400000000, "to": 1780401200000 }],
+  "busier": { "loadFactor": 1.25, "outages": [{ "from": 1780300000000, "to": 1780401200000 }] }
+}
+```
+
+`accounts` gives each account's state at `from` and every change after it, keyed by account name; `bucket` names what blocks it. `outages` are the stretches in which no account is usable, `to: null` for one still running at `to`. `busier` repeats the outages with every rate a quarter higher. Unlike `fleetForecast`, it answers when nothing runs out; it is `null` only with no account to forecast or too little history to measure a rate (the first two cases below).
 
 `teamclaude status` and the dashboard show it as one line, only when there is a forecast: `all accounts out in ~31h (weekly), first back 4h later`.
 
-It is `null` until the proxy has 48 hours of samples, `null` when the samples cover too little of a rate window to trust (under 6 hours of the weekly window, or under 1 hour of the last 6 hours), and `null` when nothing runs out within 14 days.
+`fleetForecast` is `null` until the proxy has 48 hours of samples, `null` when the samples cover too little of a rate window to trust (under 6 hours of the weekly window, or under 1 hour of the last 6 hours), and `null` when nothing runs out within 14 days.
 
 How it works. Every 15 minutes the proxy stores one sample per account from the readings it already has: weekly and 5-hour utilization and when each window resets. It makes no extra upstream call, so an account is sampled only once the proxy has read it, from traffic or the [quota probe](#quota-probe). The forecast then simulates the fleet forward from the current readings:
 
 - Each bucket has its own measured rate. The weekly rate is the fleet's summed weekly increase over the last 24 hours, or the last 7 days once the samples cover at least 6 of them, shaped by hour of day (UTC): a flat evening rate carried through the night would call the wall too early. The 5-hour rate is the summed increase over the last 6 hours, flat. Each rate is divided by the time the samples actually cover inside its window, not by the whole window: two samples more than 30 minutes apart are a gap, such as a stopped proxy, and a gap does not count as a quiet fleet.
-- Spend goes to the fullest account still under its [switch thresholds](#switch-threshold), as rotation does, so the order in which accounts fill is the order they would be used.
+- Spend is measured in units of plan size, read from the subscription tier: 1% of a 20x account's week is 4% of a 5x one's. When any account's plan is unknown, every account counts as the same size.
+- Spend is shared among the accounts under their [switch thresholds](#switch-threshold) in proportion to their size, so their utilization rises together, as rotation that spreads sessions keeps it ([`distributeSessions`](routing.md)). With the default routing, which stays on one account until it reaches its threshold, the accounts fill one after another instead: the moment the whole pool is out is the same while no reset falls in between, and a single account's block in `fleetTimeline` comes earlier or later than shown.
+- The simulation steps from one event to the next: an account reaching a threshold, a reset, the hourly rate changing. Times are whole milliseconds, and an outage of a minute is as visible as one of a day.
 - An account is blocked while either bucket is at or over its threshold, and comes back at that bucket's reset. A weekly reset is followed by the next one 7 days later, a 5-hour reset by the next one 5 hours later.
 
 A window reset shows in the samples as a drop, or as an empty reading where the proxy had cleared the window at its reset; a drop is never counted as negative spend, and the first reading of the new window counts in full. The forecast covers Anthropic subscription accounts in rotation. Codex accounts are a separate pool, a disabled account is not in rotation, and an API key meters no window.
@@ -166,9 +181,9 @@ teamclaude warmup                                          # show current settin
 
 > ⚠️ **This spends a little quota — unlike the passive quota probe.** The 5h timer can't be started by a read-only call, so keep-warm sends a real (minimal) message: for each eligible idle account it spawns a one-shot `claude -p --bare --model haiku --output-format text "hi"` pointed at this proxy, pinned to that account. It only warms accounts whose 5h window is **not already running**, skips disabled/throttled/errored, third-party-backend and Codex accounts and any account that [meters no 5-hour window](#accounts-without-a-5-hour-window), and uses the cheapest model — but it does consume a few tokens and a slice of the 5h/weekly buckets per account per window. It looks for the `claude` CLI on `PATH`, then in `~/.local/bin`, which is where the native installer puts it. A proxy already running as a service finds that binary without another `service install`. Minimum interval 60s; changes apply live. Status shows under `warm` in `teamclaude status --json`.
 
-Reset mode stores the target wall time and IANA timezone in the config, then subtracts Anthropic's fixed five-hour window to find each warm-up. It recalculates the next calendar occurrence after startup, config reload, and every run, so daylight-saving changes do not drift the schedule. It follows cron semantics: if TeamClaude was stopped at the scheduled time, that run is skipped and the server waits for the next future occurrence. The CLI confirmation prints the resolved local time, UTC time, timezone offset, and next occurrence.
+Reset mode stores the target wall time and IANA timezone in the config, then subtracts Anthropic's fixed five-hour window to find each warm-up. It recalculates the next calendar occurrence after startup, every run, and a config reload that changes the schedule, so daylight-saving changes do not drift the schedule. A reload that leaves the schedule as it is (every reload re-reads the whole file) leaves keep-warm running, and so does not cut a warm-up sweep short. It follows cron semantics: if TeamClaude was stopped at the scheduled time, that run is skipped and the server waits for the next future occurrence. The CLI confirmation prints the resolved local time, UTC time, timezone offset, and next occurrence.
 
-Rolling mode uses the requested local time to save the next reset whose warm-up time has not passed, then schedules warm-ups on the same absolute five-hour cadence indefinitely. The saved anchor keeps the phase stable across service restarts and config reloads. Missed slots are skipped with no catch-up request; TeamClaude waits for the next point on the original cadence. If Anthropic reports that an account's current window resets within two minutes of a rolling slot, TeamClaude waits until ten seconds after that reset and retries only that account. It rechecks the account first, so normal usage that already started a new window suppresses the delayed warm-up. The retry is also skipped if its timer or token refresh runs beyond the following minute. This short per-account delay handles clock and reset-reporting imprecision without moving the global cadence or replaying a missed slot after restart. Because 24 hours is not divisible by 5, only the anchor reset occurs at the requested wall time: later reset times move around the local clock, and daylight-saving changes can shift their displayed local time as well. The CLI prints each rolling instant with its own UTC offset and ISO timestamp so repeated DST wall times remain unambiguous. This is best effort: an account with a live five-hour window outside the tolerance or an ineligible state is skipped at that slot.
+Rolling mode uses the requested local time to save the next reset whose warm-up time has not passed, then schedules warm-ups on the same absolute five-hour cadence indefinitely. The saved anchor keeps the phase stable across service restarts and config reloads. Missed slots are skipped with no catch-up request; TeamClaude waits for the next point on the original cadence. If Anthropic reports that an account's current window resets within two minutes of a rolling slot, TeamClaude waits until ten seconds after that reset and retries only that account. It rechecks the account first, so normal usage that already started a new window suppresses the delayed warm-up. The retry is also skipped if its timer or token refresh runs beyond the following minute. Each delay is logged, and so is each delayed warm-up that is dropped, with the reason. This short per-account delay handles clock and reset-reporting imprecision without moving the global cadence or replaying a missed slot after restart. Because 24 hours is not divisible by 5, only the anchor reset occurs at the requested wall time: later reset times move around the local clock, and daylight-saving changes can shift their displayed local time as well. The CLI prints each rolling instant with its own UTC offset and ISO timestamp so repeated DST wall times remain unambiguous. This is best effort: an account with a live five-hour window outside the tolerance or an ineligible state is skipped at that slot.
 
 Keep-warm has nothing to do with the prompt cache — see [Prompt caching across rotation](routing.md#prompt-caching-across-rotation).
 
@@ -198,6 +213,8 @@ teamclaude threshold unified7d=default  # drop it again
 ```
 
 A running server picks the change up on the reload the command sends it. This is the only way to edit a per-bucket table in place: the TUI shows it read-only, and the single-number form there would flatten it.
+
+A switch moves a conversation to an account that has none of it cached. The opt-in `compactBeforeSwitch` has Claude Code compact a long conversation shortly before its account reaches this threshold; see [Compact before a switch](routing.md#compact-before-a-switch) for what it changes in what the client receives.
 
 ### Per-account thresholds
 
@@ -249,7 +266,7 @@ No CLI editor for this one, matching `maxUsage`: hand-edit the config and let a 
 }
 ```
 
-A bare number caps every bucket. Keys are the same quota field names as `switchThreshold`, and `default` covers the ones a table does not list — but a bucket that is neither listed nor covered by `default` is **uncapped**, so a cap is only ever what you asked for.
+A bare number caps every bucket. Keys are the same quota field names as `switchThreshold`, and `default` covers the ones a table does not list — but a bucket that is neither listed nor covered by `default` is **uncapped**, so a cap is only ever what you asked for. A cap of `0` is a hard stop: the bucket counts as at its cap whatever it reads, and before any reading exists, so `"maxUsage": 0` (or `{ "default": 0 }`) keeps every request off the account and `{ "unified7dFable": 0 }` keeps Fable off it.
 
 At the cap, that account receives **nothing**:
 
@@ -258,13 +275,13 @@ At the cap, that account receives **nothing**:
 - a pinned request (`TC_ACCT`, `/tc-acct/<name>`) gets the exhausted answer rather than spending past the cap. A pin still never leaks to another account;
 - the paid fallback, and the last-resort revival of a throttled account when nothing is available, skip it too;
 - a request that waited in admission is checked again before it is sent, and moves elsewhere if a reading during the wait put the account at its cap;
-- an advisor request also checks the advisor model's own family cap on every one of these paths (under `advisorEligibility: "prefer"` the advisor is a preference, so only the executor's caps apply).
+- an advisor request also checks the advisor model's own family cap on every one of these paths. Under `advisorEligibility: "prefer"` the advisor is a preference: rotation and a failover hop still stay off an account at that cap while another account can serve the request, but when none can, or the request is pinned there, only the executor's caps apply and the advisor call can cross the cap ([advisor routing](routing.md#model-aware-routing)).
 
 A family reading (Fable, Sonnet) at or past the cap is kept until its window resets, or for a week when no reset time is known. An uncapped spent family reading is revalidated after 30 minutes instead, because only a request of that family can refresh it; for a capped one that request would go past the cap.
 
 With [expiry-pressure routing](routing.md#expiry-pressure-routing) on, a capped account's pressure is the room left under its cap, not under 100%: an account at 0.6 with a 0.7 cap has 0.1 to spend before its reset. For a family window the shared weekly cap also bounds that room, since family spend counts against both (by [how much](routing.md#model-aware-routing) was measured on one pool).
 
-Caps are model-scoped exactly like thresholds. `unified5h` and `unified7d` stop every model; `unified7dFable` stops only Fable, so the example above keeps serving Opus and Sonnet from the same account after Fable is done. The cap binds at the level you set (`>=`), and a window that has reset is never capped on the old reading.
+Caps are model-scoped exactly like thresholds. `unified5h` and `unified7d` stop every model; `unified7dFable` stops only Fable, so the example above keeps serving Opus and Sonnet from the same account after Fable is done. A family with no field of its own that upstream meters with a scoped weekly bucket (`scoped:opus`) is held to the `unified7d` cap, as it is to the weekly threshold. The cap binds at the level you set (`>=`), and a window that has reset is never capped on the old reading.
 
 A cap shows on the status screen before it binds — marked on the bar it applies to, named in percent beside it, and reflected in the `Models` row:
 
@@ -314,6 +331,8 @@ By default, once every account is past its switch threshold the proxy answers 42
 }
 ```
 
+Without `preferExtraUsage`, automatic selection follows these rules:
+
 - **Rotation is unchanged.** An opted-in account rotates away at `switchThreshold` like any other, and the fallback never runs while any account can serve under the normal rules — a lower-priority one included.
 - **Free quota first.** The switch threshold is a rotation preference, so an account between it and 100% — under a per-bucket `unified7d: 0.85`, that is 15% of the week — still has quota you already pay for. Once nothing is under its threshold, the fallback serves from the best such account, **opted in or not**, chosen by `priority` (lower first) and then the most free quota left. No money moves while any account can still serve for free.
 - **Billing is the last resort.** An opted-in account is billed only when every account that could serve at all is at 100% of a governing bucket or carries upstream's own `rejected` verdict. Among several opted-in accounts: `priority`, then the least deep into overage. An account that cannot serve at all — `disabled`, over its `maxUsage` cap, in an `error` state, under an entitlement cooldown or a live 429 hold — is neither used nor waited for: it does not count as free quota, and the fallback proceeds without it.
@@ -321,6 +340,30 @@ By default, once every account is past its switch threshold the proxy answers 42
 - **After the free probe.** The fallback runs where the proxy would otherwise have nothing: after the normal walk, and after the free revalidation probe, which still goes first when it is due because headroom it finds costs nothing. If that probe is refused, the same request retries through the fallback rather than returning 429. The 429/5xx failover hops reach it too, but only when nothing in the fleet is under its threshold — a hop off an account that is merely rate-limited for a minute waits that out as before rather than spending quota, free or paid.
 - **It goes back on its own.** As soon as any account's window resets — the paid one's included — selection returns to normal, and the "billing" mark clears even if no request for that model has come in since.
 - **Only the quota verdicts are overridden** — the switch threshold (a spent Fable bucket included, for Fable requests only) and, for the paid tier, a remembered upstream `rejected` status. Everything else still binds: `disabled`, `maxUsage`, `maxSpend`, a live upstream 429 hold, an entitlement cooldown, an error state, routes and model ownership, and the Claude/Codex partition. An account whose usage probe reports overage switched off upstream is skipped, since it would only 429; with no probe data, upstream decides.
+
+A temporary rate-limit throttle prevents requests to a fallback account while the throttle is active. It does not end the existing fallback episode by itself: status continues to report that episode, and when no request arrives during the throttle, requests resume without a new fallback announcement or ramp once it expires. A request that arrives while the throttle leaves no account able to serve it does end the episode, quietly, so the first request after the throttle announces the account and ramps onto it again.
+
+To prefer a subscription's capacity before API fallback, also set `accounts[].preferExtraUsage: true`:
+
+```json
+{
+  "name": "team@example.com",
+  "allowExtraUsage": true,
+  "preferExtraUsage": true
+}
+```
+
+Both settings require literal `true`. The preference is off by default, so existing `allowExtraUsage` configurations keep their spending order. Neither setting enables billing upstream, purchases credits or applies to API keys, third-party backends or Codex subscriptions.
+
+Normal subscription selection runs first. When only API accounts or backends have normal capacity, subscriptions with `preferExtraUsage: true` can use their remaining included quota up to 100% before API fallback. Subscriptions without that setting keep their normal switch thresholds and fallback order. Their remaining included quota still prevents preferred paid spending: if only unpreferred subscriptions have included quota past their thresholds, selection follows the default order, using available API capacity before legacy fallback. Within each fallback tier, account priority and then utilisation decide. An API account with a strictly lower priority number still takes precedence over the selected subscription. The hard restrictions described above still apply.
+
+Eligible route pins and explicit API-account choices take precedence over this automatic preference. With `distributeSessions` on, a choice that a higher-priority account outranks is reported as not taking effect: it leaves the preference in place, and stays recorded, so it applies once distribution is turned off. Manual subscription choices and subscription conversation pins yield to normal subscription capacity, and paid credits yield to eligible remaining included quota. A conversation can therefore move to another subscription and lose its prompt-cache affinity before any paid credits are used. New sessions follow the configured distribution mode within the selected tier. Adaptive placement uses its even fallback once those candidates are past their normal switch thresholds. Existing sessions keep their eligible account within that tier.
+
+With `preferExtraUsage: true`, an explicit `teamclaude switch <account>` can also select that subscription's fallback capacity, subject to the same spending order. Without `preferExtraUsage` a switch is what it is everywhere else: it holds against the automatic rankings while the account is under its threshold, and does nothing past it. The switch does not authorise credit use by itself. Hard limits still apply, and so does the rule that an API account with a strictly lower priority number goes first.
+
+With session distribution off and several preferred subscriptions in the same tier, the one already serving keeps the traffic for as long as it stays in that tier, instead of the least utilised being picked again on every request. Priority still decides between them first, and included quota on another preferred subscription is still used before paid credits.
+
+A conversation pinned to a preferred subscription stays on it without moving the fleet's current account or releasing a manual switch.
 
 Utilization goes past 100% in overage, so `maxUsage` above 1.0 is a spend limit: `"maxUsage": 1.5` lets an account run to 150% of its plan and then stop, like any other cap. To bound the bill in money instead, set `maxSpend` — see [Per-account spend caps](#per-account-spend-caps) above; the fallback never bills an account at its spend cap (it may still use that account's free quota, like any other).
 
@@ -332,7 +375,24 @@ The switch onto the fallback and back off it is logged once each, per model scop
 
 and the status payload carries `allowExtraUsage` and `onExtraUsage` per account; `onExtraUsage` is false while the fallback is only serving free quota past a threshold. The opt-in itself is visible before it is ever used: `extra usage allowed` in the account header of `teamclaude status`, an `xu` tag (yellow) at the end of the TUI row that turns into a red `xu!` while billing, and an `extra usage allowed` / `on extra usage — billing` badge on the web dashboard. With the quota probe on, the `Spend` row shows what has been billed this month.
 
+An account with `preferExtraUsage: true` that is billing reads as follows instead, for as long as it can still serve that way. Once it cannot (disabled, capped, throttled), the line goes back to the `Blocked` form with the reason:
+
+```
+  Usage    serving on extra usage (paid overage), billing
+```
+
+An account past its switch threshold that is not billing can still have fallback capacity, and where any account sets `allowExtraUsage`, `teamclaude status` says so in place of `Blocked  local switch threshold reached`:
+
+```
+  Fallback included quota available past switch threshold (fallback after normal rotation)
+  Fallback subscription usage credits available (fallback after normal rotation)
+```
+
+The first is an account between its threshold and 100%. The second is an opted-in account at 100%, and is shown only when the usage probe has reported overage enabled upstream; with no probe data the line stays `Blocked  local switch threshold reached`, since nothing shows the credits exist. With `preferExtraUsage: true` on the account the parenthesis reads `(extra-usage preference enabled)`. The status payload also includes `preferExtraUsage` and `fallbackTier` (`"free"`, `"paid"`, or `null`); `fallbackTier` is `"paid"` whenever nothing says overage is off, probe data or not. Disabled accounts, billing cooldowns and usage or spend caps continue to report `Blocked`. The `Models` row continues to describe included quota.
+
 Edits apply live on config reload — turning it off stops the spending immediately.
+
+Removing `preferExtraUsage` restores the default fallback-only spending order on config reload.
 
 ## Third-party backend quota
 

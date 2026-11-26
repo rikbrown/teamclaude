@@ -3,10 +3,57 @@ import { sameIdentity } from './identity.js';
 import { safeLine } from './safe-text.js';
 import { removedAccountIds, addedAccountIds, configIndexFor } from './account-pairing.js';
 import { ensureAccountIds } from './account-id.js';
-import { accountSwitchThreshold, accountAllowsExtraUsage, accountRouting, normalizeHeadersTimeoutMs } from './account-manager.js';
+import { accountSwitchThreshold, accountAllowsExtraUsage, accountRouting, accountEndsAt, isLongLived, normalizeHeadersTimeoutMs } from './account-manager.js';
 import { localListener } from './upstream-proxy.js';
 import { accountCredit } from './api-credit.js';
 import { accountQuotaProvider } from './backend-quota.js';
+
+// A long-lived login sets `longLived` and drops `importFrom` on disk; a config
+// row still holding the old pair would write it back on the next save. Only
+// that login's removal of `importFrom` is mirrored: on a row that is not
+// long-lived the key is left as a reload has always left it.
+/** @param {Record<string, any>} cfgAcct @param {Record<string, any>} diskAcct */
+function mirrorCredentialSource(cfgAcct, diskAcct) {
+  if (diskAcct.longLived === true) cfgAcct.longLived = true; else delete cfgAcct.longLived;
+  if (diskAcct.longLived === true && !diskAcct.importFrom) delete cfgAcct.importFrom;
+}
+
+// Mirror a disk row onto its memConfig entry: the TUI save stencil rebuilds
+// diskConfig.accounts from config.accounts as `{ ...diskAcct, ...live }`,
+// so a stale key there would win the spread and silently overwrite this
+// disk edit on the next save — and the following reload would then revert
+// the running account too. Delete-on-absence keeps the saved JSON clean,
+// the same shape a hand edit produces.
+/** @param {Record<string, any>} cfgAcct @param {Record<string, any>} diskAcct */
+function mirrorRowOntoEntry(cfgAcct, diskAcct) {
+  if (diskAcct.upstream) cfgAcct.upstream = diskAcct.upstream; else delete cfgAcct.upstream;
+  if (diskAcct.quotaProvider != null) cfgAcct.quotaProvider = diskAcct.quotaProvider; else delete cfgAcct.quotaProvider;
+  if (diskAcct.modelMap) cfgAcct.modelMap = diskAcct.modelMap; else delete cfgAcct.modelMap;
+  if (diskAcct.stripRequestFields) cfgAcct.stripRequestFields = diskAcct.stripRequestFields; else delete cfgAcct.stripRequestFields;
+  if (diskAcct.messageThreads === true) cfgAcct.messageThreads = true; else delete cfgAcct.messageThreads;
+  if (diskAcct.maxUsage != null) cfgAcct.maxUsage = diskAcct.maxUsage; else delete cfgAcct.maxUsage;
+  if (diskAcct.maxSpend != null) cfgAcct.maxSpend = diskAcct.maxSpend; else delete cfgAcct.maxSpend;
+  if (diskAcct.switchThreshold != null) cfgAcct.switchThreshold = diskAcct.switchThreshold; else delete cfgAcct.switchThreshold;
+  if (diskAcct.routing) cfgAcct.routing = diskAcct.routing; else delete cfgAcct.routing;
+  if (diskAcct.credit != null) cfgAcct.credit = diskAcct.credit; else delete cfgAcct.credit;
+  if (diskAcct.priority != null) cfgAcct.priority = diskAcct.priority; else delete cfgAcct.priority;
+  // The TUI's reorder writes this key onto the entry, so after one
+  // arrangement every entry carries a value for a hand edit to lose to.
+  if (Number.isFinite(diskAcct.displayOrder)) cfgAcct.displayOrder = diskAcct.displayOrder; else delete cfgAcct.displayOrder;
+  if (diskAcct.disabled) cfgAcct.disabled = true; else delete cfgAcct.disabled;
+  if (diskAcct.cordoned) cfgAcct.cordoned = true; else delete cfgAcct.cordoned;
+  // As written, not as parsed: the entry keeps the operator's own text.
+  if (diskAcct.endsAt != null) cfgAcct.endsAt = diskAcct.endsAt; else delete cfgAcct.endsAt;
+  if (diskAcct.allowExtraUsage === true) cfgAcct.allowExtraUsage = true; else delete cfgAcct.allowExtraUsage;
+  if (diskAcct.preferExtraUsage === true) cfgAcct.preferExtraUsage = true; else delete cfgAcct.preferExtraUsage;
+  // Both polarities are mirrored, unlike the flags above: `false` is the
+  // side of this key that does something, so a stale mirror of either value
+  // would win the save stencil's spread and undo the disk edit.
+  if (typeof diskAcct.autoRedeemReset === 'boolean') cfgAcct.autoRedeemReset = diskAcct.autoRedeemReset;
+  else delete cfgAcct.autoRedeemReset;
+  if (diskAcct.headersTimeoutMs != null) cfgAcct.headersTimeoutMs = diskAcct.headersTimeoutMs; else delete cfgAcct.headersTimeoutMs;
+  mirrorCredentialSource(cfgAcct, diskAcct);
+}
 
 /**
  * Sync accounts from disk config: add new accounts and refresh credentials
@@ -86,6 +133,21 @@ export async function syncAccountsFromDisk(diskConfig, memConfig, accountManager
         memConfig.accounts.push(diskAcct);
         ensureAccountIds(memConfig.accounts);
         cfgClaimed.add(memConfig.accounts.length - 1);
+      } else {
+        mirrorCredentialSource(cfgAcct, diskAcct);
+        // A known entry, its account built from the row just below. The entry
+        // takes the row's name and settings as a paired one does, or the next
+        // save writes its own back over the row. An entry left out at startup
+        // (no usable credential) gets here on its first reload, so a `rename`,
+        // `priority` or `enable` whose notify was that reload came undone.
+        // Only from its own row, by id: this pairing goes by identity, and
+        // where that is ambiguous (one account uuid in two organizations, a
+        // row that does not name its organization) the row can be another
+        // account's, whose name and settings would then land on this entry.
+        if (cfgAcct.id === diskAcct.id) {
+          if (diskAcct.name) cfgAcct.name = diskAcct.name;
+          mirrorRowOntoEntry(cfgAcct, diskAcct);
+        }
       }
       accountManager.addAccount(diskAcct);
       claimed.add(accountManager.accounts.length - 1);
@@ -101,6 +163,10 @@ export async function syncAccountsFromDisk(diskConfig, memConfig, accountManager
     // Backfill org identity and pick up renames/priority onto the running
     // account (e.g. after disk-side org disambiguation or a `priority` change).
     if (diskAcct.orgUuid && !mgr.orgUuid) mgr.orgUuid = diskAcct.orgUuid;
+    // The account id too: a long-lived login learns it from its token answer,
+    // onto an entry that had none, and a removal made in the running server
+    // (the TUI, the MCP endpoint) is recorded under it.
+    if (diskAcct.accountUuid && !mgr.accountUuid) mgr.accountUuid = diskAcct.accountUuid;
     if (diskAcct.orgName && !mgr.orgName) mgr.orgName = diskAcct.orgName;
     // Only a disk edit is new information. An unchanged field can be older
     // than the running value learned from a profile probe.
@@ -119,6 +185,13 @@ export async function syncAccountsFromDisk(diskConfig, memConfig, accountManager
       // A session pin names its account, so it follows the rename (#543).
       accountManager.sessionPins?.rename(mgr.name, diskAcct.name);
       mgr.name = diskAcct.name;
+      // So does its entry. Left with the old name, the next save wrote it back
+      // over a `teamclaude rename`, while the routes the rename updated kept
+      // the new one, which then named no account. Only on a rename: a name the
+      // TUI has just given the entry in memory (an import's " (org)") is not on
+      // disk yet, and stays until its own save writes it. And only from the
+      // entry's own row, by id, for the reason the re-admission above gives.
+      if (cfgAcct && cfgAcct.id === diskAcct.id) cfgAcct.name = diskAcct.name;
     }
     // Read as makeAccount reads it, so deleting the key returns the account to
     // the default tier instead of leaving it at the priority it last held (#640).
@@ -135,6 +208,10 @@ export async function syncAccountsFromDisk(diskConfig, memConfig, accountManager
     // A cordon applies on reload too: placement reads it at the next request,
     // and a conversation already on the account is kept there (account-manager.js).
     accountManager.setCordoned(mgr.index, !!diskAcct.cordoned);
+    // An end time set, moved or cleared on disk (`teamclaude ends`) is read by
+    // the very next selection. Through the constructor's own parse, so a value
+    // refused at startup is refused here, and a removed key clears it.
+    mgr.endsAt = accountEndsAt(diskAcct);
     mgr.maxSpend = diskAcct.maxSpend ?? null;
     // Same for a per-account switch threshold (#409): thresholdFor() reads it
     // straight off the account, so a disk edit takes effect on the very next
@@ -149,6 +226,7 @@ export async function syncAccountsFromDisk(diskConfig, memConfig, accountManager
     // (an API key, a third-party backend, a Codex login) stays opted out on
     // reload as it was at startup; the warning was makeAccount's to give.
     mgr.allowExtraUsage = accountAllowsExtraUsage(diskAcct);
+    mgr.preferExtraUsage = mgr.allowExtraUsage && diskAcct.preferExtraUsage === true;
     // Same for a per-account routing proxy: it is read per request off this
     // object (server.js forwardRequest, ensureTokenFresh, the prober), so a
     // disk edit or a `teamclaude routing` change takes effect on the very next
@@ -196,53 +274,26 @@ export async function syncAccountsFromDisk(diskConfig, memConfig, accountManager
     // same normalization as the constructor, so a removed or invalid disk value
     // reverts to the fleet default.
     mgr.headersTimeoutMs = normalizeHeadersTimeoutMs(diskAcct.headersTimeoutMs);
-    // Mirror onto the memConfig entry: the TUI save stencil rebuilds
-    // diskConfig.accounts from config.accounts as `{ ...diskAcct, ...live }`,
-    // so a stale key there would win the spread and silently overwrite this
-    // disk edit on the next save — and the following reload would then revert
-    // the running account too. Delete-on-absence keeps the saved JSON clean,
-    // the same shape a hand edit produces.
-    if (cfgAcct) {
-      if (diskAcct.upstream) cfgAcct.upstream = diskAcct.upstream; else delete cfgAcct.upstream;
-      if (diskAcct.quotaProvider != null) cfgAcct.quotaProvider = diskAcct.quotaProvider; else delete cfgAcct.quotaProvider;
-      if (diskAcct.modelMap) cfgAcct.modelMap = diskAcct.modelMap; else delete cfgAcct.modelMap;
-      if (diskAcct.stripRequestFields) cfgAcct.stripRequestFields = diskAcct.stripRequestFields; else delete cfgAcct.stripRequestFields;
-      if (diskAcct.messageThreads === true) cfgAcct.messageThreads = true; else delete cfgAcct.messageThreads;
-      if (diskAcct.maxUsage != null) cfgAcct.maxUsage = diskAcct.maxUsage; else delete cfgAcct.maxUsage;
-      if (diskAcct.maxSpend != null) cfgAcct.maxSpend = diskAcct.maxSpend; else delete cfgAcct.maxSpend;
-      if (diskAcct.switchThreshold != null) cfgAcct.switchThreshold = diskAcct.switchThreshold; else delete cfgAcct.switchThreshold;
-      if (diskAcct.routing) cfgAcct.routing = diskAcct.routing; else delete cfgAcct.routing;
-      if (diskAcct.credit != null) cfgAcct.credit = diskAcct.credit; else delete cfgAcct.credit;
-      if (diskAcct.priority != null) cfgAcct.priority = diskAcct.priority; else delete cfgAcct.priority;
-      // The TUI's reorder writes this key onto the entry, so after one
-      // arrangement every entry carries a value for a hand edit to lose to.
-      if (Number.isFinite(diskAcct.displayOrder)) cfgAcct.displayOrder = diskAcct.displayOrder; else delete cfgAcct.displayOrder;
-      if (diskAcct.disabled) cfgAcct.disabled = true; else delete cfgAcct.disabled;
-      if (diskAcct.cordoned) cfgAcct.cordoned = true; else delete cfgAcct.cordoned;
-      if (diskAcct.allowExtraUsage === true) cfgAcct.allowExtraUsage = true; else delete cfgAcct.allowExtraUsage;
-      // Both polarities are mirrored, unlike the flags above: `false` is the
-      // side of this key that does something, so a stale mirror of either value
-      // would win the save stencil's spread and undo the disk edit.
-      if (typeof diskAcct.autoRedeemReset === 'boolean') cfgAcct.autoRedeemReset = diskAcct.autoRedeemReset;
-      else delete cfgAcct.autoRedeemReset;
-      if (diskAcct.headersTimeoutMs != null) cfgAcct.headersTimeoutMs = diskAcct.headersTimeoutMs; else delete cfgAcct.headersTimeoutMs;
-    }
+    if (cfgAcct) mirrorRowOntoEntry(cfgAcct, diskAcct);
     // Pick up enable/disable toggles; re-enabling clears a stuck error state.
     const wantDisabled = !!diskAcct.disabled;
     if (mgr.disabled !== wantDisabled) accountManager.setDisabled(mgr.index, wantDisabled);
 
     // Existing account — resolve fresh credentials from disk
-    /** @type {{ accessToken?: string, refreshToken?: string, expiresAt?: number, apiKey?: string }|null} */
+    /** @type {{ accessToken?: string, refreshToken?: string, expiresAt?: number, refreshTokenExpiresAt?: number, apiKey?: string }|null} */
     let freshCred = null;
     if (diskAcct.type === 'oauth' && diskAcct.importFrom) {
       try {
         const creds = await importCredentials(diskAcct.importFrom);
-        freshCred = { accessToken: creds.accessToken, refreshToken: creds.refreshToken, expiresAt: creds.expiresAt };
+        // The refresh token's own expiry rides with the token it describes, here
+        // and below: a newer sign-in on disk brings its date (or none), and a
+        // staler copy never gets as far as updateAccountTokens.
+        freshCred = { accessToken: creds.accessToken, refreshToken: creds.refreshToken, expiresAt: creds.expiresAt, refreshTokenExpiresAt: creds.refreshTokenExpiresAt };
       } catch (/** @type {any} */ err) {
         console.error(`[TeamClaude] Re-import failed for "${safeLine(diskAcct.name, 64)}": ${err.message}`);
       }
     } else if (diskAcct.type === 'oauth' && diskAcct.accessToken) {
-      freshCred = { accessToken: diskAcct.accessToken, refreshToken: diskAcct.refreshToken, expiresAt: diskAcct.expiresAt };
+      freshCred = { accessToken: diskAcct.accessToken, refreshToken: diskAcct.refreshToken, expiresAt: diskAcct.expiresAt, refreshTokenExpiresAt: diskAcct.refreshTokenExpiresAt };
     } else if (diskAcct.type === 'apikey' && diskAcct.apiKey) {
       freshCred = { apiKey: diskAcct.apiKey };
     }
@@ -250,14 +301,19 @@ export async function syncAccountsFromDisk(diskConfig, memConfig, accountManager
     if (!freshCred) continue;
 
     if (freshCred.accessToken) {
-      const changed = mgr.credential !== freshCred.accessToken ||
-        // The manager keeps a missing refresh token as null, the disk entry as undefined.
-        (mgr.refreshToken || null) !== (freshCred.refreshToken || null);
+      // Only a login writes `longLived`, so a change to it is a newer credential
+      // whatever the expiries say: a year-long token outlasts any ordinary one.
+      const wantLongLived = isLongLived(diskAcct);
+      const modeChanged = mgr.longLived !== wantLongLived;
+      const changed = modeChanged || mgr.credential !== freshCred.accessToken ||
+        (mgr.refreshToken || null) !== (wantLongLived ? null : freshCred.refreshToken || null);
       // Don't overwrite in-memory credentials with staler ones from disk
       // (e.g. after a TUI import updated the AM before saveConfig wrote to disk)
-      const diskIsStaler = freshCred.expiresAt && mgr.expiresAt &&
+      const diskIsStaler = !modeChanged && freshCred.expiresAt && mgr.expiresAt &&
         freshCred.expiresAt < mgr.expiresAt;
       if (changed && !diskIsStaler) {
+        mgr.longLived = wantLongLived;
+        if (wantLongLived) mgr.refreshToken = null;
         accountManager.updateAccountTokens(mgr.index, freshCred);
         console.log(`[TeamClaude] Refreshed credentials for "${safeLine(mgr.name, 64)}"`);
       }

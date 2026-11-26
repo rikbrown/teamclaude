@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { AccountManager } from '../src/account-manager.js';
+import { newObservation } from '../src/rollover.js';
 import { TUI } from '../src/tui.js';
 
 const H = 3600_000;
@@ -1838,6 +1839,28 @@ test('a rest on the nameless reading a removal left is handed the roll it still 
     'the roll the chain owed the key was first-sighted away');
 });
 
+test('a rest on a nameless reading hands back a hand-back\'s roll as it does a preemption\'s', () => {
+  // Production reaches this state through 429 fail-backs followed by removing
+  // the account the reading names. No request sequence in this file does, so
+  // it is built by hand.
+  const am = mgr(['a', 'b'], ON);
+  for (const [i, hours] of [[0, 10], [1, 20]]) bucket(am, i, 'unified7d', 0.4, hours);
+  am.selectActiveAccount();
+  assert.equal(am.currentIndex, 0, 'the fixture must rest on a');
+  const preRoll = new Map(Object.entries(am._accountWindows(am.accounts[0])));
+  rollWindow(am, 0);
+  am._currentObs = {
+    ...newObservation(),
+    unescaped: { kind: 'hand-back', idx: 0, windows: preRoll, provider: 'anthropic', prev: null },
+  };
+
+  assert.equal(am.getActiveAccount(null, OPUS, null, null, 'anthropic').name, 'b',
+    'the rest spent the week a had gained');
+  assert.equal(am._currentRolledOver(am.accounts[0], OPUS), true,
+    'the roll the chain owed a was first-sighted away');
+  assert.equal(am._currentObs.unescaped, null, 'the hand-back stayed on the chain after it was handed back');
+});
+
 test('a confirmed serve releases a roll held against the account it rests on', () => {
   // A borrowed walk leaves the reading on the borrower and the roll on the chain;
   // the cursor comes back, so the owner's next request rests on its own account
@@ -2075,7 +2098,8 @@ test('a roll displaced by a restore onto a reading no walk established still nam
   assert.equal(serve(am, 's1', OPUS).name, 'a', 'c\'s roll did not send the pin back to a');
   const held = am.sessionTracker.refsFor('s1', 'unified7d').unescaped;
   assert.equal(held.idx, 1, 'the restore held nothing for c');
-  assert.equal(held.gen, null, 'a hand-back\'s roll took a stamp');
+  assert.equal(held.kind, 'hand-back', 'the restore held c\'s roll as something other than a hand-back');
+  assert.ok(!('gen' in held), 'a hand-back\'s roll took a stamp');
   assert.equal(held.provider, 'anthropic',
     'the roll the restore displaced names no fleet, so no stay can settle it');
 
@@ -2749,7 +2773,9 @@ test('a paint clears the window; with the knob on the switch waits for a request
     const now = Date.now();
     bucket(am, 0, 'unified7d', 0.5, 200, now);
     bucket(am, 1, 'unified7d', 0.5, 20, now);   // its weekly expires sooner
-    assert.equal(am.setCurrentAccount(0), true);
+    // An automatic placement: these tests are about the session-reset switch, and a
+    // manual choice (#668) holds the cursor against it (manual-switch-priority.test.js).
+    am._setCurrent(am.accounts[0]);
     am.accounts[1].quota.unified5h = 0.5;
     am.accounts[1].quota.unified5hReset = now - 1000;   // the reset the switch acts on
     return am;
@@ -2890,7 +2916,9 @@ test('the session-reset switch admits on the order the pick uses', () => {
     bucket(am, 0, 'unified7dFable', 0.5, 300, now);
     bucket(am, 1, 'unified7d', 0.5, sharedOnReset, now);
     bucket(am, 1, 'unified7dFable', 0.5, 10, now);
-    assert.equal(am.setCurrentAccount(0), true);
+    // An automatic placement: these tests are about the session-reset switch, and a
+    // manual choice (#668) holds the cursor against it (manual-switch-priority.test.js).
+    am._setCurrent(am.accounts[0]);
     am.accounts[1].quota.unified5h = 0.5;
     am.accounts[1].quota.unified5hReset = now - 1000;
     assert.equal(am._rankedReset(am.accounts[1], FABLE) < am._rankedReset(am.accounts[0], FABLE), true,
@@ -2921,7 +2949,9 @@ test('with the knob OFF the switch is handed no model, whatever the request carr
     // which is the only shape in which the two filters can disagree.
     bucket(am, 1, 'unified7dFable', 0.99, 40, now);
     bucket(am, 1, 'unified7d', 0.10, 40, now);
-    assert.equal(am.setCurrentAccount(0), true);
+    // An automatic placement: these tests are about the session-reset switch, and a
+    // manual choice (#668) holds the cursor against it (manual-switch-priority.test.js).
+    am._setCurrent(am.accounts[0]);
     am.accounts[1].quota.unified5h = 0.5;
     am.accounts[1].quota.unified5hReset = now - 1000;
     return am;
@@ -2976,7 +3006,9 @@ test('the 5h session-reset switch cannot spend the roll of the account it leaves
   bucket(am, 0, 'unified7d', 0.4, 10);
   bucket(am, 1, 'unified7d', 0.4, 20);
   bucket(am, 2, 'unified7d', 0.4, 30);
-  assert.equal(am.setCurrentAccount(0), true);
+  // An automatic placement: these tests are about the session-reset switch, and a
+  // manual choice (#668) holds the cursor against it (manual-switch-priority.test.js).
+  am._setCurrent(am.accounts[0]);
   assert.equal(serve(am, null, OPUS).name, 'a', 'the fixture must start on a');
 
   // a's weekly rolls, and b's 5h window expires in the same instant — so the

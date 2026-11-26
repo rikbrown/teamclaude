@@ -5,6 +5,7 @@ import { importCredentials, fetchProfile, formatMoney } from './oauth.js';
 import {
   sameIdentity,
   findUpsertTarget,
+  apiKeyNamed,
   updateAccountEntry,
   canUpsertOAuthAccount,
   oauthIdentityFields,
@@ -15,12 +16,14 @@ import { mintAccountId } from './account-id.js';
 import { ACCOUNT_REFUSAL_CODES } from './account-refusal.js';
 import { formatPercent, heldFableResets, heldResetCredits, showSessionRow, showWeeklyRow, unavailableLine } from './status-renderer.js';
 import { cacheUsageLabel, cacheUsageState } from './usage-label.js';
+import { statusLabel } from './error-type.js';
 import { resolveMaxUsage, resolveMaxSpendMinor, switchThresholdDiffs, modelLabel, EFFORT_SEP } from './model.js';
 import { fleetAggregate, routeHeadroom, routeFamily } from './quota-summary.js';
 /** @typedef {import('./quota-summary.js').FleetBucket} FleetBucket */
 import { parseProxyUrl, proxyToUrl, describeProxy, describeSelfProxy, resolveUpstreamProxy, setUpstreamProxy, getUpstreamProxy, localListener, isSelfProxy } from './upstream-proxy.js';
 import { describeRouting, parseRoutingUrl, routingToUrl, checkRouting } from './account-routing.js';
 import { sanitizeText, safeLine } from './safe-text.js';
+import { refreshTokenExpiryWarning, knownRefreshTokenExpiry, setRefreshTokenExpiry } from './refresh-token-expiry.js';
 // The setting rules live in one module; the CLI, the MCP tools and this screen
 // all read them from there, so they cannot drift apart (#426).
 import { MAX_PROBE_SECONDS, ROUTE_COLORS } from './config-ops.js';
@@ -599,6 +602,25 @@ export function routingTag(account) {
   if (!r) return '';
   const text = typeof r === 'string' ? r : describeRouting(r);
   return text ? `via ${text}` : '';
+}
+
+/**
+ * "ends 6d" — how long until the end time the operator set for the account
+ * (accounts[].endsAt), "ended" once it has passed, or '' when it has none.
+ * The countdown rather than the date: the row has a few columns to spare, and
+ * how soon is what explains why this account is being spent first.
+ * `teamclaude status` prints the date.
+ * @param {any} account
+ * @param {number} [now]
+ */
+export function endsTag(account, now = Date.now()) {
+  const endsAt = account?.endsAt;
+  if (typeof endsAt !== 'number' || !Number.isFinite(endsAt) || endsAt <= 0) return '';
+  const left = endsAt - now;
+  if (left <= 0) return 'ended';
+  if (left >= 86400000) return `ends ${Math.floor(left / 86400000)}d`;
+  if (left >= 3600000) return `ends ${Math.floor(left / 3600000)}h`;
+  return `ends ${Math.max(1, Math.floor(left / 60000))}m`;
 }
 
 // The status cell's name for an errorReason code. A code it does not know keeps `error`.
@@ -1606,9 +1628,10 @@ export class TUI {
     // it, and drawn only while the meter is on (see _requestLine), so turning
     // the meter off gives back the old line for every entry, however it was
     // logged; and the pieces are kept so the line can be fitted around it.
-    this._addLog(`${tag} ${info.method} ${info.path}${model} → ${acct}${sx}${pin}${steer} (${info.status}, ${dur}s)${cache ? ` ${cache}` : ''}`, {
+    const shownStatus = statusLabel(info.status, info.errorType);
+    this._addLog(`${tag} ${info.method} ${info.path}${model} → ${acct}${sx}${pin}${steer} (${shownStatus}, ${dur}s)${cache ? ` ${cache}` : ''}`, {
       head: `${tag} ${info.method} `, path: info.path, model: label || null, effort: info.effort || null, account: acct, pin: sx + pin + steer,
-      status: info.status, dur, tps, cache,
+      status: shownStatus, dur, tps, cache,
     });
     if (this.active.size === 0) this._retick();   // animating → idle
   }
@@ -1940,6 +1963,16 @@ export class TUI {
       left: () => this._toggleThroughputMeter(),
       right: () => this._toggleThroughputMeter(),
       enter: () => this._toggleThroughputMeter(),
+    });
+
+    fields.push({
+      id: 'quotaBarStretch',
+      label: 'Stretch lone bar',
+      hint: '←→ toggle',
+      value: () => (this.config.quotaBarStretch === false ? gray('off') : green('on')),
+      left: () => this._toggleQuotaBarStretch(),
+      right: () => this._toggleQuotaBarStretch(),
+      enter: () => this._toggleQuotaBarStretch(),
     });
 
     fields.push({
@@ -2573,6 +2606,12 @@ export class TUI {
     // ignored on the next reload and the account would land back in `error`.
     const entry = acct.id ? this.config?.accounts?.find((/** @type {any} */ c) => c.id === acct.id) : null;
     if (entry?.importFrom) { this._addLog(`"${acct.name}" reads its tokens from ${entry.importFrom} — sign in there instead`); return; }
+    // A long-lived account (long-lived.js) is renewed by its own login, which
+    // asks for a year-long, inference-only token. The sign-in here is the
+    // ordinary one: onto an entry that carries the account's ids it would turn
+    // it into a refreshing account, and onto one known by its name only it
+    // would add the account it signed in as and leave this one waiting.
+    if (acct.longLived === true) { this._addLog(`"${acct.name}" holds a long-lived token; renew it from a shell: teamclaude login --long-lived --name "${acct.name}"`); return; }
     // One at a time: a second flow would race the first for the browser, and
     // for Codex for the fixed callback port as well.
     if (this._loggingIn) { this._addLog(`Still waiting on the sign-in for "${this._loggingIn}"`); return; }
@@ -2730,8 +2769,10 @@ export class TUI {
     // A claim cannot be cancelled. Keep its grant fixed until it settles;
     // closing the panel only stops displaying it, not the upstream request.
     if (panel.busy) return;
-    if (k === 'r') { void this._readResets(panel); return; }
+    // One read at a time: the read floor only arms once a read has landed, so
+    // a held `r` would otherwise send a usage request per key repeat.
     if (panel.loading) return;
+    if (k === 'r') { void this._readResets(panel); return; }
     const grants = panel.details?.grants || [];
     if (k === 'up' || k === 'k') panel.idx = Math.max(0, panel.idx - 1);
     else if (k === 'down' || k === 'j') panel.idx = Math.max(0, Math.min(grants.length - 1, panel.idx + 1));
@@ -3016,6 +3057,17 @@ export class TUI {
     if (this.running) this.render();
   }
 
+  async _toggleQuotaBarStretch() {
+    // Absent means on (the stretched row is the default), so the first toggle
+    // from a config that predates the key has to write `false`.
+    const prev = this.config.quotaBarStretch;
+    const on = prev === false;
+    this.config.quotaBarStretch = on;
+    if (!await this._saveSetting('lone bar stretch', () => { this.config.quotaBarStretch = prev; })) return;
+    this._addLog(`Stretch lone quota bar: ${on ? 'on' : 'off'}`);
+    if (this.running) this.render();
+  }
+
   /** The configured account sort; anything unknown reads as `arranged`. */
   _accountSort() {
     const s = this.config?.accountSort;
@@ -3115,6 +3167,8 @@ export class TUI {
         refreshToken: creds.refreshToken,
         expiresAt: creds.expiresAt,
       };
+      // When the refresh token lapses, where the credential file says.
+      setRefreshTokenExpiry(entry, creds.refreshTokenExpiresAt);
 
       // Same rule as the login path: a name match counts only where it is not
       // standing in for a different account+org. Both organizations of one person
@@ -3125,6 +3179,8 @@ export class TUI {
       if (idx >= 0) {
         const prev = this.config.accounts[idx];
         this.config.accounts[idx] = updateAccountEntry(prev, entry);
+        // A new refresh token: the date the row held was about the old one.
+        setRefreshTokenExpiry(this.config.accounts[idx], creds.refreshTokenExpiresAt);
         // The account to update is the one built from this entry. Identity cannot
         // answer that: the entry may have matched on a bare name while carrying no
         // UUID, and then no account matches the freshly profiled identity at all.
@@ -3138,6 +3194,8 @@ export class TUI {
           amAcct.credential = creds.accessToken;
           amAcct.refreshToken = creds.refreshToken;
           amAcct.expiresAt = creds.expiresAt;
+          amAcct.refreshTokenExpiresAt = knownRefreshTokenExpiry(creds.refreshTokenExpiresAt);
+          amAcct.longLived = false;
           if (entry.accountUuid) amAcct.accountUuid = entry.accountUuid;
           if (entry.orgUuid) amAcct.orgUuid = entry.orgUuid;
           if (entry.orgName) amAcct.orgName = entry.orgName;
@@ -3151,6 +3209,11 @@ export class TUI {
         // keep its traffic off this machine's address.
         if (prev.routing) this._addLog(`Note: "${safeLine(prev.name, 64)}" has its own proxy, and this import's profile lookup did not go through it`);
       } else {
+        // Not under a name an API-key account holds (apiKeyNamed).
+        if (apiKeyNamed(this.config.accounts, entry.name)) {
+          this._addLog(`Import refused: "${entry.name}" already names an API-key account; remove or rename that account first`);
+          return;
+        }
         // New org for this person: disambiguate colliding email names with " (org)".
         if (profile?.accountUuid) {
           const orgLbl = a => a.orgName || (a.orgUuid ? a.orgUuid.slice(0, 8) : 'org');
@@ -3855,6 +3918,12 @@ export class TUI {
         const tag = switchThresholdTag(a, key => this.am.thresholdFor(key));
         return tag ? Math.max(w, 2 + vw(tag)) : w;
       }, 0);
+      // Same rule again for the end-time tag: silent for every account that
+      // has none.
+      const endsW = members.reduce((/** @type {number} */ w, /** @type {any} */ a) => {
+        const tag = endsTag(a);
+        return tag ? Math.max(w, 2 + vw(tag)) : w;
+      }, 0);
       // Same rule again for the routing tag: silent for every account on the
       // fleet path, so it costs the budget nothing there.
       const routeW = members.reduce((/** @type {number} */ w, /** @type {any} */ a) => {
@@ -3872,7 +3941,7 @@ export class TUI {
       // that, a routed credit account reserved 82 columns at W=80 before any bar and fitLine cut the address off
       // (Copilot's review of #649).
       const layout = (/** @type {number} */ tagW) => {
-        const fixedWithRoute = 20 + typeCell + NAME_MIN + routeCells + tagW + spendW + creditW + switchW + routeW + prepaidW;
+        const fixedWithRoute = 20 + typeCell + NAME_MIN + routeCells + tagW + spendW + creditW + switchW + endsW + routeW + prepaidW;
         const routeTags = routeW === 0 || fixedWithRoute + BAR_MIN <= W;
         return { fixed: routeTags ? fixedWithRoute : fixedWithRoute - routeW, routeTags };
       };
@@ -3975,7 +4044,13 @@ export class TUI {
   _rowLines(/** @type {number} */ idx, /** @type {any} */ L, /** @type {Set<number>} */ current, /** @type {Set<number>} */ steered = this._steerRows()) {
     const a = this.am.accounts[idx];
     const row = this._renderRow(idx, L, current, steered);
-    if (this._unavailable(a) !== 'error') return [row];
+    if (this._unavailable(a) !== 'error') {
+      // A known refresh-token expiry gets a line only once it is close (or
+      // past): on every row it would double the list for a date weeks away,
+      // which `teamclaude status` shows.
+      const soon = refreshTokenExpiryWarning(a);
+      return soon ? [row, ...wrapWords(soon, L.width - 4).map(l => `    ${yellow(l)}`)] : [row];
+    }
     const plain = (/** @type {string} */ s) => s;
     const why = unavailableLine({ ...a, unavailable: 'error', onExtraUsage: this._onExtraUsage(a) }, { dim: plain, yellow: plain, red: plain });
     return [row, ...wrapWords(why ?? '', L.width - 4).map(l => `    ${yellow(l)}`)];
@@ -4840,8 +4915,16 @@ export class TUI {
     // The mirror case: a plan with no shared weekly window (a Team seat). Its
     // one slot already holds the session bar, so only two-bar mode changes it.
     const sessionOnly = !weeklyFirst && showBoth && category === 'unified' && !showWeeklyRow(q);
-    if (weeklyFirst || weeklyOnly) [l1, r1, t1, w1, th1] = [l2, r2, t2, w2, th2];
-    const bw1 = showBoth && (weeklyOnly || sessionOnly) ? bw * 2 + 6 : bw;
+    // `quotaBarStretch: false` keeps that lone bar at its own width, in its own
+    // column, and leaves the other cell blank (not `Ses -`, which said nothing),
+    // so the bar lines up with the same bar on the rows around it. Two-bar mode
+    // only: in single-bar mode there is one slot and nothing to stretch.
+    const unstretched = showBoth && (weeklyOnly || sessionOnly) && this.config?.quotaBarStretch === false;
+    // The blank stands in for one `label bar` cell: three columns of label, a
+    // space, the bar.
+    const blankCell = ' '.repeat(3 + 1 + bw);
+    if (weeklyFirst || (weeklyOnly && !unstretched)) [l1, r1, t1, w1, th1] = [l2, r2, t2, w2, th2];
+    const bw1 = showBoth && (weeklyOnly || sessionOnly) && !unstretched ? bw * 2 + 6 : bw;
 
     // Keep the optional chaining: _renderAcct is called on instances built
     // without a config, and it read none before this line existed.
@@ -4867,9 +4950,14 @@ export class TUI {
     };
     const slotLabel = (/** @type {string} */ label) => (label === 'Wk ' ? mark('Wk', label) : label);
 
-    let line = ` ${sel}${cur}${steer}${startSlot}${name} ${type}${status} ${slotLabel(l1)} ${bar(r1, bw1, t1, w1, th1, pctInBar)}`;
+    const firstCell = unstretched && weeklyOnly ? blankCell : `${slotLabel(l1)} ${bar(r1, bw1, t1, w1, th1, pctInBar)}`;
+    let line = ` ${sel}${cur}${steer}${startSlot}${name} ${type}${status} ${firstCell}`;
     if (showBoth) {
-      if (!weeklyFirst && !weeklyOnly && !sessionOnly) line += `  ${slotLabel(l2)} ${bar(r2, bw, t2, w2, th2, pctInBar)}`;
+      // Unstretched, a weekly-only row draws its bar here, in the Wk column; a
+      // session-only row draws a blank. A row with neither reading counts as
+      // weekly-only, as the stretched layout already treats it.
+      if (!weeklyFirst && ((!weeklyOnly && !sessionOnly) || (unstretched && weeklyOnly))) line += `  ${slotLabel(l2)} ${bar(r2, bw, t2, w2, th2, pctInBar)}`;
+      else if (unstretched && sessionOnly) line += `  ${blankCell}`;
       // A backend's monthly window has no unified slot; it draws its own bar
       // and is budgeted as a family column, like S7/F7.
       if (showFamily && backendWindows?.monthly != null && l2 !== 'Mon') {
@@ -4920,6 +5008,10 @@ export class TUI {
     // the fleet's own numbers) — see switchThresholdTag.
     const switchTag = switchThresholdTag(a, key => this.am.thresholdFor(key));
     if (switchTag) line += `  ${cyan(switchTag)}`;
+    // The end time the operator set, as a countdown: yellow while it is ahead
+    // and moving traffic here, dim once it has passed.
+    const ends = endsTag(a);
+    if (ends) line += `  ${(ends === 'ended' ? dim : yellow)(ends)}`;
     // Routing tag trails even that: where the account's traffic physically
     // leaves the machine, when the operator pinned it to its own proxy.
     // Left out when the row's budget had no room for it (`routeTags`, budgetFor).
@@ -5023,6 +5115,8 @@ export class TUI {
     // ── Quota bars
     lines.push(bold('  Quota bars') + dim('  — what the bar on each account row carries'));
     lines.push(row(byId('quotaBarPercent')));
+    lines.push(row(byId('quotaBarStretch')));
+    lines.push(dim('  A row with one window (no 5-hour limit) widens its bar across both columns.'));
     lines.push('');
     // ── Throughput
     lines.push(bold('  Throughput') + dim('  — output tokens per second, per request and for the whole fleet, and its last hour at API prices'));

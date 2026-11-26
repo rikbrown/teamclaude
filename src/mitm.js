@@ -21,9 +21,10 @@ import http2 from 'node:http2';
 import { getConfigPath } from './config.js';
 import { generateCertChain } from './x509.js';
 import { createProxyRequestListener, resolveClientAuth, loopbackExempt, relayUpgrade, resolvePinList, describeConnectError, KEEP_ALIVE_TIMEOUT_MS, shouldStripOverageHeaders } from './server.js';
-import { interceptHostsFor, isNeverIntercepted, providerForPath, DEFAULT_PROVIDER } from './provider.js';
+import { interceptHostsFor, isNeverIntercepted, providerForPath, providerForHost, providerOf, isSubscriptionAccount, DEFAULT_PROVIDER } from './provider.js';
 import { forwardRefusal, guardedLookup, FORBIDDEN_FORWARD } from './forward-target.js';
 import { safeLine } from './safe-text.js';
+import { usageDimensionHeaderNames } from './client-usage.js';
 /** @typedef {import('./types.js').CodedError} CodedError */
 
 const CA_CERT = 'teamclaude-ca.pem';
@@ -75,8 +76,8 @@ export function chainShortfall(caCertPem, leafCertPem, hosts, now = Date.now()) 
     const ca = new X509Certificate(caCertPem);
     const leaf = new X509Certificate(leafCertPem);
     if (!leaf.verify(ca.publicKey)) return { signed: false, shortfall: 'is not signed by the stored CA' };
-    const names = (leaf.subjectAltName || '').split(',').map((s) => s.trim());
-    const missing = hosts.filter((h) => !names.includes(`DNS:${h}`));
+    const names = leafDnsNames(leaf);
+    const missing = hosts.filter((h) => !names.includes(h));
     if (missing.length) return { signed: true, shortfall: `does not name ${missing.join(', ')}` };
     for (const cert of [ca, leaf]) {
       const validTo = new Date(cert.validTo).getTime();
@@ -89,6 +90,17 @@ export function chainShortfall(caCertPem, leafCertPem, hosts, now = Date.now()) 
   } catch {
     return { signed: false, shortfall: 'cannot be read' };
   }
+}
+
+/**
+ * The DNS names in a leaf's subjectAltName.
+ * @param {string|X509Certificate} leaf  PEM, or a parsed certificate
+ * @returns {string[]}
+ */
+function leafDnsNames(leaf) {
+  const cert = typeof leaf === 'string' ? new X509Certificate(leaf) : leaf;
+  return (cert.subjectAltName || '').split(',').map((s) => s.trim())
+    .filter((s) => s.startsWith('DNS:')).map((s) => s.slice(4));
 }
 
 /**
@@ -236,8 +248,15 @@ export function upgradeUpstreamFor(hostHeader, config, upstream) {
  * the top of this file.
  * @param {Object} opts
  * @param {Object} opts.config
- * @param {Object} opts.accountManager
- * @param {() => Promise<{ key: string, cert: string }>} opts.ensureLeaf  current leaf PEMs
+ * @param {import('./account-manager.js').AccountManager} opts.accountManager
+ * @param {() => Promise<{ key: string, cert: string }>} opts.ensureLeaf  current leaf PEMs. Once a
+ *   call resolves, every later call resolves to the same leaf: each terminating server keeps the
+ *   one it got, and the check below reads it again (createProxyServer's memo guarantees this)
+ * @param {string[]|null} [opts.leafHosts]  hosts the leaf is known to name; a host hostMode
+ *   would intercept that is not among them is terminated only if the leaf `ensureLeaf`
+ *   returns (the one every terminating server presents) names it, and otherwise tunnelled,
+ *   or refused when its pin names an account of the host's provider or an API key with an
+ *   upstream of its own (null: no check)
  * @param {string|null} [opts.logDir]
  * @param {Object} [opts.hooks]
  * @param {(line: string) => void} [opts.log]
@@ -246,13 +265,18 @@ export function upgradeUpstreamFor(hostHeader, config, upstream) {
  * @param {Object|null} [opts.clientUsage]
  * @param {Object|null} [opts.dimensionUsage]
  * @param {import('./drain.js').DrainState|null} [opts.drain]  the shared drain state (drain.js), handed to each MITM listener
+ * @param {any} [opts.limiter]  the server's weekly key-limit counter (src/usage/limits.js)
  * @param {any} [opts.usageStore]  SQLite usage store (src/usage/db.js); threaded straight
  *   into createProxyRequestListener so a request forwarded through a terminated tunnel
  *   writes a usage row the same way the base HTTP listener does — no separate write path.
  */
-export function createConnectHandler({ config, accountManager, ensureLeaf, logDir = null, hooks = {}, log = () => {}, sx = null, egress = null, clientUsage = null, dimensionUsage = null, drain = null, usageStore = undefined }) {
+export function createConnectHandler({ config, accountManager, ensureLeaf, leafHosts = null, logDir = null, hooks = {}, log = () => {}, sx = null, egress = null, clientUsage = null, dimensionUsage = null, drain = null, usageStore = undefined, limiter = undefined }) {
   const upstream = config.upstream || 'https://api.anthropic.com';
   const holdMs = (config.holdSeconds || 0) * 1000;
+  // Host and reason pairs already reported as tunnelled for want of a leaf
+  // that names the host: once per host for a leaf that does not, and once per
+  // distinct load error for one that could not be loaded.
+  const unnamedReported = new Set();
 
   // One terminating h2/h1 server per pin, minted lazily on the first intercepted
   // CONNECT that needs it (key '' = unpinned, the common case).
@@ -308,7 +332,7 @@ export function createConnectHandler({ config, accountManager, ensureLeaf, logDi
     // Node 24.6 adds this buffer when an HTTP/1 response finishes, but its
     // HTTP/2 server leaves it undefined; timeout + undefined would be NaN.
     /** @type {any} */ (srv).keepAliveTimeoutBuffer ??= 1_000;
-    srv.on('request', createProxyRequestListener({ accountManager, upstream, logDir, hooks, sx, holdMs, config, forcedPin: pin || null, egress, clientUsage, forcedClient: client, dimensionUsage, drain, usageStore }));
+    srv.on('request', createProxyRequestListener({ accountManager, upstream, logDir, hooks, sx, holdMs, config, forcedPin: pin || null, egress, clientUsage, forcedClient: client, dimensionUsage, drain, usageStore, limiter }));
     // Remote Control's real-time channel is a WebSocket (Upgrade handshake),
     // which never fires 'request' — only 'upgrade', with a raw socket instead
     // of a response object (h1-only; falls back to blind h2 passthrough is not
@@ -340,7 +364,7 @@ export function createConnectHandler({ config, accountManager, ensureLeaf, logDi
         }
         // The CONNECT's client identity is bound to this listener (see getServer),
         // so the channel is attributed the way the requests in the tunnel are.
-        relayUpgrade(req, socket, head, target, sx, { client, clientUsage, log, stripOverage: shouldStripOverageHeaders(config) });
+        relayUpgrade(req, socket, head, target, sx, { client, clientUsage, log, stripOverage: shouldStripOverageHeaders(config), strip: usageDimensionHeaderNames(/** @type {any} */ (config).proxy) });
       } catch (err) {
         log(`[TeamClaude] MITM: WebSocket upgrade handler failed for ${safeLine(req?.url)}: ${err?.message || err}`);
         try { socket.write('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n'); } catch { /* client already gone */ }
@@ -400,7 +424,10 @@ export function createConnectHandler({ config, accountManager, ensureLeaf, logDi
     const { host, port } = authority;
     const mode = hostMode(host, config);
 
-    if (mode === 'tunnel') {
+    // A blind tunnel: every host hostMode does not claim, and a claimed one the
+    // presented leaf does not name (see the rewrite path below). `onEstablished`
+    // runs once the destination policy has passed and the dial is up.
+    const tunnel = (/** @type {(() => void)|null} */ onEstablished = null) => {
       // Destination policy (see forward-target.js): a tunnel may not reach
       // this machine's loopback, the unspecified address, or link-local — that
       // is how a remote client with only a low-trust key would reach our own
@@ -446,6 +473,7 @@ export function createConnectHandler({ config, accountManager, ensureLeaf, logDi
           return;
         }
         established = true;
+        onEstablished?.();
         reply200Raw(clientSocket);
         if (head && head.length) up.write(head);
         up.pipe(clientSocket); clientSocket.pipe(up);
@@ -464,6 +492,10 @@ export function createConnectHandler({ config, accountManager, ensureLeaf, logDi
       up.on('close', () => teardown('502 Bad Gateway'));
       clientSocket.on('close', () => teardown()); // client gone: nothing to write
       up.setTimeout(30_000, () => teardown('504 Gateway Timeout')); // bound a stalled connect/idle tunnel
+    };
+
+    if (mode === 'tunnel') {
+      tunnel();
       return;
     }
 
@@ -486,7 +518,7 @@ export function createConnectHandler({ config, accountManager, ensureLeaf, logDi
     // Proxy-Authorization on EVERY CONNECT, including blind-tunneled third-party
     // hosts, where an account pin is meaningless — rejecting there would take
     // down unrelated traffic over a typo meant for Anthropic.
-    const { pin, error } = resolveConnectPin(req, accountManager, config.proxy);
+    const { pin, pins, error } = resolveConnectPin(req, accountManager, config.proxy);
     if (error) {
       log(`[TeamClaude] CONNECT ${host}: ${error}`);
       try {
@@ -496,11 +528,68 @@ export function createConnectHandler({ config, accountManager, ensureLeaf, logDi
       return;
     }
 
-    getServer(pin || '', auth.client).then((srv) => {
+    const intercept = () => getServer(pin || '', auth.client).then((srv) => {
       reply200Raw(clientSocket);
       if (head && head.length) clientSocket.unshift(head);
       srv.emit('connection', clientSocket);
     }).catch((err) => { log(`[TeamClaude] MITM ${host}: ${err.message}`); reply502Raw(clientSocket); clientSocket.destroy(); });
+
+    // hostMode reads the accounts live, so a reload that adds the first Codex
+    // account makes chatgpt.com an intercepted host at once. The leaf is read
+    // at the first intercepted CONNECT, for the hosts the accounts needed when
+    // the proxy started (a stored chain that names more is reused), and every
+    // terminating server presents that one leaf. A leaf naming another host
+    // would come with a new CA (its key is never kept, see ensureCerts), which
+    // every client launched before it refuses. So a host off that list is
+    // terminated only if the leaf names it, since the client's handshake would
+    // fail on the name. If it does not, or the leaf cannot be loaded at all,
+    // an unpinned CONNECT is tunnelled until a restart renews the chain, or,
+    // when the leaf could not be loaded, until it can be; the client runs on
+    // its own login, with nothing pooled or booked. A CONNECT whose pin names
+    // an account of the host's provider, or an API key with an upstream of its
+    // own, is refused, with 503 since this proxy cannot serve it until then:
+    // that pin asks for accounts of the pool, and a tunnel would drop it
+    // unsaid. Any other pin is tunnelled, as it was before the account was
+    // added, because the pool does not serve that pin on this host: another
+    // provider's subscription, or a plain API key (no upstream of its own),
+    // such as the one `teamclaude login --api` writes. TC_ACCT rides
+    // HTTPS_PROXY into whatever a session starts. Which pin is refused is
+    // decided now, on the accounts resolveConnectPin resolved it to, before
+    // ensureLeaf() is called: a reload while the leaf loads can remove or
+    // rename the pinned account, and the pin, resolved again after it, would
+    // name nothing and be tunnelled. A CONNECT already waiting keeps its 503
+    // even when that reload removes every account of the provider; the next
+    // one is tunnelled, since the host is no longer intercepted. Decided
+    // before a terminating server is built, too, so a refusal builds none.
+    if (leafHosts && !leafHosts.includes(host)) {
+      const provider = providerForHost(host);
+      const pinWantsPool = pins.some((i) => {
+        const account = accountManager.accounts[i];
+        return providerOf(account) === provider || (!isSubscriptionAccount(account) && !!account?.upstream);
+      });
+      ensureLeaf()
+        .then(({ cert }) => ({ named: leafDnsNames(cert).includes(host), until: ', until the proxy restarts', why: 'the certificate this proxy presents does not name it' }))
+        .catch((err) => ({ named: false, until: '', why: `this proxy's certificate could not be loaded (${safeLine(err?.message || err, 160)})` }))
+        .then(({ named, until, why }) => {
+          if (named) return intercept();
+          if (pinWantsPool) {
+            log(`[TeamClaude] CONNECT ${host} refused for pin ${redactToken(pin)}: it arrived naming an account of that host's provider or an API key with an upstream of its own, and ${why}; a tunnel would serve the pin outside the pool`);
+            refuseRaw(clientSocket, '503 Service Unavailable');
+            return;
+          }
+          // Said once the tunnel is up, so a dial the destination policy refuses
+          // is not reported as a tunnel.
+          tunnel(() => {
+            const key = `${host}\u0000${why}`;
+            if (unnamedReported.has(key)) return;
+            unnamedReported.add(key);
+            log(`[TeamClaude] MITM: tunnelling ${host} untouched, on the client's own login${until}: it arrived while an account added since the proxy started needed that host, and ${why}`);
+          });
+        })
+        .catch((err) => { log(`[TeamClaude] MITM ${host}: ${err?.message || err}`); reply502Raw(clientSocket); clientSocket.destroy(); });
+      return;
+    }
+    intercept();
   };
 }
 
@@ -531,7 +620,11 @@ export function connectPinToken(req) {
  * a pin that lists several accounts in order (`a,b`, see resolvePinList); the
  * pin is passed on as written and resolved again per request.
  *
- * @returns {{pin: string|null, error: string|null}}
+ * `pins` is what the pin resolved to here, the indices of the accounts it names
+ * in order (none without a pin), so that what the CONNECT itself decides rests
+ * on the same resolution as its 407.
+ *
+ * @returns {{pin: string|null, pins: number[], error: string|null}}
  */
 export function resolveConnectPin(req, accountManager, proxyConfig) {
   // Historically this took the bare apiKey string; accept both so existing
@@ -539,14 +632,15 @@ export function resolveConnectPin(req, accountManager, proxyConfig) {
   // (needed to recognize clientKeys entries in the username slot).
   const proxy = typeof proxyConfig === 'string' ? { apiKey: proxyConfig } : proxyConfig;
   const token = connectPinToken(req);
-  if (!token) return { pin: null, error: null };
+  if (!token) return { pin: null, pins: [], error: null };
   if (resolveClientAuth(proxy, token).ok && (proxy?.apiKey || proxy?.clientKeys?.length)) {
-    return { pin: null, error: null };
+    return { pin: null, pins: [], error: null };
   }
-  if (resolvePinList(accountManager, token) == null) {
-    return { pin: null, error: `Unknown account pin ${redactToken(token)}` };
+  const pins = resolvePinList(accountManager, token);
+  if (pins == null) {
+    return { pin: null, pins: [], error: `Unknown account pin ${redactToken(token)}` };
   }
-  return { pin: token, error: null };
+  return { pin: token, pins, error: null };
 }
 
 // An unrecognized CONNECT username reaches the log, and it is not necessarily a

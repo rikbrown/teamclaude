@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { AccountManager } from '../src/account-manager.js';
 import { createProxyServer, peekStreamFailure, STREAM_FAILURE_CODES } from '../src/server.js';
+import { gate } from '../test-helpers/gate.js';
 
 // Every failover in forwardRequest keys on the upstream status, and the
 // Responses API does not always use one: it answers 200, opens the SSE stream,
@@ -16,16 +17,27 @@ import { createProxyServer, peekStreamFailure, STREAM_FAILURE_CODES } from '../s
 // tests here drive real HTTP through createProxyServer so that what is pinned
 // is what a client sees: which accounts were spent, and the exact bytes back.
 
-// The hold is wall-clock bounded; a test-sized bound keeps the slow-first-token
-// cases fast. Read per call by the proxy, so setting it here covers every test.
+// The hold is wall-clock bounded, and the proxy reads the bound per call. Most
+// tests here need the peek to reach its verdict, and a hold that ran out first
+// (a loaded machine, a refusal a few hundred milliseconds late) would release
+// the stream undecided and relay the refusal: so for them the hold is longer
+// than the runner lets a test live, and only the verdict or the byte budget
+// ends a peek. The tests about the hold itself shorten it with `shortHold`.
+// Nothing asserts on either number: a test of the hold waits for the headers
+// the release sends, however long that takes.
+const NO_HOLD_MS = 3600_000;
 const HOLD_MS = 200;
-process.env.TEAMCLAUDE_STREAM_PEEK_HOLD_MS = String(HOLD_MS);
+process.env.TEAMCLAUDE_STREAM_PEEK_HOLD_MS = String(NO_HOLD_MS);
+/** For the rest of test `t`, the peek releases an undecided stream after HOLD_MS. */
+function shortHold(t) {
+  process.env.TEAMCLAUDE_STREAM_PEEK_HOLD_MS = String(HOLD_MS);
+  t.after(() => { process.env.TEAMCLAUDE_STREAM_PEEK_HOLD_MS = String(NO_HOLD_MS); });
+}
 
 const HOUR = 3600_000;
 const MODEL = 'gpt-5.6-sol';
 const SID = 'sess-stream-failover';
 const listen = (s) => new Promise(r => s.listen(0, '127.0.0.1', () => r(s.address().port)));
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 // One real Codex turn's usage (see responses-usage.test.js for the arithmetic).
 const WIRE = {
@@ -76,7 +88,14 @@ const claudeAccount = (name, port) => ({
 // A fleet of `names` accounts in front of one upstream. `handler(acct, res, seen)`
 // answers each upstream request; `seen` is the order accounts were spent in,
 // by the ChatGPT-Account-Id (Codex) or bearer token (Anthropic) the proxy sent.
-async function withFleet(names, handler, fn, { provider = 'codex' } = {}) {
+// Both servers are closed when the test `t` ends, through t.after rather than a
+// finally after `fn`: a wait in `fn` that the failure under test leaves pending
+// (a response that never ends, say) is not unwound when the test fails. On Node
+// 24 and later the test fails on its timeout and the file runs on, and a
+// finally after `fn` would never run, so the servers would keep the file from
+// exiting; Node 20 and 22 apply the timeout to the whole file as well and kill
+// it there.
+async function withFleet(t, names, handler, fn, { provider = 'codex' } = {}) {
   /** @type {string[]} */
   const seen = [];
   const upstream = http.createServer(async (req, res) => {
@@ -88,26 +107,57 @@ async function withFleet(names, handler, fn, { provider = 'codex' } = {}) {
     handler(acct.replace(/^acct-/, ''), res, seen);
   });
   const upstreamPort = await listen(upstream);
+  t.after(() => { upstream.closeAllConnections(); upstream.close(); });
   const make = provider === 'codex' ? codexAccount : claudeAccount;
   const am = new AccountManager(names.map(n => make(n, upstreamPort)), 0.98);
-  const proxy = createProxyServer(am, { proxy: {} });
+  // `ended()` resolves once the listener's finally has ended the next
+  // request: on endSession, which runs there after all of forwardRequest's
+  // bookkeeping (which outlives the client's last byte), whether it returns or
+  // throws, or on the onRequestEnd hook that follows it. Either is enough, so a
+  // request that never reaches endSession still ends the wait, and the test
+  // fails on what the request left behind rather than on its timeout. Ask for
+  // it before sending, and await it before reading what the request left
+  // behind.
+  let onEnd = () => {};
+  const endSession = am.endSession.bind(am);
+  am.endSession = (key, ok) => { try { return endSession(key, ok); } finally { onEnd(); } };
+  const ended = () => new Promise(resolve => { onEnd = () => resolve(undefined); });
+  const proxy = createProxyServer(am, { proxy: {} }, { onRequestEnd: () => onEnd() });
   const proxyPort = await listen(proxy);
-  try { await fn({ am, proxyPort, seen }); } finally { proxy.close(); upstream.close(); }
+  t.after(() => { proxy.closeAllConnections(); proxy.close(); });
+  await fn({ am, proxyPort, seen, ended });
 }
 
-async function codexPost(port) {
-  const t0 = Date.now();
+// `onHeaders` is called once the response's headers have reached the client,
+// and `onBody` with the body read so far after each chunk of it: where a test
+// opens the gates its upstream is held at (test-helpers/gate.js). `signal` ends
+// the request with the test, for a test whose failure is a response that never
+// comes.
+/**
+ * @param {number} port
+ * @param {() => Promise<unknown>} ended
+ * @param {{ onHeaders?: () => void, onBody?: (soFar: string) => void, signal?: AbortSignal }} [watch]
+ */
+async function codexPost(port, ended, { onHeaders, onBody, signal } = {}) {
+  const done = ended();
   const res = await fetch(`http://127.0.0.1:${port}/backend-api/codex/responses`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'session-id': SID },
     body: JSON.stringify({ model: MODEL, input: [], stream: true }),
+    signal,
   });
-  const headersAfterMs = Date.now() - t0;
-  const body = await res.text();
-  // The streaming usage record lands in streamResponse's finally, a tick after
-  // the client's last byte.
-  await sleep(60);
-  return { status: res.status, body, headersAfterMs };
+  onHeaders?.();
+  let body = '';
+  const decoder = new TextDecoder();
+  for await (const chunk of /** @type {AsyncIterable<Uint8Array>} */ (/** @type {unknown} */ (res.body))) {
+    body += decoder.decode(chunk, { stream: true });
+    onBody?.(body);
+  }
+  body += decoder.decode();
+  // The streaming usage record lands in streamResponse's finally, after the
+  // client's last byte, and the session is ended after that.
+  await done;
+  return { status: res.status, body };
 }
 
 const byName = (am, name) => am.accounts.find(a => a.name.endsWith(`:${name}`));
@@ -117,14 +167,14 @@ const byName = (am, name) => am.accounts.find(a => a.name.endsWith(`:${name}`));
 // (a) The case this exists for. The account first spent refuses inside its
 // 200; the sibling answers; the client reads the sibling's stream and never
 // sees the refusal.
-test('a refusal reported inside a 200 stream hops once to a sibling', async () => {
-  await withFleet(['one', 'two', 'three'], (acct, res, seen) => {
+test('a refusal reported inside a 200 stream hops once to a sibling', async (t) => {
+  await withFleet(t, ['one', 'two', 'three'], (acct, res, seen) => {
     sseHead(res);
     // Whichever account went first is the one that refuses.
     if (acct === seen[0]) return res.end(sse(CREATED, OVERLOADED, FAILED));
     res.end(sse(CREATED, IN_PROGRESS, DELTA, COMPLETED));
-  }, async ({ proxyPort, seen }) => {
-    const { status, body } = await codexPost(proxyPort);
+  }, async ({ proxyPort, seen, ended }) => {
+    const { status, body } = await codexPost(proxyPort, ended);
     assert.equal(status, 200);
     assert.equal(seen.length, 2, 'one hop: the refusing account and one sibling');
     assert.notEqual(seen[0], seen[1], 'the hop went to a sibling, not back to the same account');
@@ -133,15 +183,45 @@ test('a refusal reported inside a 200 stream hops once to a sibling', async () =
   });
 });
 
+// The hop never lands on an account the request already tried. one answers a
+// rate-limit 429 (paused, and in what the request tried, but still available),
+// the request hops to two, and two's stream fails: the stream hop's best sibling
+// would be one, so it goes to three, which ranks below both.
+test('a stream-failure hop never lands on an account the request already tried', async (t) => {
+  const OVERLOADED_ERROR = { type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } };
+  let oneRefused = false;
+  await withFleet(t, ['one', 'two', 'three'], (acct, res) => {
+    if (acct === 'one' && !oneRefused) {
+      oneRefused = true;
+      res.writeHead(429, { 'content-type': 'application/json', 'retry-after': '30', 'anthropic-ratelimit-requests-remaining': '0' });
+      res.end(JSON.stringify({ type: 'error', error: { type: 'rate_limit_error', message: 'slow down' } }));
+      return;
+    }
+    sseHead(res);
+    if (acct === 'two') return res.end(sse(OVERLOADED_ERROR));
+    res.end(sse(MESSAGE_START, TEXT_DELTA, MESSAGE_STOP));
+  }, async ({ am, proxyPort, seen }) => {
+    byName(am, 'three').priority = 1;
+    const res = await fetch(`http://127.0.0.1:${proxyPort}/v1/messages`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'claude-x', messages: [], stream: true }),
+    });
+    const body = await res.text();
+    assert.equal(res.status, 200);
+    assert.deepEqual(seen, ['one', 'two', 'three']);
+    assert.equal(body, sse(MESSAGE_START, TEXT_DELTA, MESSAGE_STOP), "three's stream reaches the client");
+  }, { provider: 'anthropic' });
+});
+
 // (b) One hop, not a walk of the fleet: a second account refusing the same way
 // is the provider talking, and every further attempt would only spend another
 // account's cache to learn it. The last stream is relayed as upstream sent it.
-test('a refusal every account shares is relayed after exactly one hop', async () => {
-  await withFleet(['one', 'two', 'three'], (acct, res) => {
+test('a refusal every account shares is relayed after exactly one hop', async (t) => {
+  await withFleet(t, ['one', 'two', 'three'], (acct, res) => {
     sseHead(res);
     res.end(sse(CREATED, OVERLOADED, FAILED));
-  }, async ({ proxyPort, seen }) => {
-    const { status, body } = await codexPost(proxyPort);
+  }, async ({ proxyPort, seen, ended }) => {
+    const { status, body } = await codexPost(proxyPort, ended);
     assert.equal(status, 200, 'upstream answered 200, and that is what the client gets');
     assert.equal(seen.length, 2, 'two attempts, not one per account');
     assert.equal(body, sse(CREATED, OVERLOADED, FAILED), "the second refusal is relayed byte for byte, not hidden");
@@ -150,12 +230,12 @@ test('a refusal every account shares is relayed after exactly one hop', async ()
 
 // (c) Order decides, not presence. A failure that follows a delta is a stream
 // that broke after committing, and committed output has no retry behind it.
-test('a failure after output is relayed untouched, on one account', async () => {
-  await withFleet(['one', 'two'], (acct, res) => {
+test('a failure after output is relayed untouched, on one account', async (t) => {
+  await withFleet(t, ['one', 'two'], (acct, res) => {
     sseHead(res);
     res.end(sse(CREATED, DELTA, FAILED));
-  }, async ({ proxyPort, seen }) => {
-    const { body } = await codexPost(proxyPort);
+  }, async ({ proxyPort, seen, ended }) => {
+    const { body } = await codexPost(proxyPort, ended);
     assert.equal(seen.length, 1, 'no sibling was spent on a committed stream');
     assert.equal(body, sse(CREATED, DELTA, FAILED));
   });
@@ -163,12 +243,12 @@ test('a failure after output is relayed untouched, on one account', async () => 
 
 // (d) A refusal about the request is refused identically everywhere, so a hop
 // would only pay for a second copy of the same answer.
-test('a request-fault failure is relayed without a hop', async () => {
-  await withFleet(['one', 'two'], (acct, res) => {
+test('a request-fault failure is relayed without a hop', async (t) => {
+  await withFleet(t, ['one', 'two'], (acct, res) => {
     sseHead(res);
     res.end(sse(CREATED, INVALID));
-  }, async ({ proxyPort, seen }) => {
-    const { body } = await codexPost(proxyPort);
+  }, async ({ proxyPort, seen, ended }) => {
+    const { body } = await codexPost(proxyPort, ended);
     assert.equal(seen.length, 1);
     assert.equal(body, sse(CREATED, INVALID));
     assert.equal(STREAM_FAILURE_CODES.has('invalid_prompt'), false);
@@ -178,12 +258,12 @@ test('a request-fault failure is relayed without a hop', async () => {
 // The decoy instructions in every envelope above spell a failure event out in
 // full. A peek that matched text would hop here; one that parses events does
 // not, because the decoy is a string inside a `response.created`.
-test('failure-shaped text inside the echoed instructions does not trigger a hop', async () => {
-  await withFleet(['one', 'two'], (acct, res) => {
+test('failure-shaped text inside the echoed instructions does not trigger a hop', async (t) => {
+  await withFleet(t, ['one', 'two'], (acct, res) => {
     sseHead(res);
     res.end(sse(CREATED, IN_PROGRESS, DELTA, COMPLETED));
-  }, async ({ proxyPort, seen }) => {
-    const { body } = await codexPost(proxyPort);
+  }, async ({ proxyPort, seen, ended }) => {
+    const { body } = await codexPost(proxyPort, ended);
     assert.equal(seen.length, 1);
     assert.match(body, /server_is_overloaded/, 'the decoy is still in the body the client reads');
     assert.equal(body, sse(CREATED, IN_PROGRESS, DELTA, COMPLETED));
@@ -195,18 +275,26 @@ test('failure-shaped text inside the echoed instructions does not trigger a hop'
 // (e) A slow first token is not a failure. The hold expires, the headers go
 // out, and the bytes the peek held are replayed ahead of the rest of the same
 // stream, so the body is unbroken and no sibling is spent.
-test('a slow first token releases the stream at the hold and the body is unbroken', async () => {
-  await withFleet(['one', 'two'], async (acct, res) => {
+//
+// "Slow" is a gate, not a timer: the upstream sends its two envelopes and then
+// nothing until the client has the response's headers. Those envelopes decide
+// nothing and are far under the byte budget, so the hold running out is the
+// only thing that can send the headers while the upstream is silent; a peek
+// that waited for the first token instead would wait on an upstream that is
+// waiting on it, and the test would end on the runner's timeout.
+test('a slow first token releases the stream at the hold and the body is unbroken', async (t) => {
+  shortHold(t);
+  const released = gate(t.signal);
+  await withFleet(t, ['one', 'two'], async (acct, res) => {
     sseHead(res);
     res.write(sse(CREATED, IN_PROGRESS));
-    await sleep(HOLD_MS * 3);
+    await released.opened;
     res.end(sse(DELTA, COMPLETED));
-  }, async ({ proxyPort, seen }) => {
-    const { status, body, headersAfterMs } = await codexPost(proxyPort);
+  }, async ({ proxyPort, seen, ended }) => {
+    const { status, body } = await codexPost(proxyPort, ended, { signal: t.signal, onHeaders: released.open });
     assert.equal(status, 200);
     assert.equal(seen.length, 1, 'a stream that is merely slow spent no sibling');
     assert.equal(body, sse(CREATED, IN_PROGRESS, DELTA, COMPLETED), 'the held bytes were replayed ahead of the rest');
-    assert.ok(headersAfterMs < HOLD_MS * 3, `headers were held for ${headersAfterMs}ms, past the ${HOLD_MS}ms hold`);
   });
 });
 
@@ -234,17 +322,27 @@ test('a chunk that lands just after the deadline still appears in the replayed b
 });
 
 // The same thing through the proxy: the first chunk after the hold reaches
-// the client, in order, and the stream is still relayed on one account.
-test('bytes arriving right after the hold reach the client in order', async () => {
-  await withFleet(['one', 'two'], async (acct, res) => {
+// the client, in order, and the stream is still relayed on one account. The
+// upstream sends that chunk once the client has the headers, which is after
+// the hold ran out with a read still pending, and the last one once the client
+// has read the delta, so the three arrive as three chunks.
+test('bytes arriving right after the hold reach the client in order', async (t) => {
+  shortHold(t);
+  const released = gate(t.signal);
+  const deltaRead = gate(t.signal);
+  await withFleet(t, ['one', 'two'], async (acct, res) => {
     sseHead(res);
     res.write(sse(CREATED));
-    await sleep(HOLD_MS + 20);
+    await released.opened;
     res.write(sse(DELTA));
-    await sleep(20);
+    await deltaRead.opened;
     res.end(sse(COMPLETED));
-  }, async ({ proxyPort, seen }) => {
-    const { body } = await codexPost(proxyPort);
+  }, async ({ proxyPort, seen, ended }) => {
+    const { body } = await codexPost(proxyPort, ended, {
+      signal: t.signal,
+      onHeaders: released.open,
+      onBody: (soFar) => { if (soFar.endsWith(sse(DELTA))) deltaRead.open(); },
+    });
     assert.equal(seen.length, 1);
     assert.equal(body, sse(CREATED, DELTA, COMPLETED));
   });
@@ -252,17 +350,26 @@ test('bytes arriving right after the hold reach the client in order', async () =
 
 // The byte budget is the other bound: an envelope bigger than it is released
 // as-is, whatever follows. A refusal that arrives after the budget is then a
-// relayed stream, which is the cost of not holding an unbounded head.
-test('a stream past the byte budget is released untouched', async () => {
+// relayed stream, which is the cost of not holding an unbounded head. The
+// refusal is sent once the client has the headers: the hold is not what sent
+// them (it outlasts the test), so the budget did, and the refusal is a chunk
+// the peek never read.
+test('a stream past the byte budget is released untouched', async (t) => {
   process.env.TEAMCLAUDE_STREAM_PEEK_BUDGET_BYTES = '64';
+  // Through t.after as well: on Node 24 and later a test that fails on its
+  // timeout is not unwound, so after a wait below that never settled the
+  // finally would not run, and every later test in the file would peek on 64
+  // bytes.
+  t.after(() => { delete process.env.TEAMCLAUDE_STREAM_PEEK_BUDGET_BYTES; });
   try {
-    await withFleet(['one', 'two'], async (acct, res) => {
+    const released = gate(t.signal);
+    await withFleet(t, ['one', 'two'], async (acct, res) => {
       sseHead(res);
       res.write(sse(CREATED));   // well over 64 bytes on its own
-      await sleep(30);
+      await released.opened;
       res.end(sse(OVERLOADED, FAILED));
-    }, async ({ proxyPort, seen }) => {
-      const { body } = await codexPost(proxyPort);
+    }, async ({ proxyPort, seen, ended }) => {
+      const { body } = await codexPost(proxyPort, ended, { signal: t.signal, onHeaders: released.open });
       assert.equal(seen.length, 1, 'past the budget the peek judges nothing');
       assert.equal(body, sse(CREATED, OVERLOADED, FAILED));
     });
@@ -276,12 +383,12 @@ test('a stream past the byte budget is released untouched', async () => {
 // (g) The relay reads the replayed stream, and the usage parser rides the relay
 // (#433). A turn that went through a released peek must still book its tokens
 // on the account that served it.
-test('a Responses stream still books its usage through the replay', async () => {
-  await withFleet(['one', 'two'], (acct, res) => {
+test('a Responses stream still books its usage through the replay', async (t) => {
+  await withFleet(t, ['one', 'two'], (acct, res) => {
     sseHead(res);
     res.end(sse(CREATED, IN_PROGRESS, DELTA, COMPLETED));
-  }, async ({ am, proxyPort, seen }) => {
-    await codexPost(proxyPort);
+  }, async ({ am, proxyPort, seen, ended }) => {
+    await codexPost(proxyPort, ended);
     assert.equal(seen.length, 1);
     const u = byName(am, seen[0]).usage;
     assert.equal(u.totalInputTokens, FRESH, 'the uncached input side was not booked');
@@ -293,13 +400,13 @@ test('a Responses stream still books its usage through the replay', async () => 
 
 // After a hop, the turn belongs to the sibling that served it, and the account
 // that refused booked nothing: its stream carried no usage and was never relayed.
-test('after a hop the usage lands on the sibling that served the turn', async () => {
-  await withFleet(['one', 'two'], (acct, res, seen) => {
+test('after a hop the usage lands on the sibling that served the turn', async (t) => {
+  await withFleet(t, ['one', 'two'], (acct, res, seen) => {
     sseHead(res);
     if (acct === seen[0]) return res.end(sse(CREATED, OVERLOADED, FAILED));
     res.end(sse(CREATED, DELTA, COMPLETED));
-  }, async ({ am, proxyPort, seen }) => {
-    await codexPost(proxyPort);
+  }, async ({ am, proxyPort, seen, ended }) => {
+    await codexPost(proxyPort, ended);
     assert.equal(seen.length, 2);
     const refused = byName(am, seen[0]).usage;
     const served = byName(am, seen[1]).usage;
@@ -318,8 +425,8 @@ const MESSAGE_START = { type: 'message_start', message: { id: 'msg_1', type: 'me
 const TEXT_DELTA = { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'hi' } };
 const MESSAGE_STOP = { type: 'message_stop' };
 
-test('an Anthropic stream starting with message_start is relayed with no added hop', async () => {
-  await withFleet(['one', 'two'], (acct, res) => {
+test('an Anthropic stream starting with message_start is relayed with no added hop', async (t) => {
+  await withFleet(t, ['one', 'two'], (acct, res) => {
     sseHead(res);
     res.end(sse(MESSAGE_START, TEXT_DELTA, MESSAGE_STOP));
   }, async ({ proxyPort, seen }) => {
@@ -336,9 +443,9 @@ test('an Anthropic stream starting with message_start is relayed with no added h
 
 // Anthropic can report a 529 inside a stream that already opened, as an `error`
 // event whose `error.type` is `overloaded_error`. Same hop.
-test('an Anthropic overloaded_error as the first event hops once', async () => {
+test('an Anthropic overloaded_error as the first event hops once', async (t) => {
   const OVERLOADED_ERROR = { type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } };
-  await withFleet(['one', 'two'], (acct, res, seen) => {
+  await withFleet(t, ['one', 'two'], (acct, res, seen) => {
     sseHead(res);
     if (acct === seen[0]) return res.end(sse(OVERLOADED_ERROR));
     res.end(sse(MESSAGE_START, TEXT_DELTA, MESSAGE_STOP));
@@ -354,21 +461,231 @@ test('an Anthropic overloaded_error as the first event hops once', async () => {
   }, { provider: 'anthropic' });
 });
 
+// The hop detours this one request, as the 429 and 5xx hops do
+// (hop-keeps-cursor.test.js): the fleet stays on the account it was on, and the
+// next request starts there.
+test('a stream-failure hop leaves the cursor where it was', async (t) => {
+  const OVERLOADED_ERROR = { type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } };
+  let refused = false;
+  await withFleet(t, ['one', 'two'], (acct, res) => {
+    sseHead(res);
+    if (acct === 'one' && !refused) { refused = true; return res.end(sse(OVERLOADED_ERROR)); }
+    res.end(sse(MESSAGE_START, TEXT_DELTA, MESSAGE_STOP));
+  }, async ({ proxyPort, seen }) => {
+    const send = async () => {
+      const res = await fetch(`http://127.0.0.1:${proxyPort}/v1/messages`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'claude-x', messages: [], stream: true }),
+      });
+      await res.text();
+      return res.status;
+    };
+    assert.equal(await send(), 200);
+    assert.deepEqual(seen, ['one', 'two']);
+    assert.equal(await send(), 200);
+    assert.equal(seen[2], 'one', 'the hop moved the fleet onto the account it detoured to');
+  }, { provider: 'anthropic' });
+});
+
+// The same as the 5xx hop (hop-keeps-cursor.test.js): the hop's account is
+// removed before the attempt it names, here at the hop's own log line, in the
+// field while the stream's first events are read. Held by index, the hop went
+// to the disabled account that slid into its place (removed while the events
+// were read, it read -1, and the client was told every account was at its
+// quota). Picked again, four serves.
+test('a stream-failure hop whose account is removed is picked again, and the cursor stays', async (t) => {
+  const OVERLOADED_ERROR = { type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } };
+  await withFleet(t, ['one', 'two', 'three', 'four'], (acct, res) => {
+    sseHead(res);
+    if (acct === 'one') return res.end(sse(OVERLOADED_ERROR));
+    res.end(sse(MESSAGE_START, TEXT_DELTA, MESSAGE_STOP));
+  }, async ({ am, proxyPort, seen }) => {
+    am.accounts[2].disabled = true;
+    t.mock.method(console, 'log', (...args) => {
+      if (/failing over once to "claude:two"/.test(String(args[0]))) am.removeAccount(am.accounts.indexOf(byName(am, 'two')));
+    });
+    const res = await fetch(`http://127.0.0.1:${proxyPort}/v1/messages`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'claude-x', messages: [], stream: true }),
+    });
+    const body = await res.text();
+    assert.equal(res.status, 200);
+    assert.deepEqual(seen, ['one', 'four']);
+    assert.equal(body, sse(MESSAGE_START, TEXT_DELTA, MESSAGE_STOP));
+    assert.equal(am.accounts[am.currentIndex], byName(am, 'one'), 'the detour moved the fleet');
+  }, { provider: 'anthropic' });
+});
+
 // ---------------------------------------------------------------- headerless
 
 // The ChatGPT backend can answer a Codex stream with no Content-Type at all
 // (#456); the relay reads such a reply as a stream because the request asked
 // for one. The peek keys on the same reading, so an in-band refusal on a
 // headerless stream still hops rather than slipping past as a buffered body.
-test('a headerless Codex stream is peeked on the same rule the relay uses', async () => {
-  await withFleet(['one', 'two'], (acct, res, seen) => {
+test('a headerless Codex stream is peeked on the same rule the relay uses', async (t) => {
+  await withFleet(t, ['one', 'two'], (acct, res, seen) => {
     res.writeHead(200);   // no content-type
     if (acct === seen[0]) return res.end(sse(CREATED, OVERLOADED, FAILED));
     res.end(sse(CREATED, DELTA, COMPLETED));
-  }, async ({ proxyPort, seen }) => {
-    const { status, body } = await codexPost(proxyPort);
+  }, async ({ proxyPort, seen, ended }) => {
+    const { status, body } = await codexPost(proxyPort, ended);
     assert.equal(status, 200);
     assert.equal(seen.length, 2, 'the refusal inside a headerless stream was not seen');
     assert.equal(body, sse(CREATED, DELTA, COMPLETED));
   });
 });
+
+// A pinned request is never moved (docs/routing.md, "Pin a session to one
+// account"): the refusal reaches the client as the pinned account sent it, as
+// for the 5xx and 429 hops (bounded-failover.test.js).
+test('a refusal inside a 200 stream on a pinned request stays on the pinned account', async (t) => {
+  await withFleet(t, ['one', 'two'], (acct, res) => {
+    sseHead(res);
+    if (acct === 'one') return res.end(sse(CREATED, OVERLOADED, FAILED));
+    res.end(sse(CREATED, IN_PROGRESS, DELTA, COMPLETED));
+  }, async ({ proxyPort, seen }) => {
+    const res = await fetch(`http://127.0.0.1:${proxyPort}/tc-acct/${encodeURIComponent('codex:one')}/backend-api/codex/responses`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'session-id': SID },
+      body: JSON.stringify({ model: MODEL, input: [], stream: true }),
+    });
+    const body = await res.text();
+    assert.deepEqual(seen, ['one'], 'only the pinned account is spent');
+    // The whole stream, not a match on the code: CREATED's instructions carry
+    // the same string as a decoy, so a match would pass with the refusal gone.
+    assert.equal(body, sse(CREATED, OVERLOADED, FAILED), 'the pinned account\'s refusal is relayed intact');
+  });
+});
+
+// A stream that reports its own failure is relayed whole but completed
+// nothing, so it is no proof the organization allows OAuth again: the
+// entitlement cooldown stays. Both cases are pinned, so the peek is skipped
+// whatever the fleet size; the fleet of one is the case master already
+// relayed without a hop. The completed stream is the control that the
+// cooldown can still be lifted.
+for (const [names, answer, kept] of [
+  [['one', 'two'], 'refused', true],
+  [['one'], 'refused', true],
+  [['one', 'two'], 'completed', false],
+]) {
+  test(`a pinned stream that ${answer} ${kept ? 'keeps' : 'lifts'} the entitlement cooldown (fleet of ${names.length})`, async (t) => {
+    const OVERLOADED_ERROR = { type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } };
+    await withFleet(t, names, (acct, res) => {
+      sseHead(res);
+      if (acct === 'one' && answer === 'refused') return res.end(sse(OVERLOADED_ERROR));
+      res.end(sse(MESSAGE_START, TEXT_DELTA, MESSAGE_STOP));
+    }, async ({ am, proxyPort, seen, ended }) => {
+      am.markEntitlementDenied(0, { seconds: 600 });
+      const done = ended();
+      const res = await fetch(`http://127.0.0.1:${proxyPort}/tc-acct/${encodeURIComponent('claude:one')}/v1/messages`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'claude-x', messages: [], stream: true }),
+      });
+      assert.equal(res.status, 200);
+      await res.text();
+      await done;
+      assert.deepEqual(seen, ['one'], 'only the pinned account is spent');
+      if (kept) assert.ok(am.accounts[0].entitlementDeniedUntil > Date.now(), 'a refused stream left the cooldown in place');
+      else assert.equal(am.accounts[0].entitlementDeniedUntil, null, 'a completed stream lifted the cooldown');
+    }, { provider: 'anthropic' });
+  });
+}
+
+// The rule the relay applies, shape by shape: any failure the stream reports
+// (not only the codes worth a hop), wherever it arrives, in either dialect,
+// with or without a code - and for the model denial as for the entitlement
+// one. Each runs pinned, so the stream reaches the relay as sent.
+async function pinnedStream(t, provider, events, prep, check) {
+  await withFleet(t, ['one', 'two'], (acct, res) => {
+    sseHead(res);
+    res.end(sse(...events));
+  }, async ({ am, proxyPort, ended }) => {
+    prep(am);
+    const done = ended();
+    const codex = provider === 'codex';
+    const path = codex ? '/backend-api/codex/responses' : '/v1/messages';
+    const res = await fetch(`http://127.0.0.1:${proxyPort}/tc-acct/${encodeURIComponent(`${codex ? 'codex' : 'claude'}:one`)}${path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', [codex ? 'session-id' : 'x-claude-code-session-id']: SID },
+      body: JSON.stringify(codex ? { model: MODEL, input: [], stream: true } : { model: 'claude-x', messages: [], stream: true }),
+    });
+    assert.equal(res.status, 200);
+    await res.text();
+    await done;
+    check(am);
+  }, { provider: provider === 'codex' ? 'codex' : 'anthropic' });
+}
+const liveCooldown = (am) => am.markEntitlementDenied(0, { seconds: 600 });
+const cooldownKept = (am) => assert.ok(am.accounts[0].entitlementDeniedUntil > Date.now(), 'a refused stream left the cooldown in place');
+// A model denial whose cooldown has run out keeps its record - and with it the
+// next cooldown's length - until a completion forgets it.
+const expiredModelDenial = (am) => { am.markModelDenied(0, MODEL); am.accounts[0].modelDenials.get(MODEL).until = Date.now() - 1; };
+const ANTHROPIC_INVALID = { type: 'error', error: { type: 'invalid_request_error', message: 'bad' } };
+const BARE_ERROR = { type: 'error' };
+
+for (const [what, provider, events] of [
+  ['a refusal after output', 'anthropic', [MESSAGE_START, TEXT_DELTA, { type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } }]],
+  ['a request-fault error, not worth a hop', 'anthropic', [ANTHROPIC_INVALID]],
+  ['a code-less error event', 'anthropic', [BARE_ERROR]],
+  ['a Responses response.failed with no error event', 'codex', [CREATED, INVALID]],
+]) {
+  test(`${what} keeps the entitlement cooldown`, (t) => pinnedStream(t, provider, events, liveCooldown, cooldownKept));
+}
+
+test('a refused stream keeps an expired model denial\'s record', (t) =>
+  pinnedStream(t, 'codex', [CREATED, INVALID], expiredModelDenial, (am) => assert.ok(am.modelDenial(am.accounts[0], MODEL), 'the model denial was forgotten')));
+
+test('a completed stream forgets an expired model denial (control)', (t) =>
+  pinnedStream(t, 'codex', [CREATED, DELTA, COMPLETED], expiredModelDenial, (am) => assert.equal(am.modelDenial(am.accounts[0], MODEL), null)));
+
+// Unpinned, with no sibling to hop to: the refused stream reaches the relay
+// too. A live cooldown keeps such a request off the account, but one that has
+// run out keeps its escalation count, so the next denial is not the shortest.
+// Both kinds of refusal: an overload is also not delivered (below), so only
+// the request fault depends on the failure check alone.
+for (const [what, refusal] of [
+  ['an overload', { type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } }],
+  ['a request fault', ANTHROPIC_INVALID],
+]) {
+  test(`an unpinned stream refused with ${what} keeps an expired cooldown's escalation count`, async (t) => {
+    await withFleet(t, ['one'], (acct, res) => {
+      sseHead(res);
+      res.end(sse(refusal));
+    }, async ({ am, proxyPort, seen, ended }) => {
+      am.markEntitlementDenied(0, { seconds: 600 });
+      am.accounts[0].entitlementDeniedUntil = Date.now() - 1;
+      const done = ended();
+      const res = await fetch(`http://127.0.0.1:${proxyPort}/v1/messages`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'claude-x', messages: [], stream: true }),
+      });
+      await res.text();
+      await done;
+      assert.deepEqual(seen, ['one']);
+      assert.equal(am.accounts[0].entitlementDenial?.count, 1, 'the refused stream reset the escalation count');
+    }, { provider: 'anthropic' });
+  });
+}
+
+// The session tracker's verdict: a provider-side failure inside a 200 is the
+// 5xx or 429 it would have been as a status - nothing came back - while a
+// request fault is an answer, as a 4xx is. Both dialects: Anthropic reports
+// `overloaded_error`, `api_error` and `rate_limit_error` in-band too.
+const anthropicError = (type) => ({ type: 'error', error: { type, message: type } });
+for (const [what, provider, events, usable] of [
+  ['an in-band overload', 'codex', [CREATED, OVERLOADED, FAILED], false],
+  ['an in-band request fault', 'codex', [CREATED, INVALID], true],
+  ['a completed stream', 'codex', [CREATED, DELTA, COMPLETED], true],
+  ['an Anthropic in-band overload', 'anthropic', [MESSAGE_START, anthropicError('overloaded_error')], false],
+  ['an Anthropic in-band api_error', 'anthropic', [MESSAGE_START, anthropicError('api_error')], false],
+  ['an Anthropic in-band rate_limit_error', 'anthropic', [MESSAGE_START, anthropicError('rate_limit_error')], false],
+  ['an Anthropic in-band request fault', 'anthropic', [MESSAGE_START, anthropicError('invalid_request_error')], true],
+]) {
+  test(`a pinned stream with ${what} ends its session as ${usable ? 'usable' : 'nothing back'}`, (t) => {
+    const outcomes = [];
+    return pinnedStream(t, provider, events, (am) => {
+      const end = am.endSession.bind(am);
+      am.endSession = (key, ok) => { outcomes.push(ok); return end(key, ok); };
+    }, () => assert.deepEqual(outcomes, [usable]));
+  });
+}

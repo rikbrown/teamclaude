@@ -102,3 +102,78 @@ test('the hold lifts once the Retry-After has passed, and a success clears it', 
   assert.strictEqual(calls, 2);
   assert.strictEqual(m.accounts[0].credential, 'at-new');
 });
+
+// The Retry-After is upstream's number, and the hold above takes it as-is: one
+// header of 99999999999 held an account's refreshes for about 3,169 years, past
+// a re-login and a re-enable, until a restart. Taken at most as an hour.
+
+test('parseRetryAfterMs takes an absurd Retry-After as an hour, in seconds or as a date', () => {
+  const now = Date.parse('2026-10-13T00:00:00Z');
+  assert.strictEqual(parseRetryAfterMs('3599', now), 3_599_000, 'under the ceiling: as sent');
+  assert.strictEqual(parseRetryAfterMs('3600', now), 3600_000, 'at the ceiling: as sent');
+  for (const v of ['3601', '99999999999', '9'.repeat(400), 'Tue, 13 Oct 2026 01:00:01 GMT', 'Fri, 31 Dec 9999 23:59:59 GMT']) {
+    assert.strictEqual(parseRetryAfterMs(v, now), 3600_000, v.slice(0, 32));
+  }
+});
+
+test('an absurd Retry-After from the token endpoint holds the refreshes for an hour, not for millennia', async () => {
+  for (const header of ['99999999999', 'Fri, 31 Dec 9999 23:59:59 GMT']) {
+    const { srv, endpoint, hits } = await tokenServer(429, { 'retry-after': header });
+    try {
+      const m = mgr((rt, _endpoint, routing, opts) => refreshAccessToken(rt, endpoint, routing, opts));
+      await m.ensureTokenFresh(0);
+      const held = m.accounts[0]._refreshHeldUntil - Date.now();
+      assert.ok(held > 0 && held <= 3600_000, `${header} -> held ${held} ms`);
+      await m.ensureTokenFresh(0, true);
+      assert.strictEqual(hits(), 1, 'held for that hour');
+    } finally {
+      srv.close();
+    }
+  }
+});
+
+test('a Retry-After too long for a Date does not throw out of ensureTokenFresh', async () => {
+  // Past about 8.6 trillion seconds the hold is past the last moment a Date can
+  // name, and the log line that prints it threw a RangeError out of the refresh.
+  const { srv, endpoint } = await tokenServer(429, { 'retry-after': '9999999999999' });
+  try {
+    const m = mgr((rt, _endpoint, routing, opts) => refreshAccessToken(rt, endpoint, routing, opts));
+    await assert.doesNotReject(m.ensureTokenFresh(0));
+    assert.ok(Number.isFinite(new Date(m.accounts[0]._refreshHeldUntil).getTime()));
+  } finally {
+    srv.close();
+  }
+});
+
+// A kept 400/401/403 (a page in front of the endpoint, not its refusal) holds
+// only the refresh token it was sent with. A 429 that follows holds them all,
+// whatever token the hold before it was about.
+test('a 429 after a kept 4xx holds every refresh token, not just the one the 4xx held', async () => {
+  const sent = [];
+  const m = mgr(async (rt) => {
+    sent.push(rt);
+    if (rt === 'rt-a') throw Object.assign(new Error('Token refresh failed (403): <html>Access denied</html>'), { status: 403, grantRefused: false });
+    throw rateLimited(undefined);
+  });
+  await m.ensureTokenFresh(0);
+  m.updateAccountTokens(0, { accessToken: 'at-new', refreshToken: 'rt-new', expiresAt: Date.now() - 1000 });
+  await m.ensureTokenFresh(0);
+  assert.deepStrictEqual(sent, ['rt-a', 'rt-new'], 'the kept 4xx did not hold the new token');
+  await m.ensureTokenFresh(0, true);
+  m.updateAccountTokens(0, { accessToken: 'at-newer', refreshToken: 'rt-newer', expiresAt: Date.now() - 1000 });
+  await m.ensureTokenFresh(0);
+  assert.deepStrictEqual(sent, ['rt-a', 'rt-new'], 'the 429 holds the token it was sent with and the one after it');
+});
+
+// A hold that has lapsed is armed again by the next 429, as the first one was.
+test('a 429 after a lapsed 429 hold holds the refreshes again', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-15T00:00:00Z') });
+  let calls = 0;
+  const m = mgr(async () => { calls++; throw rateLimited(undefined); });
+  await m.ensureTokenFresh(0);
+  t.mock.timers.tick(30_000);
+  await m.ensureTokenFresh(0);
+  await m.ensureTokenFresh(0);
+  await m.ensureTokenFresh(0, true);
+  assert.strictEqual(calls, 2, 'asked once when the first hold lapsed, then held again');
+});

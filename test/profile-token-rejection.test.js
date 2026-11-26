@@ -193,6 +193,27 @@ test('a refresh that merely failed leaves the credential unreachable, not refuse
   assert.equal(saved, creds, 'nothing was renewed, so nothing changes');
 });
 
+// The token endpoint's answer decides, as in the account manager (oauth.js
+// isRefreshRejection): a page from something in front of it says nothing about
+// the refresh token, so the credential is unreachable, not refused, and --name
+// still gets it in. An empty 401 there is carried as no status, since
+// isTokenRejection reads a 401 as the upstream's verdict.
+test('a refresh answered by a page in front of the token endpoint leaves the credential unreachable, importable by name', async () => {
+  for (const [status, body] of [[403, '<html><body>Access denied</body></html>'], [401, '']]) {
+    const page = () => ({ ok: false, status, json: async () => { throw new SyntaxError('not JSON'); }, text: async () => body });
+    const up = upstream({ refresh: page });
+    const creds = { accessToken: 'stale-at', refreshToken: 'maybe-good-rt', expiresAt: Date.now() - 60_000 };
+    const { creds: saved, profile } = await withFetch(up.fetch, () => profileForCredentials(creds));
+    assert.deepEqual(up.refreshes().map(b => b.refresh_token), ['maybe-good-rt'], String(status));
+    assert.match(profile.error, new RegExp(`token refresh failed.*\\(${status}\\)`), String(status));
+    assert.equal(profile.status, status === 401 ? null : status, String(status));
+    assert.equal(isTokenRejection(profile), false, String(status));
+    assert.equal(canUpsertOAuthAccount(profile, true), true, `--name gets it in: ${status}`);
+    assert.equal(canUpsertOAuthAccount(profile, false), false, `an unnamed import still needs an identity: ${status}`);
+    assert.equal(saved, creds, String(status));
+  }
+});
+
 test('a 403 is not refreshed and not refused', async () => {
   const up = upstream({
     profiles: { 'good-at': () => reply(403, { error: { message: 'Request not allowed' } }) },
@@ -218,6 +239,27 @@ test('the renewal an import needs goes through the renew the caller hands in', a
   assert.deepEqual(up.refreshes(), [], 'the token endpoint was not called directly');
   assert.equal(saved.accessToken, 'at-new');
   assert.equal(profile.error, undefined);
+});
+
+// The renewal an import makes is a rotation of the token it came with: the
+// refresh token's date stays, unless the response states an earlier one. A
+// renewal that brings no date (a token another install stored, say) is another
+// family, and the date the import came with is not copied onto it (#674).
+test('an import renewed first keeps the date its refresh token came with; a renewal that brings none keeps none', async () => {
+  const held = Date.now() + 6 * 86_400_000;
+  const up = upstream({
+    profiles: { 'new-at': identified },
+    refresh: () => reply(200, { access_token: 'new-at', refresh_token: 'new-rt', expires_in: 3600 }),
+  });
+  const creds = { accessToken: 'old-at', refreshToken: 'old-rt', expiresAt: Date.now() - 60_000, refreshTokenExpiresAt: held };
+  const { creds: rotated } = await withFetch(up.fetch, () => profileForCredentials(creds));
+  assert.equal(rotated.refreshToken, 'new-rt');
+  assert.equal(rotated.refreshTokenExpiresAt, held);
+
+  const renew = async () => ({ accessToken: 'new-at', refreshToken: 'their-rt', expiresAt: Date.now() + 3600_000 });
+  const { creds: theirs } = await withFetch(upstream({ profiles: { 'new-at': identified } }).fetch, () => profileForCredentials(creds, null, { renew }));
+  assert.equal(theirs.refreshToken, 'their-rt');
+  assert.equal('refreshTokenExpiresAt' in theirs, false);
 });
 
 // Under a lock that lapses, the grant may not go out once its time is spent.

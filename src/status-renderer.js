@@ -5,6 +5,8 @@ import { isRefused } from './account-refusal.js';
 import { ROUTE_COLORS } from './config-ops.js';
 import { describeRouting } from './account-routing.js';
 import { formatSteerLeft } from './steer.js';
+import { describeEndsAt } from './ends-at.js';
+import { accountRefreshTokenExpiry, loginCommandFor } from './refresh-token-expiry.js';
 
 const ESC = '\x1b[';
 const RESET = `${ESC}0m`;
@@ -91,6 +93,8 @@ export function renderStatus(status, { color = process.stdout.isTTY, now = Date.
     if (threshold) lines.push(`  ${threshold}`);
     const egress = egressProxyLine(account, paint);
     if (egress) lines.push(`  ${egress}`);
+    const ends = endsAtLine(account, now, paint);
+    if (ends) lines.push(`  ${ends}`);
     const why = unavailableLine(account, paint);
     if (why) lines.push(`  ${why}`);
     const denied = entitlementLine(account, now, paint);
@@ -99,6 +103,10 @@ export function renderStatus(status, { color = process.stdout.isTTY, now = Date.
     if (unserved) lines.push(`  ${unserved}`);
     const credits = familyRefusalLine(account, now, paint);
     if (credits) lines.push(`  ${credits}`);
+    const login = loginExpiryLine(account, paint, now);
+    if (login) lines.push(`  ${login}`);
+    const token = longLivedLine(account, paint);
+    if (token) lines.push(`  ${token}`);
     const plan = subscriptionLostLine(account, paint, now);
     if (plan) lines.push(`  ${plan}`);
     const spend = spendLine(account, paint);
@@ -110,6 +118,8 @@ export function renderStatus(status, { color = process.stdout.isTTY, now = Date.
     }
     const resetCredits = resetCreditLine(account, paint, now);
     if (resetCredits) lines.push(`  ${resetCredits}`);
+    const redeem = autoRedeemLine(account, paint);
+    if (redeem) lines.push(`  ${redeem}`);
     const outside = outsideSpendText(account.quota?.outsideSpend);
     if (outside) lines.push(`  ${paint.dim('Outside'.padEnd(8))} ${outside}`);
     const forecast = forecastText(account.quota?.forecast, now);
@@ -487,19 +497,50 @@ export function showWeeklyRow(quota) {
  */
 export function resetCreditLine(account, paint, now = Date.now()) {
   const credits = account?.quota?.resetCredits;
-  const available = heldResetCredits(account?.quota, now);
-  if (!available) return null;
-  const fable = heldFableResets(account?.quota, now);
-  const general = available - fable;
+  const { general, fable, generalExpiresAt, fableExpiresAt } = heldResetKinds(account?.quota, now);
+  if (!general && !fable) return null;
+  // Both kinds held on different dates: each is dated in place, since they can
+  // lapse months apart. Otherwise the one date goes with the notes.
+  const both = general > 0 && fable > 0 && generalExpiresAt !== fableExpiresAt;
+  const dated = (/** @type {string} */ text, /** @type {number|null} */ at) => (both && at != null ? `${text} (expires ${formatDuration(at - now)})` : text);
   const held = [];
-  if (general) held.push(`${general} free rate-limit reset ${general === 1 ? 'credit' : 'credits'}`);
-  if (fable) held.push(`${fable} Fable ${fable === 1 ? 'reset' : 'resets'}`);
+  if (general) held.push(dated(`${general} free rate-limit reset ${general === 1 ? 'credit' : 'credits'}`, generalExpiresAt));
+  if (fable) held.push(dated(`${fable} Fable ${fable === 1 ? 'reset' : 'resets'}`, fableExpiresAt));
   const notes = [];
   if (credits.applicable === 0) notes.push('none applicable to a window right now');
-  if (Number.isFinite(credits.expiresAt)) notes.push(`expires ${formatDuration(credits.expiresAt - now)}`);
+  const soleExpiry = both ? null : (general ? generalExpiresAt : fableExpiresAt);
+  if (soleExpiry != null) notes.push(`expires ${formatDuration(soleExpiry - now)}`);
   if (Number.isFinite(credits.seenAt)) notes.push(`as of ${formatAgo(Math.min(credits.seenAt, now), now)}`);
   const note = notes.length ? ` — ${notes.join(', ')}` : '';
   return `${paint.dim('Reset'.padEnd(8))} ${paint.cyan(held.join(', '))}${paint.gray(note)}`;
+}
+
+/**
+ * The auto-redeem policy's standing on this account: whether the automatic
+ * policy may spend one of its reset credits, why not when it may not, and what
+ * a credit spent now would buy (a Codex reset restarts the 7-day timer, so a
+ * credit is worth the days left to the natural reset over seven).
+ *
+ * Drawn only where the payload carries the block — Codex rows from a server
+ * that computes it — so an older server, or a Claude row, prints nothing.
+ *
+ * @param {Record<string, any>|null|undefined} account  a row of the status payload
+ * @param {ReturnType<typeof colors>} paint
+ */
+export function autoRedeemLine(account, paint) {
+  const view = account?.autoRedeem;
+  if (!view || typeof view !== 'object') return null;
+  // The weeks and the days as the server states them, each to the step below
+  // from one reading (codex-reset-policy.js), so they cannot disagree on one
+  // line; worked back from the weeks only for a server older than the field.
+  const days = Number.isFinite(view.daysToReset) ? view.daysToReset : view.creditValueWeeks * 7;
+  const value = Number.isFinite(view.creditValueWeeks)
+    ? `credit worth ${view.creditValueWeeks.toFixed(2)} of a week (${days.toFixed(1)}d to reset)`
+    : 'credit value unknown (no reset time)';
+  const state = view.armed
+    ? paint.green('armed')
+    : `${paint.yellow('exempt')}${view.exemptReason ? paint.gray(` — ${safeLine(view.exemptReason, 160)}`) : ''}`;
+  return `${paint.dim('Redeem'.padEnd(8))} ${state}${paint.gray(`, ${value}`)}`;
 }
 
 // How long a reset-credit reading is worth showing. Nothing refreshes the count
@@ -511,8 +552,8 @@ export const RESET_CREDIT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
  * How many reset credits to REPORT for this quota: the held count while the
- * reading is fresh, 0 once it is older than RESET_CREDIT_MAX_AGE_MS, past its
- * stated `expiresAt`, or states no positive count. One rule for the status screen and the TUI row, so the two
+ * reading is fresh, 0 once it is older than RESET_CREDIT_MAX_AGE_MS or states
+ * no positive count, less any kind past its own stated expiry (heldResetKinds). One rule for the status screen and the TUI row, so the two
  * cannot disagree about whether a credit is there (the dashboard page applies
  * the same cut-off in its own serialized helper).
  *
@@ -524,13 +565,43 @@ export const RESET_CREDIT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
  * @returns {number}
  */
 export function heldResetCredits(quota, now = Date.now()) {
+  const { general, fable } = heldResetKinds(quota, now);
+  return general + fable;
+}
+
+/**
+ * The reported resets by kind, each with when it lapses: `general` (every
+ * Codex credit, and a Claude reset that clears the shared windows) and `fable`
+ * (see bankedResets in oauth.js). Both are 0 for a reading heldResetCredits
+ * would not report, and a kind past its own expiry is 0 while the other stands.
+ *
+ * A reading without `fableExpiresAt` (Codex, or one stored before the kinds
+ * were dated apart) has one `expiresAt` for everything it holds.
+ *
+ * @param {Record<string, any>|null|undefined} quota
+ * @param {number} [now]
+ * @returns {{general: number, fable: number, generalExpiresAt: number|null, fableExpiresAt: number|null}}
+ */
+export function heldResetKinds(quota, now = Date.now()) {
+  const none = { general: 0, fable: 0, generalExpiresAt: null, fableExpiresAt: null };
   const credits = quota?.resetCredits;
   const available = credits?.available;
-  if (!Number.isFinite(available) || available <= 0) return 0;
-  if (Number.isFinite(credits.seenAt) && now - credits.seenAt > RESET_CREDIT_MAX_AGE_MS) return 0;
+  if (!Number.isFinite(available) || available <= 0) return none;
+  if (Number.isFinite(credits.seenAt) && now - credits.seenAt > RESET_CREDIT_MAX_AGE_MS) return none;
+  const at = (/** @type {unknown} */ v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+  const generalExpiresAt = at(credits.expiresAt);
+  const fableExpiresAt = 'fableExpiresAt' in credits ? at(credits.fableExpiresAt) : generalExpiresAt;
+  let fable = Number.isFinite(credits.fable) && credits.fable > 0 ? Math.min(credits.fable, available) : 0;
+  let general = available - fable;
   // A grant past its stated expiry is gone whatever the last reading said.
-  if (Number.isFinite(credits.expiresAt) && credits.expiresAt <= now) return 0;
-  return available;
+  if (generalExpiresAt != null && generalExpiresAt <= now) general = 0;
+  if (fableExpiresAt != null && fableExpiresAt <= now) fable = 0;
+  return {
+    general,
+    fable,
+    generalExpiresAt: general ? generalExpiresAt : null,
+    fableExpiresAt: fable ? fableExpiresAt : null,
+  };
 }
 
 // Upstream refused the account itself: its words, and its link when the
@@ -562,9 +633,7 @@ function lastGoodRefresh(account, err) {
  * @param {number} [now]
  */
 export function heldFableResets(quota, now = Date.now()) {
-  const fable = quota?.resetCredits?.fable;
-  if (!Number.isFinite(fable) || fable <= 0) return 0;
-  return Math.min(fable, heldResetCredits(quota, now));
+  return heldResetKinds(quota, now).fable;
 }
 
 export function unavailableLine(account, paint) {
@@ -586,9 +655,59 @@ export function unavailableLine(account, paint) {
   // any other, yet is taking traffic and billing for it. Say so on the line
   // that would otherwise tell the operator it is idle.
   if (account.onExtraUsage) {
+    // With `preferExtraUsage` the account is past its threshold by the
+    // operator's own choice, so while it can still serve that way the line
+    // says what it is doing and not that it is blocked. Without the key the
+    // line is the one it always was.
+    if (account.preferExtraUsage === true && account.fallbackTier) {
+      return `${paint.dim('Usage'.padEnd(8))} ${paint.red('serving on extra usage (paid overage), billing')}`;
+    }
     return `${paint.dim('Blocked'.padEnd(8))} ${paint.yellow(text)} ${paint.red('\u2014 serving on extra usage (paid overage), billing')}`;
   }
+  // Past its switch threshold, yet the fallback could still serve from it
+  // (AccountManager.fallbackTier). Included quota is known from the buckets.
+  // Paid credits are not: the tier is 'paid' whenever nothing says overage is
+  // off, which includes an account whose usage was never probed, so the line
+  // claims credits only when the spend reading says overage is on upstream.
+  const capacity = account.fallbackTier === 'free' ? 'included quota available past switch threshold'
+    : account.fallbackTier === 'paid' && account.quota?.spend?.enabled === true ? 'subscription usage credits available'
+    : null;
+  if (capacity) {
+    const policy = account.preferExtraUsage === true ? 'extra-usage preference enabled' : 'fallback after normal rotation';
+    return `${paint.dim('Fallback'.padEnd(8))} ${paint.yellow(capacity)} (${policy})`;
+  }
   return `${paint.dim('Blocked'.padEnd(8))} ${paint.yellow(text)}`;
+}
+
+/**
+ * When the account's refresh token lapses and a new sign-in is due — only for
+ * an account with a known date: one its provider or imported credential file
+ * stated (#674), or the 30 days a Claude sign-in that stated none is given; a
+ * row with none gets no line. Yellow, with the command, once
+ * it is within the warning window or past. A long-lived account gets the same
+ * row for the token itself, which lapses a year after its login.
+ * @param {any} account
+ * @param {ReturnType<typeof colors>} paint
+ * @param {number} [now]
+ */
+export function loginExpiryLine(account, paint, now = Date.now()) {
+  const view = accountRefreshTokenExpiry(account, now);
+  if (!view) return null;
+  const label = paint.dim('Login'.padEnd(8));
+  if (!view.warn) return `${label} ${view.text}`;
+  return `${label} ${paint.yellow(view.text)} ${paint.gray(`\u2014 run: ${loginCommandFor(account)}`)}`;
+}
+
+/**
+ * Why a `login --long-lived` account shows less than its neighbours: its token
+ * serves inference only, so no plan, usage read or probe stands behind the
+ * row, and its quota bars stay empty until a response of its own states them.
+ * @param {any} account
+ * @param {ReturnType<typeof colors>} paint
+ */
+export function longLivedLine(account, paint) {
+  if (account?.longLived !== true) return null;
+  return `${paint.dim('Token'.padEnd(8))} long-lived, inference only: plan and usage are not read, quota is taken from response headers`;
 }
 
 // Upstream's refusal outlives its cooldown, so the account reads as denied
@@ -705,6 +824,22 @@ export function egressProxyLine(account, paint) {
   const text = typeof r === 'string' ? r : describeRouting(r);
   if (!text) return null;
   return `${paint.dim('Egress'.padEnd(8))} ${paint.cyan(`via ${text}`)}`;
+}
+
+/**
+ * "Ends     2026-12-01 (in 6 days)" — the end time the operator set for the
+ * account (accounts[].endsAt), or null when it has none. Yellow while it is
+ * ahead, since that is when it moves traffic; gray once passed, when it is
+ * only a record.
+ * @param {any} account
+ * @param {number} now
+ * @param {any} paint
+ */
+export function endsAtLine(account, now, paint) {
+  const endsAt = account?.endsAt;
+  // The payload can come from another process: only a real instant is drawn.
+  if (typeof endsAt !== 'number' || !Number.isFinite(endsAt) || endsAt <= 0) return null;
+  return `${paint.dim('Ends'.padEnd(8))} ${(endsAt > now ? paint.yellow : paint.gray)(describeEndsAt(endsAt, now))}`;
 }
 
 function colors(enabled) {

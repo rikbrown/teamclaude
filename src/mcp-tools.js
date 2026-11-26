@@ -204,9 +204,7 @@ function accountIndexFor({ accountManager }, { account, org }) {
 
 /**
  * Change one account in the running fleet and in its config entry, then save,
- * the way the TUI does. Not a file edit plus reload: a reload applies a
- * disk-side priority or disabled flag to the manager without mirroring it onto
- * the entry the next save is built from.
+ * the way the TUI does.
  * @param {ToolContext} ctx
  * @param {Record<string, any>} args
  * @param {(index: number, entry: Record<string, any>|null, entryIndex: number) => void} mutate
@@ -267,7 +265,7 @@ const WRITE_TOOLS = [
     run: (args, ctx) => {
       const index = accountIndexFor(ctx, args);
       ctx.accountManager.setCurrentAccount(index);
-      return { account: ctx.accountManager.accounts[index].name, ...ctx.accountManager.eligibility(index) };
+      return { account: ctx.accountManager.accounts[index].name, ...ctx.accountManager.eligibility(index, { manualSwitch: true }) };
     },
   },
   {

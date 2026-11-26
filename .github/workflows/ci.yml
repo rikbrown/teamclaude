@@ -16,6 +16,10 @@ jobs:
         # Cover the whole supported range — package.json declares "node >=20".
         node: [20, 22, 24]
     runs-on: ubuntu-latest
+    # The job takes about a minute. A test file that never exits (a server left
+    # open by a test stuck on a wait; see test/README.md) would otherwise hold
+    # the runner for GitHub's six-hour default.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -64,11 +68,13 @@ jobs:
   nix:
     name: nix package
     runs-on: ubuntu-latest
+    # About a minute with a warm cache; the VM test is given room for a cold one.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Nix
-        uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
+        uses: cachix/install-nix-action@bb0495a1086c46893eee56f32fd192dfe4a15bb9 # v32.0.0
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
@@ -87,6 +93,7 @@ jobs:
     needs: [node, nix]
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Check job results
         if: needs.node.result != 'success' || needs.nix.result != 'success'

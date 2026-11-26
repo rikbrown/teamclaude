@@ -122,9 +122,31 @@ export function findUpsertTarget(accounts, incoming) {
     const byUuid = accounts.findIndex(a => a?.accountUuid && sameIdentity(a, incoming));
     if (byUuid >= 0) return byUuid;
   }
-  const byIdentity = accounts.findIndex(a => sameIdentity(a, incoming));
+  // The passes left can fall back to the name, so there only an entry of the
+  // incoming's type can be it. An API-key entry carries no UUID, so
+  // sameIdentity compared names, and a login named after an API-key account
+  // turned that entry into an OAuth one that still held the key. Such a login
+  // is refused instead (apiKeyNamed).
+  const byIdentity = accounts.findIndex(a => a?.type === incoming?.type && sameIdentity(a, incoming));
   if (byIdentity >= 0) return byIdentity;
-  return accounts.findIndex(a => a.name === incoming.name && !distinctAccounts(a, incoming));
+  return accounts.findIndex(a => a?.type === incoming?.type && a.name === incoming.name && !distinctAccounts(a, incoming));
+}
+
+/**
+ * The API-key entry named `name`, or null. A Claude login or import is refused
+ * under the name it was given, or its profile's email, when such an entry
+ * holds it, and nothing is written: the API-key entry is never turned into an
+ * OAuth one (findUpsertTarget), and a second entry under its name could not be
+ * told from it by the commands and routes that go by name (`remove`; `rename`
+ * refuses a name another account holds for the same reason). The " (org)" name
+ * a second organization of one person gets, and a Codex login, are not
+ * checked.
+ * @param {Array<Record<string, any>>} accounts
+ * @param {unknown} name
+ * @returns {Record<string, any>|null}
+ */
+export function apiKeyNamed(accounts, name) {
+  return accounts.find(a => a?.type === 'apikey' && a.name === name) ?? null;
 }
 
 /**
@@ -138,9 +160,53 @@ export function findUpsertTarget(accounts, incoming) {
  * would be dropped instead of persisted. An `incoming` record carrying neither
  * field already leaves both alone; pinning them says so, and keeps saying so if
  * one day it carries them.
+ *
+ * `longLived` describes the incoming token, never the entry, so it is taken from
+ * `incoming` alone. A long-lived login also drops `importFrom`: that file is
+ * read over the saved token on every load.
  */
 export function updateAccountEntry(prev, incoming) {
-  return { ...prev, ...incoming, name: prev.name, id: prev.id };
+  const merged = { ...prev, ...incoming, name: prev.name, id: prev.id };
+  if (incoming.longLived === true) delete merged.importFrom;
+  else delete merged.longLived;
+  return merged;
+}
+
+/**
+ * Where a Codex login is saved, and under what name: `{ index, name }`, with
+ * index -1 for a new row.
+ *
+ * The row is found the way any login's is (findUpsertTarget): by ChatGPT
+ * account id and user id, and by name only where those do not contradict it.
+ * One person's Personal plan and Business workspace sign in with one email, and
+ * an unnamed login is named after it, so matching on the name alone put the
+ * second workspace's tokens on the first one's row.
+ *
+ * An existing row keeps its name: routes and pins refer to it. A new row the
+ * operator did not name is `name` while no Codex row holds it, else
+ * `name (plan)`, else `name (2)`, `name (3)`…, because two rows of one name
+ * cannot be told apart by `remove`, `rename` or a route (`--org` reads only
+ * Claude organizations). A Claude namesake is left alone: one email holding a
+ * Claude and a ChatGPT plan has always been named the email on both.
+ *
+ * @param {Array<Record<string, any>>} accounts
+ * @param {Record<string, any>} incoming - the login's row, named
+ * @param {{ userNamed?: boolean, planType?: string|null }} [opts] - userNamed: the
+ *   name came from --name; planType: the id_token's chatgpt_plan_type
+ * @returns {{ index: number, name: string }}
+ */
+export function codexLoginTarget(accounts, incoming, { userNamed = false, planType = null } = {}) {
+  const index = findUpsertTarget(accounts, incoming);
+  if (index >= 0) return { index, name: accounts[index].name };
+  const { name } = incoming;
+  const taken = new Set(accounts.filter(a => providerOf(a) === 'codex').map(a => a.name));
+  if (userNamed || !taken.has(name)) return { index, name };
+  // The plan is a token claim, and the name is typed back on the command line.
+  const plan = /^[\w-]{1,32}$/.test(planType || '') ? planType : null;
+  if (plan && !taken.has(`${name} (${plan})`)) return { index, name: `${name} (${plan})` };
+  for (let n = 2; ; n++) {
+    if (!taken.has(`${name} (${n})`)) return { index, name: `${name} (${n})` };
+  }
 }
 
 /** The email portion of a display name, stripping any " (org)" suffix. */

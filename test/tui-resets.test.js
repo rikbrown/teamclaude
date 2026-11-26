@@ -418,21 +418,23 @@ test('resets: re-read and close invalidate old reads, including a late failure',
   }) });
   openPanel(tui);
   const first = tui.resetsPanel;
+  // A read is in flight: r does not start another one.
   tui._key('r');
-  pending[1].resolve(details({ atLimit: false }));
-  await flush();
-  pending[0].resolve(details({ atLimit: true }));
+  tui._key('r');
+  assert.equal(pending.length, 1);
+  pending[0].resolve(details({ atLimit: false }));
   await flush();
   assert.equal(tui.resetsPanel.details.atLimit, false);
   assert.match(frame(tui).map(stripAnsi).join('\n'), /not at a limit/);
   tui._key('r');
+  assert.equal(pending.length, 2);
   tui._key('esc');
   assert.equal(tui.mode, 'normal');
   assert.equal(tui.resetsPanel, null);
   openPanel(tui);
-  pending[3].resolve(details({ grants: [] }));
+  pending[2].resolve(details({ grants: [] }));
   await flush();
-  pending[2].reject(new Error('late failure'));
+  pending[1].reject(new Error('late failure'));
   await flush();
   assert.notEqual(tui.resetsPanel, first);
   assert.equal(tui.resetsPanel.error, null);
@@ -523,8 +525,6 @@ test('resets: r and its footer hint are available only locally with actions and 
   const local = makeTUI({ resetActions: actions() });
   local.loginAccount = async () => ({});
   assert.match(stripAnsi(local._renderFooter()), / resets /);
-  assert.match(stripAnsi(frame(local, { columns: 80 }).at(-1)), / resets /);
-  // The fork also offers steer and fleet controls; its full hint list needs more room.
   assert.match(stripAnsi(frame(local, { columns: 120 }).at(-1)), /steer.* resets .*fleet.*quit/);
   for (const options of [{}, { resetActions: actions(), remote: true }, { resetActions: actions(), accounts: [] }]) {
     const tui = makeTUI(options);

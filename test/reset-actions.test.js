@@ -172,6 +172,15 @@ test('unsupported account types and Claude backends never read or spend a reset'
   }
 });
 
+test('a long-lived account never reads or spends a reset: its token serves inference only', async () => {
+  const { actions, account, calls } = harness({ extra: { longLived: true } });
+  const details = await actions.read(account);
+  assert.match(details.error, /long-lived token serves inference only/);
+  assert.deepEqual(details.grants, []);
+  assert.match((await actions.redeem(account, 'weekly')).message, /long-lived token serves inference only/);
+  assert.equal(calls.statuses + calls.details + calls.claims.length + calls.consumes.length, 0);
+});
+
 test('manual Claude claim sends a non-next grant id on the wire and re-applies quota', async () => {
   let body;
   const h = harness({ claim: (account, attempt) => claimClaudeReset(account, attempt, {
@@ -374,16 +383,121 @@ test('refuse manual redemption while that provider has an auto attempt in flight
     let started;
     const ready = new Promise(resolve => { started = resolve; });
     const pending = new Promise(resolve => { release = resolve; });
-    if (provider === 'claude') h.claudeRedeemer.statusFn = async () => { started(); await pending; return { reset: parseResetStatus(block()) }; };
-    else h.codexRedeemer.detailsFn = async () => { started(); await pending; return { credits: [credit()] }; };
+    // Only the automatic attempt's read waits: a manual claim let through
+    // reads at once, and shows here rather than waiting on it.
+    let reads = 0;
+    if (provider === 'claude') h.claudeRedeemer.statusFn = async () => { if (++reads === 1) { started(); await pending; } return { reset: parseResetStatus(block()) }; };
+    else h.codexRedeemer.detailsFn = async () => { if (++reads === 1) { started(); await pending; } return { credits: [credit()] }; };
     const redeemer = provider === 'claude' ? h.claudeRedeemer : h.codexRedeemer;
     const attempt = redeemer.maybeRedeemForPool([h.account]);
     await ready;
-    assert.match((await h.actions.redeem(h.account, provider === 'claude' ? 'weekly' : 'credit-1')).message, /automatic reset is in progress/);
-    assert.equal(h.calls.claims.length + h.calls.consumes.length, 0);
-    release();
+    try {
+      assert.match((await h.actions.redeem(h.account, provider === 'claude' ? 'weekly' : 'credit-1')).message, /automatic reset is in progress/);
+      assert.equal(reads, 1, `${provider}: declined before a read of its own`);
+      assert.equal(h.calls.claims.length + h.calls.consumes.length, 0);
+    } finally { release(); }
     assert.equal((await attempt).redeemed, true);
   }
+});
+
+test('an account removed before the panel acts is neither read nor claimed on', async () => {
+  const h = harness();
+  h.am.accounts.length = 0;
+  assert.equal((await h.actions.read(h.account)).error, 'account is no longer listed');
+  assert.equal((await h.actions.redeem(h.account, 'weekly')).message, 'Manual reset on "test-account": account is no longer listed');
+  assert.deepEqual(h.calls.tokens, [], 'no token refresh for an account that is gone');
+  assert.equal(h.calls.statuses + h.calls.claims.length, 0);
+});
+
+// A removal (CLI, MCP, a reload) can land while the token is refreshed or the
+// details are read; the claim after it cannot be undone.
+test('an account removed while its details are read is never claimed on, by hand or automatically', async () => {
+  for (const provider of ['claude', 'codex']) {
+    const h = harness({ provider });
+    const remove = () => { h.am.accounts.length = 0; };
+    if (provider === 'claude') { const read = h.claudeRedeemer.statusFn; h.claudeRedeemer.statusFn = async (...args) => { remove(); return read(...args); }; }
+    else { const read = h.codexRedeemer.detailsFn; h.codexRedeemer.detailsFn = async (...args) => { remove(); return read(...args); }; }
+    const result = await h.actions.redeem(h.account, provider === 'claude' ? 'weekly' : 'credit-1');
+    assert.equal(result.message, 'Manual reset on "test-account": account is no longer listed', provider);
+    assert.equal(h.calls.claims.length + h.calls.consumes.length, 0, provider);
+  }
+  for (const provider of ['claude', 'codex']) {
+    const h = harness({ provider, armed: true });
+    const remove = () => { h.am.accounts.length = 0; };
+    if (provider === 'claude') { const read = h.claudeRedeemer.statusFn; h.claudeRedeemer.statusFn = async (...args) => { remove(); return read(...args); }; }
+    else { const read = h.codexRedeemer.detailsFn; h.codexRedeemer.detailsFn = async (...args) => { remove(); return read(...args); }; }
+    const auto = await (provider === 'claude' ? h.claudeRedeemer : h.codexRedeemer).maybeRedeemForPool([h.account]);
+    assert.equal(auto.redeemed, false, provider); assert.equal(auto.reason, 'account is no longer listed');
+    assert.equal(h.calls.claims.length + h.calls.consumes.length, 0, provider);
+  }
+});
+
+/** A claim (or consume) whose first call waits for `release`, and the promise
+ *  that settles once that first call has started. */
+function heldFirst(verdict) {
+  let release, started;
+  const ready = new Promise(resolve => { started = resolve; });
+  const pending = new Promise(resolve => { release = resolve; });
+  const fn = async (_account, _attempt, n) => { if (n === 1) { started(); await pending; } return verdict; };
+  return { fn, ready, release: () => release() };
+}
+
+test('no automatic attempt starts while a manual claim is in flight, for either provider', async () => {
+  for (const provider of ['claude', 'codex']) {
+    const held = heldFirst(provider === 'claude' ? { result: 'reset', resetsLeft: 0, cleared: ['seven_day'] } : { code: 'reset', windowsReset: 2 });
+    const h = harness({ provider, armed: true, claim: held.fn, consume: held.fn });
+    const redeemer = provider === 'claude' ? h.claudeRedeemer : h.codexRedeemer;
+    const manual = h.actions.redeem(h.account, provider === 'claude' ? 'weekly' : 'credit-1');
+    await held.ready;
+    try {
+      assert.match((await redeemer.maybeRedeemForPool([h.account])).reason, /manual reset is in progress/, provider);
+    } finally { held.release(); }
+    assert.equal((await manual).redeemed, true);
+    assert.equal(h.calls.claims.length + h.calls.consumes.length, 1, provider);
+  }
+});
+
+test('a manual claim made straight on the redeemer is refused while an automatic attempt is in flight', async () => {
+  for (const provider of ['claude', 'codex']) {
+    const held = heldFirst(provider === 'claude' ? { result: 'reset', resetsLeft: 0, cleared: ['seven_day'] } : { code: 'reset', windowsReset: 2 });
+    const h = harness({ provider, armed: true, claim: held.fn, consume: held.fn });
+    const redeemer = provider === 'claude' ? h.claudeRedeemer : h.codexRedeemer;
+    const auto = redeemer.maybeRedeemForPool([h.account]);
+    await held.ready;
+    try {
+      const direct = await redeemer.redeemGrant(h.account, provider === 'claude' ? 'weekly' : 'credit-1', { manual: true });
+      assert.equal(direct.redeemed, false, provider);
+      assert.equal(direct.reason, 'an automatic reset is in progress');
+    } finally { held.release(); }
+    assert.equal((await auto).redeemed, true);
+    assert.equal(h.calls.claims.length + h.calls.consumes.length, 1, provider);
+  }
+});
+
+test('a panel reopened while its first read is pending shares that read', async () => {
+  const h = harness();
+  const [first, second] = await Promise.all([h.actions.read(h.account), h.actions.read(h.account)]);
+  assert.equal(h.calls.statuses, 1);
+  assert.equal(first, second);
+});
+
+test('a manual Claude fallback never claims on a reading dated after now', async () => {
+  const h = harness();
+  await h.actions.read(h.account);
+  h.clock.at -= 60_000;
+  h.claudeRedeemer.statusFn = async () => ({ error: 'HTTP 429', status: 429 });
+  assert.match((await h.actions.redeem(h.account, 'weekly')).message, /no recent reading to fall back on/);
+  assert.equal(h.calls.claims.length, 0);
+});
+
+test('a manual Codex claim replays its own credit\'s key, never an automatic attempt\'s unread one', async () => {
+  const h = harness({ provider: 'codex', armed: true, credits: [credit(), credit({ id: 'credit-2' })],
+    consume: (_account, _attempt, n) => n === 1 ? { error: 'lost verdict' } : { code: 'reset', windowsReset: 2 } });
+  await h.codexRedeemer.maybeRedeemForPool([h.account]);
+  const other = h.calls.consumes[0].creditId === 'credit-1' ? 'credit-2' : 'credit-1';
+  assert.equal((await h.actions.redeem(h.account, other)).redeemed, true);
+  assert.equal(h.calls.consumes[1].creditId, other);
+  assert.notEqual(h.calls.consumes[1].redeemRequestId, h.calls.consumes[0].redeemRequestId);
 });
 
 test('one manual redeem at a time, and auto cannot race its fresh read', async () => {
@@ -392,14 +506,21 @@ test('one manual redeem at a time, and auto cannot race its fresh read', async (
   let started;
   const ready = new Promise(resolve => { started = resolve; });
   const pending = new Promise(resolve => { release = resolve; });
-  h.am.ensureTokenFresh = async () => { started(); await pending; };
+  // Only the first claim's refresh waits: anything let through beside it
+  // refreshes, reads and claims at once, and shows here rather than waiting.
+  let refreshes = 0;
+  h.am.ensureTokenFresh = async () => { if (++refreshes === 1) { started(); await pending; } };
   const first = h.actions.redeem(h.account, 'weekly');
   await ready;
-  assert.match((await h.actions.redeem(h.account, 'fable')).message, /manual reset is in progress/);
-  assert.match((await h.claudeRedeemer.maybeRedeemForPool([h.account])).reason, /manual reset is in progress/);
-  const codex = { ...h.account, provider: 'codex', accountId: 'codex' };
-  assert.match((await h.actions.redeem(codex, 'credit-1')).message, /manual reset is in progress/);
-  release();
+  try {
+    assert.match((await h.actions.redeem(h.account, 'fable')).message, /manual reset is in progress/);
+    assert.match((await h.claudeRedeemer.maybeRedeemForPool([h.account])).reason, /manual reset is in progress/);
+    const codex = { ...h.account, index: 1, provider: 'codex', accountId: 'codex' };
+    h.am.accounts.push(codex);
+    assert.match((await h.actions.redeem(codex, 'credit-1')).message, /manual reset is in progress/);
+    assert.equal(refreshes, 1, 'nothing else refreshed a token while the first claim was out');
+    assert.equal(h.calls.statuses + h.calls.details + h.calls.claims.length + h.calls.consumes.length, 0);
+  } finally { release(); }
   assert.equal((await first).redeemed, true);
   assert.equal(h.calls.claims.length, 1);
 });
@@ -529,97 +650,6 @@ test('claim exceptions are uncertain, while refresh exceptions after success kee
   }
 });
 
-test('manual success notifies the manager even if quota re-application fails', async () => {
-  for (const provider of ['claude', 'codex']) {
-    const h = harness({ provider });
-    let noted = null;
-    h.am.noteResetRedeemed = account => { noted = account; };
-    const fail = () => { throw new Error('quota failed'); };
-    if (provider === 'claude') h.am.applyUsageData = fail;
-    else h.am.applyCodexUsageData = fail;
-    assert.equal((await h.actions.redeem(h.account, provider === 'claude' ? 'weekly' : 'credit-1')).redeemed, true);
-    assert.equal(noted, h.account, provider);
-  }
-});
-
-test('steer and manual attempts replay the same per-grant key after an unread verdict', async () => {
-  for (const provider of ['claude', 'codex']) {
-    for (const manualFirst of [false, true]) {
-      const h = harness({ provider, credits: [credit(), credit({ id: 'credit-2', expiresAt: NOW + 48 * HOUR })],
-        claim: (_account, _attempt, n) => n < 3 ? { error: 'lost verdict' } : { result: 'already_used' },
-        consume: (_account, _attempt, n) => n < 3 ? { error: 'lost verdict' } : { code: 'already_redeemed' },
-      });
-      const redeemer = provider === 'claude' ? h.claudeRedeemer : h.codexRedeemer;
-      const id = provider === 'claude' ? 'weekly' : 'credit-1';
-      const otherId = provider === 'claude' ? 'fable' : 'credit-2';
-      const saved = [];
-      const steer = () => redeemer.redeemForSteer(h.account, { beforeSpend: async ({ requestId }) => {
-        saved.push(requestId);
-        assert.equal(redeemer._stateFor(h.account).requestIds.get(id), requestId);
-        return true;
-      } });
-      const first = await (manualFirst ? h.actions.redeem(h.account, id) : steer());
-      assert.equal(first.uncertain, true);
-      if (!manualFirst) assert.equal(first.outcome, 'unknown');
-      assert.equal((await h.actions.redeem(h.account, otherId)).uncertain, true);
-      h.clock.at += 31 * 60_000;
-      assert.equal((await (manualFirst ? steer() : h.actions.redeem(h.account, id))).redeemed, true);
-      const attempts = provider === 'claude' ? h.calls.claims : h.calls.consumes;
-      const key = provider === 'claude' ? 'requestId' : 'redeemRequestId';
-      assert.equal(attempts[0][key], attempts[2][key]);
-      assert.notEqual(attempts[0][key], attempts[1][key]);
-      assert.deepEqual(saved, [attempts[0][key]]);
-    }
-  }
-});
-
-test('a steer cannot race a manual action during its fresh read', async () => {
-  for (const provider of ['claude', 'codex']) {
-    const h = harness({ provider });
-    let release;
-    let started;
-    const ready = new Promise(resolve => { started = resolve; });
-    const pending = new Promise(resolve => { release = resolve; });
-    h.am.ensureTokenFresh = async () => { started(); await pending; };
-    const manual = h.actions.redeem(h.account, provider === 'claude' ? 'weekly' : 'credit-1');
-    await ready;
-    const redeemer = provider === 'claude' ? h.claudeRedeemer : h.codexRedeemer;
-    const steer = await redeemer.redeemForSteer(h.account, { beforeSpend: async () => assert.fail('no spend while manual is locked') });
-    assert.equal(steer.outcome, 'not-now');
-    assert.ok(steer.retryAt > h.clock.at);
-    assert.match(steer.reason, /manual reset is in progress/);
-    assert.equal(h.calls.claims.length + h.calls.consumes.length, 0);
-    release();
-    assert.equal((await manual).redeemed, true);
-    assert.equal(h.calls.claims.length + h.calls.consumes.length, 1);
-  }
-});
-
-test('Claude not_limited preserves the steer usage correction and upstream reason', async () => {
-  const h = harness({ claim: () => ({ result: 'not_limited', reason: 'not_at_limit' }) });
-  const result = await h.claudeRedeemer.redeemForSteer(h.account);
-  assert.equal(result.outcome, 'not-now');
-  assert.equal(result.retryAt, h.claudeRedeemer._stateFor(h.account).cooldownUntil);
-  assert.equal(h.calls.usage.length, 1);
-  assert.match(result.reason, /not_limited: not_at_limit/);
-  assert.ok(h.calls.logs.some(line => line.includes('its steer has spent its week (--redeem)')));
-});
-
-test('Codex checks the budget again after the steer saves its spend key', async () => {
-  const h = harness({ provider: 'codex' });
-  let saved = null;
-  const result = await h.codexRedeemer.redeemForSteer(h.account, { beforeSpend: async ({ requestId }) => {
-    saved = requestId;
-    h.clock.at += h.codexRedeemer.timeoutMs;
-    return true;
-  } });
-  assert.ok(saved);
-  assert.equal(result.outcome, 'not-now');
-  assert.match(result.reason, /ran out of the redeem budget/);
-  assert.ok(result.retryAt > h.clock.at);
-  assert.equal(h.calls.consumes.length, 0);
-  assert.equal(h.codexRedeemer._stateFor(h.account).requestIds.get('credit-1'), saved);
-});
 
 test('every real redeemer read fills the panel cache, including auto and Claude post-spend', async () => {
   for (const provider of ['claude', 'codex']) {

@@ -5,6 +5,8 @@ import { AccountManager } from '../src/account-manager.js';
 import { createProxyServer, exhaustedMessage } from '../src/server.js';
 import { accountRefusal } from '../src/account-refusal.js';
 import { unavailableLine } from '../src/status-renderer.js';
+import { syncAccountsFromDisk } from '../src/sync-accounts.js';
+import { ensureAccountIds } from '../src/account-id.js';
 
 // Upstream refuses some accounts outright: an identity check, a hold, a disabled
 // organization. Retrying another request on the same account cannot succeed, so
@@ -167,6 +169,41 @@ for (const [status, body, code, link, contentType] of [
   });
 }
 
+// A pin to the only account, which upstream refuses with a 400: the request
+// records the account as tried and answers with the refusal. Recorded as
+// anything the next attempt does not recognise, the pin was selected again,
+// and with a one-account retry budget already spent it was sent again, refused
+// again, and so on without end. The second send is awaited as an event.
+test('a request pinned to the only account gets its 400 refusal after one attempt', async () => {
+  const seen = [];
+  let second = () => {};
+  const sentAgain = new Promise(resolve => { second = resolve; });
+  const upstream = http.createServer((req, res) => {
+    req.resume();
+    seen.push((req.headers.authorization || '').replace(/^Bearer /, ''));
+    if (seen.length === 2) second('sent again');
+    res.writeHead(400, { 'content-type': 'application/json' });
+    res.end(errorBody('invalid_request_error', 'This organization has been disabled.', 'organization_disabled'));
+  });
+  const upstreamPort = await listen(upstream);
+  const am = new AccountManager([accounts()[0]], 0.98, { refreshFn: async () => { throw new Error('must not refresh'); } });
+  const proxy = createProxyServer(am, { proxy: { apiKey: 'k' }, upstream: `http://127.0.0.1:${upstreamPort}` });
+  const port = await listen(proxy);
+  try {
+    const answered = fetch(`http://127.0.0.1:${port}/tc-acct/a/v1/messages`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'x', messages: [] }),
+    }).then(r => r.status);
+    assert.equal(await Promise.race([answered, sentAgain]), 502);
+    assert.deepEqual(seen, ['a-token']);
+  } finally {
+    proxy.closeAllConnections();
+    proxy.close();
+    upstream.closeAllConnections();
+    upstream.close();
+  }
+});
+
 // The 400 is read before it is relayed, so the relay must still carry every
 // byte, including past the size the classifier reads.
 for (const size of [0, 1024 * 1024]) {
@@ -251,6 +288,24 @@ test('an account refused again after a re-login records the new refusal', () => 
   assert.equal(am.getStatus().accounts[0].errorReason?.code, 'verification_required');
 });
 
+// The remedy status names is a re-login, and `teamclaude login` (or the TUI's)
+// reaches the running proxy by rewriting the account's config row and a reload.
+test('a re-login brings a refused account back through the reload; a reload of the same tokens does not', async () => {
+  const disk = { accounts: accounts() };
+  ensureAccountIds(disk.accounts);
+  const memConfig = { accounts: disk.accounts.map((a) => ({ ...a })) };
+  const am = new AccountManager(memConfig.accounts.map((a) => ({ ...a })), 0.98);
+  am.markRefused(am.accounts[0], { code: 'account_on_hold', message: HOLD_MESSAGE, link: 'https://claude.ai/restricted' });
+  await syncAccountsFromDisk(disk, memConfig, am);
+  assert.equal(am.getStatus().accounts[0].errorReason?.code, 'account_on_hold', 'nothing new on disk');
+  disk.accounts[0] = { ...disk.accounts[0], accessToken: 'a-login', refreshToken: 'ra-login', expiresAt: Date.now() + 8 * HOUR };
+  await syncAccountsFromDisk(disk, memConfig, am);
+  const row = am.getStatus().accounts[0];
+  assert.equal(row.status, 'active');
+  assert.equal(row.errorReason, null);
+  assert.equal(am.accounts[0].credential, 'a-login');
+});
+
 test('a 429 that lands after the refusal does not turn it into a hold that lapses', () => {
   const am = new AccountManager(accounts(), 0.98);
   am.markRefused(am.accounts[0], { code: 'account_on_hold', message: HOLD_MESSAGE, link: 'https://claude.ai/restricted' });
@@ -312,6 +367,22 @@ test('with every account refused the client reads upstream\'s reason, not a re-l
     assert.match(message, /"a"/);
     assert.ok(message.includes(HOLD_MESSAGE), message);
     assert.doesNotMatch(message, /Check the account/);
+  });
+});
+
+// A refusal can come as a 400 too (a disabled organization). It is recorded as
+// a refusal there as well, so a fleet refused that way gets the same 502, not
+// the quota answer.
+test('with every account refused by a 400 the client reads upstream\'s reason, not a quota wait', async () => {
+  const am = new AccountManager([accounts()[0]], 0.98);
+  const body = errorBody('invalid_request_error', 'This organization has been disabled.', 'organization_disabled');
+  await withProxy({ status: 400, body }, am, async (port, seen) => {
+    const res = await post(port);
+    assert.equal(res.status, 502, res.body.slice(0, 160));
+    const { message } = JSON.parse(res.body).error;
+    assert.match(message, /"a"/);
+    assert.ok(message.includes('This organization has been disabled.'), message);
+    assert.deepEqual(seen, ['a-token']);
   });
 });
 

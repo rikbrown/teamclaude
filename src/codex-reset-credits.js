@@ -36,6 +36,18 @@
 import { randomUUID } from 'node:crypto';
 
 import { fetchCodexUsage } from './codex-usage.js';
+import {
+  autoRedeemArmed,
+  autoRedeemStanding,
+  byExhaustion,
+  dailyCapVerdict,
+  minDaysReason,
+  recentRedemptions,
+  redeemPolicyFrom,
+  redeemedLast24h,
+  resetCohort,
+  shareCapVerdict,
+} from './codex-reset-policy.js';
 import { providerOf } from './provider.js';
 import { safeLine } from './safe-text.js';
 import { rememberResetReading, resetRetryAt } from './reset-readings.js';
@@ -86,6 +98,12 @@ const BUDGET_LAPSED = Symbol('redeem budget lapsed');
  * time the retried request needed has helped nobody.
  */
 export const REDEEM_BUDGET_MS = 10_000;
+
+// How often one account's unchanged "skipped — <reason>" line is repeated. A
+// dry pool refuses every request that arrives, and the policy's answer for an
+// account holds for hours, so without this the activity log would be the same
+// line once per refused request.
+const SKIP_LOG_INTERVAL_MS = 10 * 60 * 1000;
 
 // Utilization at which the weekly window counts as genuinely spent. Exactly 1,
 // not the rotation threshold: rotating away from an account at 98% costs
@@ -240,14 +258,21 @@ export function weeklyExhausted(account, now = Date.now()) {
  * the config: a caller that forgets to pass it redeems nothing, which is the
  * only safe direction for a decision that spends something unrecoverable.
  *
+ * `minDaysToReset` is the floor on what a credit must buy
+ * (`config.autoRedeemMinDaysToReset`, see codex-reset-policy.js): a Codex
+ * reset restarts the 7-day timer, so a credit spent T days before the natural
+ * reset is worth T/7 of a week. It defaults to 0 — off — for the same reason
+ * the switch defaults to false: a caller that passes nothing gets exactly the
+ * behaviour the fleet had before the knob existed.
+ *
  * `consented` is the one other way in: a `steer --redeem` names this account,
  * and that flag is the operator's consent for it, so the two switches that
  * stand for consent are skipped. The weekly window still has to be spent.
  *
- * @param {{account: Record<string, any>, autoRedeemResets?: boolean, now?: number, consented?: boolean}} args
+ * @param {{account: Record<string, any>, autoRedeemResets?: boolean, minDaysToReset?: number, now?: number, consented?: boolean}} args
  * @returns {{ok: boolean, reason: string}}
  */
-export function redeemPreconditions({ account, autoRedeemResets = false, now = Date.now(), consented = false }) {
+export function redeemPreconditions({ account, autoRedeemResets = false, minDaysToReset = 0, now = Date.now(), consented = false }) {
   if (!account) return { ok: false, reason: 'no account' };
   if (providerOf(account) !== 'codex') return { ok: false, reason: 'not a Codex account' };
   if (!consented) {
@@ -262,6 +287,10 @@ export function redeemPreconditions({ account, autoRedeemResets = false, now = D
     if (account.autoRedeemReset === false) return { ok: false, reason: 'auto-redeem is switched off for this account' };
   }
   if (!weeklyExhausted(account, now)) return { ok: false, reason: 'weekly window is not exhausted' };
+  // After the exhaustion check, not before: the floor is about what the credit
+  // would BUY, and that question only arises once there is something to clear.
+  const floor = minDaysReason(account, minDaysToReset, now);
+  if (floor) return { ok: false, reason: floor };
   return { ok: true, reason: 'weekly window is exhausted' };
 }
 
@@ -339,13 +368,14 @@ export function orderRedeemCandidates(candidates = []) {
  * @param {Object} args
  * @param {Record<string, any>} args.account
  * @param {boolean} [args.autoRedeemResets]  the fleet switch — see redeemPreconditions
+ * @param {number} [args.minDaysToReset]  the credit-value floor — see redeemPreconditions
  * @param {Array<{name?: string, available: boolean}>} [args.pool]  the OTHER Codex accounts, with availability already resolved
  * @param {ResetCredit[]} [args.credits]  this account's detail rows
  * @param {number} [args.now]
  * @returns {{redeem: boolean, reason: string, creditId: string|null}}
  */
-export function shouldRedeemReset({ account, autoRedeemResets = false, pool = [], credits = [], now = Date.now() }) {
-  const pre = redeemPreconditions({ account, autoRedeemResets, now });
+export function shouldRedeemReset({ account, autoRedeemResets = false, minDaysToReset = 0, pool = [], credits = [], now = Date.now() }) {
+  const pre = redeemPreconditions({ account, autoRedeemResets, minDaysToReset, now });
   if (!pre.ok) return { redeem: false, reason: pre.reason, creditId: null };
 
   const credit = redeemableCredit(credits);
@@ -381,7 +411,7 @@ export function shouldRedeemReset({ account, autoRedeemResets = false, pool = []
  * nothing is cached — distinct from an empty list, which is a fetched "this
  * account holds none".
  *
- * @typedef {{cooldownUntil: number, credits: ResetCredit[]|null, creditsAt: number, redeemRequestId: string|null, requestIds: Map<string, string>}} RedeemState
+ * @typedef {{cooldownUntil: number, credits: ResetCredit[]|null, creditsAt: number, redeemRequestId: string|null, requestIds: Map<string, string>, cohorts: Map<string, number|null>, skipReason: string|null, skipLoggedAt: number}} RedeemState
  */
 
 /**
@@ -489,6 +519,84 @@ export class ResetCreditRedeemer {
     // Armed in _consume, read at the top of _attempt before anything is
     // fetched, and it stops the walk mid-pool.
     this.fleetCooldownUntil = 0;
+    // Every redemption that landed in the last week, newest last, for the
+    // per-day and cohort caps (codex-reset-policy.js) and the status payload's
+    // `redeemedLast24h`. Appended in redeemGrant, so it holds the redemptions
+    // made by hand from the TUI resets panel as well as the automatic ones.
+    // Transient like the rest: a restart forgets it, and the caps then count
+    // from nothing, so a restarted fleet may spend up to a full allowance
+    // again. docs/accounts.md says so.
+    /** @type {import('./codex-reset-policy.js').RedeemRecord[]} */
+    this.ledger = [];
+  }
+
+  /** The strategy knobs as the shared config states them right now. */
+  _policy() {
+    return redeemPolicyFrom(this.config);
+  }
+
+  /** The fleet switch as the shared config states it right now. */
+  _armed() {
+    return this.config?.autoRedeemResets === true;
+  }
+
+  /**
+   * The accounts the automatic policy may spend on: what a reset cohort is
+   * counted over. Three kinds are left out, which a refusal never offers the
+   * walk (server.js) and which last until the operator acts: a disabled
+   * account, a cordoned one, and one in `status: 'error'` (a refused refresh
+   * token or credential, until it signs in again).
+   * Counted, they would size the cohort above the part of it that can move,
+   * and let all of that part move under a cap meant to hold some of it back.
+   * A capped account (maxUsage, maxSpend) is not offered either, but it stays
+   * counted: its cap is read off its usage, which changes within the week.
+   * Read off the manager each time, so a change since the last refusal is
+   * counted as it stands now.
+   */
+  _members() {
+    const armed = this._armed();
+    return (this.am.accounts || []).filter((/** @type {Record<string, any>} */ a) =>
+      autoRedeemArmed(a, armed) && !a.disabled && !a.cordoned && a.status !== 'error');
+  }
+
+  /**
+   * One line per skipped account, throttled per account and per reason: a
+   * dry pool refuses every request that arrives, and a policy "no" that holds
+   * for hours would otherwise be restated on each of them.
+   *
+   * @param {Record<string, any>} account
+   * @param {RedeemState} state
+   * @param {string} reason
+   * @param {number} now
+   */
+  _logSkip(account, state, reason, now) {
+    if (state.skipReason === reason && now - state.skipLoggedAt < SKIP_LOG_INTERVAL_MS) return;
+    state.skipReason = reason;
+    state.skipLoggedAt = now;
+    this.log(`[TeamClaude] Codex rate-limit reset on "${safeLine(account.name, 64)}" skipped — ${reason}`);
+  }
+
+  /**
+   * The policy's view of one account for the status payload, or null for an
+   * account the policy never looks at: every non-Codex row, and every row
+   * while the fleet switch is off. With the switch off nothing is spent
+   * automatically, so there is no standing to report, and a fleet that never
+   * armed it gets the status screen it had before.
+   *
+   * @param {Record<string, any>} account
+   * @returns {{armed: boolean, exemptReason: string|null, creditValueWeeks: number|null, daysToReset: number|null}|null}
+   */
+  describe(account) {
+    if (!account || providerOf(account) !== 'codex' || !this._armed()) return null;
+    return autoRedeemStanding({
+      account, autoRedeemResets: this._armed(), policy: this._policy(),
+      members: this._members(), ledger: this.ledger, now: this.now(),
+    });
+  }
+
+  /** The fleet-level policy block of the status payload. */
+  policyStatus() {
+    return { ...this._policy(), redeemedLast24h: redeemedLast24h(this.ledger, this.now()) };
   }
 
   /** Record real detail reads, not the auto policy's six-hour cache hits.
@@ -511,7 +619,7 @@ export class ResetCreditRedeemer {
   _stateFor(account) {
     let state = this.state.get(account);
     if (!state) {
-      state = { cooldownUntil: 0, credits: null, creditsAt: 0, redeemRequestId: null, requestIds: new Map() };
+      state = { cooldownUntil: 0, credits: null, creditsAt: 0, redeemRequestId: null, requestIds: new Map(), cohorts: new Map(), skipReason: null, skipLoggedAt: 0 };
       this.state.set(account, state);
     }
     return state;
@@ -560,12 +668,40 @@ export class ResetCreditRedeemer {
     // client is waiting on the refusal, not on an account, so a pool of three
     // must not hold it three times as long as a pool of one.
     const deadline = now + this.timeoutMs;
+    const policy = this._policy();
 
-    /** @type {Array<{account: Record<string, any>, credits: ResetCredit[]}>} */
-    const holders = [];
+    // Everything that costs nothing is asked before anything is fetched: the
+    // preconditions, then the caps. A read costs a token refresh and a request
+    // per account, and a cap that says no says it again on every refusal past
+    // the cached rows, with the client waiting on each.
+    /** @type {Record<string, any>[]} */
+    const askable = [];
     let reason = 'no Codex account holds a credit worth spending';
     for (const account of accounts) {
-      const ready = await this._ready(account, this._stateFor(account), now, deadline);
+      const why = this._precheck(account, this._stateFor(account), now);
+      if (why) reason = why;
+      else askable.push(account);
+    }
+    // The per-day cap is a fact about the fleet, so it is asked once and said
+    // once, against the first account it stops. It counts automatic
+    // redemptions only.
+    const daily = dailyCapVerdict(this.ledger, policy.maxPerDay, now);
+    if (!daily.ok && askable.length) {
+      this._logSkip(askable[0], this._stateFor(askable[0]), /** @type {string} */ (daily.reason), now);
+      return { redeemed: false, reason: /** @type {string} */ (daily.reason) };
+    }
+    const members = policy.maxShare < 1 ? this._members() : [];
+    /** @type {Array<{account: Record<string, any>, credits: ResetCredit[]}>} */
+    const holders = [];
+    for (const account of askable) {
+      const state = this._stateFor(account);
+      const share = shareCapVerdict({ account, members, ledger: this.ledger, maxShare: policy.maxShare, now });
+      if (!share.ok) {
+        reason = /** @type {string} */ (share.reason);
+        this._logSkip(account, state, reason, now);
+        continue;
+      }
+      const ready = await this._ready(account, state, now, deadline);
       if (ready.credits) holders.push({ account, credits: ready.credits });
       else reason = ready.reason ?? reason;
     }
@@ -576,9 +712,43 @@ export class ResetCreditRedeemer {
     // through it: that step is a pure choice between candidates, and carrying a
     // reading it never looks at would only invite one of the two to go stale.
     const rows = new Map(holders.map(holder => [holder.account, holder.credits]));
-    for (const { account } of orderRedeemCandidates(holders)) {
-      const result = await this._decide(account, this._stateFor(account), rows.get(account) || [], now, deadline);
-      if (result.redeemed) return result;
+    const ordered = orderRedeemCandidates(holders);
+    // Under a share cap the cohort's slots go to the most exhausted first —
+    // that is what the cap promises — so the walk is re-ranked on exhaustion
+    // (byExhaustion, which settles every tie itself). Without a cap the
+    // ordering is the one it always was.
+    if (policy.maxShare < 1) ordered.sort((a, b) => byExhaustion(a.account, b.account));
+    for (const { account } of ordered) {
+      const state = this._stateFor(account);
+      // An account the reads left in the error state (its refresh token was
+      // refused, while the access token it still held read its rows) serves
+      // nothing until it is signed in again, so a credit spent on it buys no
+      // request, and under a share cap takes the slot of an account in service.
+      if (account.status === 'error') {
+        reason = 'went into the error state while its credits were read';
+        this._logSkip(account, state, reason, now);
+        continue;
+      }
+      // The share cap again, over the accounts as they stand now: a refresh
+      // token upstream rejects during the reads above leaves its account in
+      // the error state, and so out of the cohort the other accounts are
+      // counted in (see _members), and the verdict asked before them can
+      // allow a slot the cohort no longer has. Only while the fleet switch is
+      // on: switched off during the reads, it leaves every account out of
+      // _members(), and the cap would hold accounts back with its own reason
+      // where _decide answers that the switch is off.
+      if (policy.maxShare < 1 && this._armed()) {
+        const share = shareCapVerdict({ account, members: this._members(), ledger: this.ledger, maxShare: policy.maxShare, now });
+        if (!share.ok) {
+          reason = /** @type {string} */ (share.reason);
+          this._logSkip(account, state, reason, now);
+          continue;
+        }
+      }
+      const result = await this._decide(account, state, rows.get(account) || [], now, deadline);
+      // A lost answer is returned as it came, `uncertain` and all: it armed
+      // the fleet hold, so the walk would end here anyway.
+      if (result.redeemed || result.uncertain) return result;
       reason = result.reason;
       // Two things end the walk rather than move it on to the next account: a
       // fleet hold, armed by an attempt that may have spent something — walking
@@ -594,11 +764,12 @@ export class ResetCreditRedeemer {
    * and the operator asked for one of its credits to be spent then. Consent for
    * this one account, so the fleet switch and the account's exemption are not
    * consulted (see redeemPreconditions), and neither is the policy's reason to
-   * spend — the rest of the pool being dry, or the credit expiring. Every
-   * safeguard still holds: the fleet hold after a consume that landed or may
-   * have, the account's cooldown, a spent weekly window, a credit that is
-   * available AND supported by the plan, the idempotency key, the token refresh
-   * and the budget.
+   * spend — the rest of the pool being dry, or the credit expiring — nor the
+   * opt-in limits on automatic spends (the minimum days to reset, the cohort
+   * share and per-day caps). Every safeguard still holds: the fleet hold after
+   * a consume that landed or may have, the account's cooldown, a spent weekly
+   * window, a credit that is available AND supported by the plan, the
+   * idempotency key, the token refresh and the budget.
    *
    * Serialised with the dry-pool attempts on the same slot, so the two never
    * consume at once: this one waits out a pool attempt in flight, and a dry-pool
@@ -628,8 +799,10 @@ export class ResetCreditRedeemer {
     const now = this.now();
     /** @type {(reason: string, retryAt?: number) => RedeemResult} */
     const later = (reason, retryAt = now + RETRY_COOLDOWN_MS) => ({ redeemed: false, reason, outcome: 'not-now', retryAt });
+    /** @type {(reason: string) => RedeemResult} */
+    const none = reason => ({ redeemed: false, reason, outcome: 'nothing-held' });
     if (this.manualInFlight) return later('a manual reset is in progress');
-    if (providerOf(account) !== 'codex') return { redeemed: false, reason: 'not a Codex account', outcome: 'nothing-held' };
+    if (providerOf(account) !== 'codex') return none('not a Codex account');
     // The dry pool's own test (resetClears): disabled, a cap, an error state
     // all survive a cleared window, so a credit spent there is gone for
     // nothing. Each can change, so the steer asks again later.
@@ -640,16 +813,18 @@ export class ResetCreditRedeemer {
     }
     const deadline = now + this.timeoutMs;
     const state = this._stateFor(account);
-    const ready = await this._ready(account, state, now, deadline, true);
-    if (!ready.credits) {
-      if (ready.none) return { redeemed: false, reason: ready.reason ?? 'holds no reset credits', outcome: 'nothing-held' };
-      return later(ready.reason ?? 'holds no credit worth spending', state.cooldownUntil > now ? state.cooldownUntil : undefined);
-    }
+    const pre = redeemPreconditions({ account, now, consented: true });
+    if (!pre.ok) return later(pre.reason);
+    if (now < state.cooldownUntil) return later('cooling down after a recent attempt', state.cooldownUntil);
+    // The holdings count as a negative gate, as in _precheck.
+    if (account.quota?.resetCredits?.available === 0) return none('holds no reset credits');
+    const ready = await this._ready(account, state, now, deadline);
+    if (!ready.credits) return later(ready.reason ?? 'holds no credit worth spending', state.cooldownUntil > now ? state.cooldownUntil : undefined);
     // Plan support is read off the fresh detail rows here, not off the
     // probe's `applicable` count: that count was taken while the window still
     // had room, when no credit had anything to reset.
     const credit = redeemableCredit(ready.credits);
-    if (!credit) return { redeemed: false, reason: 'holds no redeemable credit', outcome: 'nothing-held' };
+    if (!credit) return none('holds no redeemable credit');
     const result = await this._consume(account, state, { redeem: true, reason: 'its steer has spent its week (--redeem)', creditId: credit.id }, now, deadline, beforeSpend);
     // Upstream has nothing of this account's to reset: the weekly reading that
     // sent the steer here is stale. Re-read it, inside what is left of the
@@ -659,41 +834,62 @@ export class ResetCreditRedeemer {
       const usage = timeoutMs > 0 ? await this.usageFn(account, { timeoutMs }).catch(() => null) : null;
       if (usage && !usage.error) this.am.applyCodexUsageData(account.index, usage);
     }
-    return result;
+    if (result.redeemed) return { ...result, outcome: 'redeemed' };
+    if (result.uncertain) return { ...result, outcome: 'unknown' };
+    if (result.outcome) return result;
+    // `no_credit` says there is nothing to spend; anything else, not yet.
+    if (result.code === 'no_credit') return { ...result, outcome: 'nothing-held' };
+    const after = this.now();
+    return { ...result, outcome: 'not-now', retryAt: state.cooldownUntil > after ? state.cooldownUntil : after + RETRY_COOLDOWN_MS };
   }
 
   /**
-   * The checks and the credit rows that come before any decision, for one
-   * account.
-   *
-   * Answers with the account's rows, or with why it is not a candidate at all.
-   * An EMPTY row list is still rows: the account holds nothing, and it is the
-   * policy below that says so in its own words.
+   * The checks that come before any decision and need nothing fetched, for
+   * one account: why it is not a candidate at all, or null when it is one
+   * whose credit rows are worth reading.
    *
    * @param {Record<string, any>} account
    * @param {RedeemState} state
    * @param {number} now
-   * @param {number} deadline
-   * @param {boolean} [consented]  a steer's --redeem names this account (see redeemPreconditions)
-   * @returns {Promise<{credits?: ResetCredit[], reason?: string, none?: boolean}>}  `none`: the holdings count says there is nothing to spend
+   * @returns {string|null}
    */
-  async _ready(account, state, now, deadline, consented = false) {
-    const autoRedeemResets = this.config?.autoRedeemResets === true;
-    const pre = redeemPreconditions({ account, autoRedeemResets, now, consented });
-    if (!pre.ok) return { reason: pre.reason };
-    if (now < state.cooldownUntil) return { reason: 'cooling down after a recent attempt' };
+  _precheck(account, state, now) {
+    const autoRedeemResets = this._armed();
+    const { minDaysToReset } = this._policy();
+    const pre = redeemPreconditions({ account, autoRedeemResets, minDaysToReset, now });
+    if (!pre.ok) {
+      // The floor is the one precondition that is a POLICY saying no to an
+      // account that could otherwise redeem, so it is the one that is logged:
+      // an operator who set it should be able to see it bite.
+      if (minDaysReason(account, minDaysToReset, now) === pre.reason) this._logSkip(account, state, pre.reason, now);
+      return pre.reason;
+    }
+    if (now < state.cooldownUntil) return 'cooling down after a recent attempt';
 
     // The HOLDINGS count the usage probe last saw — the same number the TUI and
     // the dashboard draw, and not the redeemable set: it knows nothing about
     // plan support. So it is only ever a negative gate. Zero holdings means zero
     // redeemable and stops us here for free; anything else decides nothing, and
-    // the detail rows below are what the policy actually reads. An ABSENT
-    // reading is likewise not "none": the probe is off by default, and the
-    // detail fetch reports the count anyway.
-    if (account.quota?.resetCredits?.available === 0) {
-      return { reason: 'holds no reset credits', none: true };
-    }
+    // the detail rows _ready reads are what the policy actually reads. An
+    // ABSENT reading is likewise not "none": the probe is off by default, and
+    // the detail fetch reports the count anyway.
+    if (account.quota?.resetCredits?.available === 0) return 'holds no reset credits';
+    return null;
+  }
 
+  /**
+   * The credit rows that come before any decision, for an account _precheck
+   * passed: the rows, or why they could not be had. An EMPTY row list is still
+   * rows: the account holds nothing, and it is the policy below that says so
+   * in its own words.
+   *
+   * @param {Record<string, any>} account
+   * @param {RedeemState} state
+   * @param {number} now
+   * @param {number} deadline
+   * @returns {Promise<{credits?: ResetCredit[], reason?: string}>}
+   */
+  async _ready(account, state, now, deadline) {
     const credits = await this._credits(account, state, now, deadline);
     if (credits.error) {
       state.cooldownUntil = now + RETRY_COOLDOWN_MS;
@@ -714,7 +910,8 @@ export class ResetCreditRedeemer {
    * @returns {Promise<RedeemResult>}
    */
   async _decide(account, state, credits, now, deadline) {
-    const autoRedeemResets = this.config?.autoRedeemResets === true;
+    const autoRedeemResets = this._armed();
+    const { minDaysToReset } = this._policy();
     // The policy asks whether the rest of the Codex pool can still serve, which
     // is exactly what rotation asks. Resolved through the manager so the two
     // answers cannot disagree — and it is also what stops a second credit being
@@ -724,7 +921,7 @@ export class ResetCreditRedeemer {
       .filter((/** @type {Record<string, any>} */ other) => other !== account && providerOf(other) === 'codex')
       .map((/** @type {Record<string, any>} */ other) => ({ name: other.name, available: this.am.unavailableReason(other) === null }));
 
-    const verdict = shouldRedeemReset({ account, autoRedeemResets, pool, credits, now });
+    const verdict = shouldRedeemReset({ account, autoRedeemResets, minDaysToReset, pool, credits, now });
     // A policy "no" arms no cooldown: it turns on pool state that can change
     // within the minute, and the cached rows above already bound what asking
     // again costs.
@@ -822,7 +1019,7 @@ export class ResetCreditRedeemer {
    * @param {{redeem: boolean, reason: string, creditId: string|null}} verdict
    * @param {number} now
    * @param {number} deadline
-   * @param {((claim: { requestId: string }) => Promise<boolean>)|null} [beforeSpend]  a steer's: awaited right before the consume, false stops it
+   * @param {((claim: { requestId: string }) => Promise<boolean>)|null} [beforeSpend]  a steer's (see redeemForSteer)
    * @returns {Promise<RedeemResult>}
    */
   async _consume(account, state, verdict, now, deadline, beforeSpend = null) {
@@ -833,26 +1030,25 @@ export class ResetCreditRedeemer {
     // broken. See _freshToken.
     const fresh = await this._freshToken(account, deadline);
     const timeoutMs = fresh.ok ? this._timeLeft(deadline) : 0;
-    /** @param {string} why @returns {RedeemResult} */
-    const stopped = why => {
+    if (timeoutMs <= 0) {
       // Declined like any other attempt that spent nothing: a cooldown, so a
-      // burst against a slow upstream cannot re-enter here per refusal.
-      // Per-account only — nothing was sent, so the fleet has nothing to be
-      // careful of.
+      // burst against a slow upstream cannot re-enter here per refusal, and
+      // no idempotency key minted for a request never made. Per-account only —
+      // nothing was sent, so the fleet has nothing to be careful of.
+      const why = fresh.error || 'ran out of the redeem budget';
       state.cooldownUntil = now + RETRY_COOLDOWN_MS;
       this.log(`[TeamClaude] Codex rate-limit reset on "${name}" stopped before redeeming — ${why}`);
-      return { redeemed: false, reason: why, outcome: 'not-now', retryAt: state.cooldownUntil };
-    };
-    // No idempotency key minted for a request never made.
-    if (timeoutMs <= 0) return stopped(fresh.error || 'ran out of the redeem budget');
+      return { redeemed: false, reason: why };
+    }
+    // Removed while the attempt read it: a credit spent there serves nothing.
+    if (!this.am.accounts?.includes(account)) return { redeemed: false, reason: 'account is no longer listed' };
 
     return this.redeemGrant(account, verdict.creditId, { deadline, reason: verdict.reason, beforeSpend });
   }
 
   /**
    * Shared consume execution, after the caller has checked its policy or a
-   * fresh manual detail read. Each chosen credit keeps its own unread key;
-   * auto and steer also keep the logical-attempt key if refreshed rows change.
+   * fresh manual detail read. Each chosen credit keeps its own unread key.
    * The steer's beforeSpend hook saves the key this consume will send.
    *
    * @param {Record<string, any>} account
@@ -861,7 +1057,7 @@ export class ResetCreditRedeemer {
    * @returns {Promise<RedeemResult>}
    */
   async redeemGrant(account, creditId, { manual = false, deadline = this.now() + this.timeoutMs, reason = 'manual redeem', beforeSpend = null } = {}) {
-    if (manual && this.inFlight) return { redeemed: false, reason: 'an automatic reset is in progress', outcome: 'not-now', retryAt: this.now() + RETRY_COOLDOWN_MS };
+    if (manual && this.inFlight) return { redeemed: false, reason: 'an automatic reset is in progress' };
     const name = safeLine(account.name, 64);
     const state = this._stateFor(account);
     const now = this.now();
@@ -876,17 +1072,17 @@ export class ResetCreditRedeemer {
     if (!manual && beforeSpend && (await beforeSpend({ requestId: redeemRequestId })) === false) {
       return { redeemed: false, reason: 'the steer ended before the credit was spent', outcome: 'cancelled' };
     }
-    const timeoutMs = this._timeLeft(deadline);
-    if (timeoutMs <= 0) {
-      state.cooldownUntil = now + RETRY_COOLDOWN_MS;
-      this.log(`[TeamClaude] Codex rate-limit reset on "${name}" stopped before redeeming — ran out of the redeem budget`);
-      return { redeemed: false, reason: 'ran out of the redeem budget', outcome: 'not-now', retryAt: state.cooldownUntil };
-    }
+    // Read BEFORE the POST: a reset that lands moves this account's natural
+    // reset to a week from now, and the cohort the caps must charge is the one
+    // it is leaving, not the one it arrives in. Kept with the key, because a
+    // POST whose answer was lost may have landed: by the time the replay reads
+    // `already_redeemed`, a quota refresh can have moved the reset already.
+    if (!state.cohorts.has(redeemRequestId)) state.cohorts.set(redeemRequestId, resetCohort(account));
     this.log(`[TeamClaude] ${manual ? 'Manually redeeming' : 'Redeeming'} a free Codex rate-limit reset on "${name}" — ${reason}`);
 
     let result;
     try {
-      result = await this.consumeFn(account, { creditId, redeemRequestId }, { timeoutMs });
+      result = await this.consumeFn(account, { creditId, redeemRequestId }, { timeoutMs: Math.max(1, this._timeLeft(deadline)) });
     } catch (/** @type {any} */ err) {
       result = { error: safeLine(err?.message || String(err), 120) };
     }
@@ -896,13 +1092,15 @@ export class ResetCreditRedeemer {
       state.cooldownUntil = now + RETRY_COOLDOWN_MS;
       this._holdFleet(now + RETRY_COOLDOWN_MS);
       this.log(`[TeamClaude] ${action} failed on "${name}" — ${safeLine(result.error, 120)}; it may still have been spent, so the pool holds off`);
-      return { redeemed: false, uncertain: true, reason: `redeem failed (${result.error}); it may still have been spent`, outcome: 'unknown' };
+      return { redeemed: false, uncertain: true, reason: `redeem failed (${result.error}); it may still have been spent` };
     }
 
     for (const [pendingCredit, pendingId] of state.requestIds) {
       if (pendingId === redeemRequestId) state.requestIds.delete(pendingCredit);
     }
     if (state.redeemRequestId === redeemRequestId) state.redeemRequestId = null;
+    const cohort = state.cohorts.get(redeemRequestId) ?? null;
+    state.cohorts.delete(redeemRequestId);
     // Whatever upstream decided, the list we hold describes a moment before it.
     state.credits = null;
 
@@ -910,6 +1108,11 @@ export class ResetCreditRedeemer {
     if (result?.code === 'reset' || result?.code === 'already_redeemed') {
       state.cooldownUntil = now + SUCCESS_COOLDOWN_MS;
       this._holdFleet(now + SUCCESS_COOLDOWN_MS);
+      // Pruned as it is appended, so the list is bounded by what a week can
+      // hold rather than by the uptime of the process. A manual redemption is
+      // recorded too: it moved an account out of its cohort like any other, so
+      // the share cap counts it. The per-day cap does not (see dailyCapVerdict).
+      this.ledger = [...recentRedemptions(this.ledger, now), { account, name, cohort, at: now, manual }];
       const windows = result.windowsReset || 0;
       this.log(`[TeamClaude] ${manual ? 'Manually redeemed' : 'Redeemed'} a free Codex rate-limit reset on "${name}" — ${windows} window(s) reset (${result.code})`);
       try { await this._refresh(account, name, deadline); } catch {
@@ -918,16 +1121,12 @@ export class ResetCreditRedeemer {
       // A steer on this account was about spending the week that just went,
       // whether an automatic, steer or manual action spent its credit.
       this.am.noteResetRedeemed?.(account);
-      return { redeemed: true, reason, code: result.code, windowsReset: windows, outcome: 'redeemed' };
+      return { redeemed: true, reason, code: result.code, windowsReset: windows };
     }
 
     state.cooldownUntil = now + RETRY_COOLDOWN_MS;
     this.log(`[TeamClaude] ${action} declined on "${name}" — upstream said "${result?.code || 'nothing'}", no credit spent`);
-    // `no_credit` says there is nothing to spend; anything else, not yet.
-    return {
-      redeemed: false, reason: `upstream declined (${result?.code || 'no code'})`, code: result?.code ?? null,
-      ...(result?.code === 'no_credit' ? { outcome: 'nothing-held' } : { outcome: 'not-now', retryAt: state.cooldownUntil }),
-    };
+    return { redeemed: false, reason: `upstream declined (${result?.code || 'no code'})`, code: result?.code };
   }
 
   /** @param {number} until */

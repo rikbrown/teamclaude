@@ -168,6 +168,17 @@ test("an advisor model's cap is checked too", () => {
   assert.equal(am.unavailableReason(capped, OPUS, FABLE), 'advisor-capped');
 });
 
+test("an advisor's family cap is not read from a window that has reset", () => {
+  const am = new AccountManager([
+    oauth('capped', { maxUsage: { unified7dFable: 0.8 } }),
+    oauth('backup', { priority: 10 }),
+  ], 0.98);
+  const capped = am.accounts[0];
+  setQuota(capped, { unified7dFable: 0.9, unified7dFableReset: Date.now() - 60_000 });
+
+  assert.equal(am.getActiveAccount(null, OPUS, FABLE).name, 'capped');
+});
+
 test('an uncapped fleet behaves exactly as before', () => {
   const am = new AccountManager([oauth('a'), oauth('b')], 0.98);
   setQuota(am.accounts[0], { unified7d: 0.7, unified7dFable: 0.9 });
@@ -221,4 +232,39 @@ test('a pinned request to a capped account reaches no upstream at all', async ()
     proxy.close();
     upstream.close();
   }
+});
+
+// ── a cap of 0 (#730) ────────────────────────────────────────
+
+// A bare 0 used to read as "no cap" in the gates and as a cap of 0 in capFor,
+// while { default: 0 } was a hard stop. It is one cap now, in both shapes: the
+// account gets nothing, with a reading or without one.
+test('maxUsage 0 is a hard stop in both shapes, with or without a reading', () => {
+  for (const maxUsage of [0, { default: 0 }]) {
+    const label = JSON.stringify(maxUsage);
+    const am = fleet(maxUsage);
+    const capped = am.accounts[1];
+    assert.equal(am.capFor('unified7d', capped), 0, label);
+    assert.equal(am.capExceeded(capped, OPUS), 'unified5h', `${label}: no reading yet`);
+    assert.equal(am.unavailableReason(capped, OPUS), 'capped', label);
+    setQuota(capped, { unified5h: 0.3, unified7d: 0.3 });
+    assert.equal(am.capExceeded(capped, OPUS), 'unified5h', `${label}: at 30%`);
+    assert.equal(am.unavailableReason(capped, OPUS), 'capped', label);
+    am.currentIndex = 1;
+    assert.equal(am.getActiveAccount(null, OPUS).name, 'a', `${label}: rotation leaves it`);
+    assert.equal(am.capExceeded(am.accounts[0], OPUS), null, 'the uncapped account is untouched');
+  }
+});
+
+test('a family cap of 0 keeps that family off the account and leaves the others', () => {
+  const am = fleet({ unified7dFable: 0 });
+  const capped = am.accounts[1];
+  assert.equal(am.capExceeded(capped, FABLE), 'unified7dFable');
+  assert.equal(am.capExceeded(capped, OPUS), null);
+});
+
+test('a manual switch to a capped account says it is capped, not at its threshold', () => {
+  const am = fleet(0.5);
+  setQuota(am.accounts[1], { unified5h: 0.6, unified7d: 0.1 });
+  assert.deepEqual(am.eligibility(1, { manualSwitch: true }), { eligible: false, reason: 'at its maxUsage cap' });
 });

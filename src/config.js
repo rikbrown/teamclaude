@@ -83,39 +83,44 @@ export async function saveState(state) {
 }
 
 /**
- * One writer for a document rewritten whole from a snapshot, such as the state
- * file: never two writes at once, and never an older snapshot landing after a
- * newer one.
- *
- * Each save used to run on its own, so two in flight raced their renames, and
- * whichever finished last won: a "set" begun just before a "clear" could land
- * after it and bring the cleared steer back at the next start. Here a save
- * asked for while a write runs starts nothing beside it. Every such request
- * joins ONE follow-up, which takes its snapshot when it starts, so it writes
- * the newest state there is, and what it replaces is older by construction.
- *
- * The answer settles once a write that began after the call has finished,
- * which is what a caller that must be on disk before it acts (a steer about
- * to spend a reset) waits for. `write` is expected to report its own failures
- * and resolve: a rejection here would only reach the caller of the moment.
- *
- * @param {() => any} snapshot  builds the document, at the moment it is written
- * @param {(doc: any) => Promise<void>} write
- * @returns {() => Promise<void>}
+ * One writer and at most one pending snapshot, read only when its write starts.
+ * Each caller waits for the batch containing its request, including final saves.
+ * @param {() => any} readState
+ * @param {{save?: (state: any) => Promise<void>, onError?: (err: any) => void}} [opts]
  */
-export function latestWriter(snapshot, write) {
-  /** @type {Promise<void>|null} */
-  let running = null;
-  /** @type {Promise<void>|null} */
-  let next = null;
-  const run = () => {
-    running = (async () => { await write(snapshot()); })().finally(() => { running = null; });
-    return running;
+export function createStatePersister(readState, { save = saveState, onError = () => {} } = {}) {
+  /** @typedef {{promise: Promise<void>, resolve: () => void}} Batch */
+  /** @type {Batch|null} */
+  let active = null;
+  /** @type {Batch|null} */
+  let pending = null;
+  /** @returns {Batch} */
+  const batch = () => {
+    let resolve = () => {};
+    /** @type {Promise<void>} */
+    const promise = new Promise(done => { resolve = done; });
+    return { promise, resolve };
+  };
+  /** @param {Batch} current */
+  const start = async current => {
+    active = current;
+    try { await save(readState()); }
+    catch (err) { onError(err); }
+    finally {
+      active = null;
+      current.resolve();
+      if (pending) {
+        const next = pending;
+        pending = null;
+        void start(next);
+      }
+    }
   };
   return () => {
-    if (!running) return run();
-    next ??= running.catch(() => {}).then(() => { next = null; return run(); });
-    return next;
+    if (active) return (pending ??= batch()).promise;
+    const current = batch();
+    void start(current);
+    return current.promise;
   };
 }
 
@@ -176,8 +181,10 @@ export function createDefaultConfig() {
     switchThreshold: 0.98,
     holdSeconds: 0,
     distributeSessions: false,
+    persistSessionAffinity: false,
     sessionTitles: { enabled: false, width: 18 },
     quotaBarPercent: false,
+    quotaBarStretch: true,
     probeDisabledAccounts: false,
     accountSort: 'arranged',
     // Tokens-per-second readouts in the TUI. Off unless asked for: with it off
@@ -199,26 +206,37 @@ export function createDefaultConfig() {
   };
 }
 
-export async function loadConfig() {
+/**
+ * The config file, or null when there is none. `applyProxy: false` skips the
+ * egress proxy, for a command that only talks to the local server.
+ * @param {{ applyProxy?: boolean }} [opts]
+ */
+export async function loadConfig({ applyProxy = true } = {}) {
   const path = getConfigPath();
   try {
-    const config = JSON.parse(await readFile(path, 'utf-8'));
-    // A file with no `accounts` key is what an empty or hand-trimmed config
-    // looks like. Every reader treats the list as always present, and the first
-    // one to trip was the save path — so the failure arrived while writing,
-    // long after the read that could have explained it (#330). A missing list
-    // is an empty one.
-    if (!Array.isArray(config.accounts)) config.accounts = [];
-    // Everything downstream pairs config entries to running accounts by entry id,
-    // so a config written before the field existed — or edited by hand — is given
-    // ids here, before anything can read one. The next save persists them.
-    ensureAccountIds(config.accounts);
-    applyUpstreamProxy(config);
-    return config;
+    return configFromFile(JSON.parse(await readFile(path, 'utf-8')), { applyProxy });
   } catch (err) {
     if (err.code === 'ENOENT') return null;
     throw err;
   }
+}
+
+/** The config loadConfig hands out, made from the file's parsed contents.
+ * @param {any} config
+ * @param {{ applyProxy?: boolean }} [opts] */
+function configFromFile(config, { applyProxy = true } = {}) {
+  // A file with no `accounts` key is what an empty or hand-trimmed config
+  // looks like. Every reader treats the list as always present, and the first
+  // one to trip was the save path — so the failure arrived while writing,
+  // long after the read that could have explained it (#330). A missing list
+  // is an empty one.
+  if (!Array.isArray(config.accounts)) config.accounts = [];
+  // Everything downstream pairs config entries to running accounts by entry id,
+  // so a config written before the field existed — or edited by hand — is given
+  // ids here, before anything can read one. The next save persists them.
+  ensureAccountIds(config.accounts);
+  if (applyProxy) applyUpstreamProxy(config);
+  return config;
 }
 
 /**
@@ -451,4 +469,25 @@ export function loadConfigPersistingIds() {
     if (config && !accountIdsComplete(raw?.accounts)) await writeJsonAtomic(path, config);
     return config;
   });
+}
+
+/**
+ * loadConfigPersistingIds for a reader that usually has nothing to write. The
+ * file is read without the lock, and a read that carries every id is the copy
+ * handed out; only one that lacks an id goes to loadConfigPersistingIds, which
+ * reads again and writes the ids under the lock. Loading through
+ * loadConfigPersistingIds alone would take the lock on every run, and a command
+ * that writes nothing would wait out another writer's hold on it (the 2 s
+ * budget, and its warning). null when there is no file.
+ */
+export async function loadConfigEnsuringIds() {
+  let raw;
+  try {
+    raw = JSON.parse(await readFile(getConfigPath(), 'utf-8'));
+  } catch (err) {
+    if (/** @type {any} */ (err).code === 'ENOENT') return null;
+    throw err;
+  }
+  if (accountIdsComplete(raw?.accounts)) return configFromFile(raw);
+  return loadConfigPersistingIds();
 }

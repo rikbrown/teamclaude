@@ -144,11 +144,13 @@ curl -X POST http://localhost:3456/teamclaude/threshold \
 
 It is a setting, not a nudge: the number is written to the config file (under its lock, so an edit the CLI or TUI made meanwhile survives) and the server reloads to apply it. The answer carries the stored ratio and, when one number replaced a per-bucket table, `dropped` names the buckets that went. Per-account `accounts[].switchThreshold` overrides are untouched. A request authenticated with a `proxy.clientKeys` entry is refused with 403 — a client key is a tenant of the proxy, not its operator; the shared `proxy.apiKey` and key-exempt loopback callers are allowed.
 
-You usually don't need to call it directly. `login`, `import`, `enable`, `disable`, `cordon`, `uncordon`, `priority`, `route`, `threshold`, `distribute`, `probe` and `warmup` notify a running server themselves.
+You usually don't need to call it directly. `login`, `import`, `enable`, `disable`, `cordon`, `uncordon`, `priority`, `ends`, `route`, `threshold`, `distribute`, `probe` and `warmup` notify a running server themselves.
 
-Control-plane **writes** (`reload`, `switch`, `session-pin`, `session-title`, `steer`, `threshold`, `priority`, `disable`, `account-cordon`, `account-release`) are refused when the request carries a browser `Origin` or a cross-site `Sec-Fetch-Site`. Loopback is exempt from the proxy API key so the CLI needs no configuration, but that exemption also covers any web page you happen to visit: a page can POST to `127.0.0.1` cross-origin without a preflight, and while it cannot read the reply, the write would still land. `curl` and the CLI send neither header and are unaffected. Reads (`status`) are not restricted — the same-origin policy already stops a page from seeing the response.
+Control-plane **writes** (`reload`, `switch`, `session-pin`, `session-title`, `session-advice/decline`, `steer`, `threshold`, `priority`, `disable`, `account-cordon`, `account-release`) are refused when the request carries a browser `Origin` or a cross-site `Sec-Fetch-Site`. Loopback is exempt from the proxy API key so the CLI needs no configuration, but that exemption also covers any web page you happen to visit: a page can POST to `127.0.0.1` cross-origin without a preflight, and while it cannot read the reply, the write would still land. `curl` and the CLI send neither header and are unaffected. Reads (`status`) are not restricted — the same-origin policy already stops a page from seeing the response.
 
 `GET /teamclaude/quota` is the compact read endpoint for status-line integrations. It returns tier-weighted fleet aggregates and the underlying per-account limits; see [Fleet quota endpoint](quota.md#fleet-quota-endpoint).
+
+`GET /teamclaude/session-advice?session=<id>` answers which account one session is on and whether to move it, and `POST /teamclaude/session-advice/decline` holds that advice; see [Session move advice](routing.md#session-move-advice). Both are refused for a client key.
 
 Switching the account by hand has the same headless path — the equivalent of pressing **s** in the TUI and confirming with the default target selected:
 
@@ -158,16 +160,20 @@ teamclaude switch me@example.com  # make that account the preferred one
 teamclaude switch me@example.com --session   # move only the session this runs in
 ```
 
-`--session [<id>]` moves one session instead of the fleet; see [Move one running session](routing.md#move-one-running-session).
+`--session [<id>]` moves one session instead of the fleet; see [Move one running session](routing.md#move-one-running-session). `teamclaude switch --session [<id>] --to <account>` does the same with the account last, and must be exactly that: the account is the last word, taken as given even when it starts with `-`, and the id, when given, is the one word between `--session` and `--to`. Anything else with `--to`, a word after the account included (an account name with spaces left unquoted), is an error and pins nothing. With no account, `teamclaude switch --session` prints that session's account, each account's weekly usage, any move advice and its `reason`, and when a move is recommended a `move command: teamclaude switch --session <id> --to <account>` line, the account as one shell word, to run exactly as printed (`--json` prints the raw [session advice](routing.md#session-move-advice), without that line); `teamclaude switch --session --stay` declines the advice for `cooldownMinutes`; `--stay` with an account or `--clear` is a usage error.
 
 Both forms need a running server: the choice is runtime state and is never written to the config, so there is nothing to apply on a later restart. The command wraps `POST /teamclaude/switch` with a `{"account": "<name>"}` body, and the account can be given as its display name, its bare email, its `accountUuid`, its `orgUuid`, or the fully qualified `accountUuid/orgUuid` — the last being the only form that tells apart one email that holds accounts in several orgs. The rotation index is deliberately not accepted — it is array position, so a script pinned to `1` would silently follow a different account after a removal.
 
-As in the TUI, a manual choice takes precedence over the automatic rankings (`priority`, and `preferSoonestWeeklyReset` where it is on) while the account remains available. Model-route allowlists, quota thresholds and account caps still apply; switching does not authorize paid extra usage. Once rotation moves off the account (it filled up, was throttled or disabled), the preference is gone and the rankings apply again; a model-scoped diversion or another provider's traffic does not release it. The choice is runtime state and is not persisted. A switch onto an account that cannot take traffic at all is still recorded, exactly as in the TUI, but the command says so instead of reporting a clean success:
+As in the TUI, a manual choice takes precedence over the automatic rankings (`priority`, and `preferSoonestWeeklyReset` where it is on) while the account remains available. Model-route allowlists, quota thresholds and account caps still apply; switching does not authorize paid extra usage. Once rotation moves off the account (it filled up, was throttled or disabled), the preference is gone and the rankings apply again; a model-scoped diversion or another provider's traffic does not release it. With `distributeSessions` on, new conversations are placed within the best priority tier and do not read the manual choice, so a switch to an account that a higher-priority account outranks is reported as not taking effect. Among accounts of the top priority, `eligible: true` then means a new conversation can be placed there, not that it will be. The choice is runtime state and is not persisted. A switch onto an account that cannot take traffic at all is still recorded, exactly as in the TUI, but the command says so instead of reporting a clean success:
 
 ```text
 Switched to "me@example.com"
 Warning: "me@example.com" is disabled, so requests will not route to it until that changes.
 ```
+
+So a switch to an account with `allowExtraUsage: true` holds only while that account is under its switch threshold. Past it, rotation moves to any account that can serve normally, as it does without a switch. The target can still be picked by the exhausted-fleet fallback like any other account, and once rotation has moved away, a later automatic return to the account does not bring the earlier choice back.
+
+With `preferExtraUsage: true` alongside `allowExtraUsage: true` on the target, the switch also keeps traffic on that subscription past its threshold, among the subscriptions the preference would use. It does not widen what may be spent: another subscription that can serve normally still goes first, paid credits still wait for included quota left on any subscription, and an API account with a strictly lower `priority` number still outranks it. Where one of those applies, the switch is reported as not taking effect and rotation proceeds as above. See [Extra-usage fallback](quota.md#extra-usage-fallback).
 
 Taking an account out of rotation, or moving it in the priority order, has a headless path too — the web equivalent of `teamclaude disable` / `enable` and `teamclaude priority --first` / `--last`, and what the browser dashboard's buttons call:
 
@@ -181,6 +187,56 @@ curl -X POST http://localhost:3456/teamclaude/account-cordon \
 ```
 
 `POST /teamclaude/priority` takes `{"account", "place": "first" | "last"}` or `{"account", "priority": <integer>}`; `POST /teamclaude/disable` takes `{"account", "disabled": true | false}`. Both accept an optional `"org"` (name or uuid) for an email that holds accounts in several orgs — an ambiguous name is refused rather than guessed. Unlike `switch`, these are config **writes**: the change is saved to the config file under the same lock the TUI uses, and the server reloads itself afterwards, so it survives a restart. `place` is relative — `first` lands one below the lowest priority in the fleet, `last` one above the highest — and the reply carries the account as it now stands (`{"ok": true, "name": ..., "priority": ...}` or `{"ok": true, "name": ..., "disabled": ...}`), so a caller learns the number it did not choose. `POST /teamclaude/account-cordon` takes `{"account", "cordoned": true | false}` (see [Cordoning one account](#cordoning-one-account)) and answers the same way, plus `remaining`, the conversations still on the account, and `inService`, how many other accounts of its provider are neither disabled nor cordoned. An unknown or ambiguous account, or a priority that is not an integer, is a `400` with the reason; a write that landed but whose reload failed is a `500` that says so, since the file did change. A request authenticated with a `proxy.clientKeys` entry is refused with `403`: a client key is for using the fleet, not for changing which accounts it contains. Use the shared proxy key, or call from the proxy's own machine.
+
+### Claude Code status line and Stop hook
+
+Two commands read the JSON Claude Code passes on stdin and answer from the running server. Neither can fail Claude Code: stdin is read for at most a second and 256 KiB, each server read gives up after a second, and both exit 0. They take only the proxy port and key from the config, so a bad egress proxy setting does not stop them.
+
+- `teamclaude statusline`, for `statusLine`, prints one line: the session's account (`(pinned)` for a manual pin), each account's weekly usage, and the move the server advises, if any — `on a | a 90% · b 25% | move to b`, or `pinned account unavailable, move to b` when the session's requests are not forwarded to its pinned account ([`pinned-unavailable`](routing.md#session-move-advice)). Account names are printed on one line, control characters removed. Without the session's account it prints `session unknown | fleet 40% | a 90% · b 25%`; with no server, `teamclaude offline`. With `sessionAdvice` off it still shows the account and usage.
+- `teamclaude stop-hook`, for the `Stop` hook, prints a hook answer when the advice newly applies, and nothing otherwise or while `sessionAdvice` is off. An `out-of-band` move is announced once until the advice goes away; a change of destination alone is not announced again. A `pinned-unavailable` pin is announced once per pinned account, and again only after the pin has moved to another account that serves. Nothing is announced for `router-moves`, where the router moves the session itself. Suggested moves use the `teamclaude switch --session --to <account>` form, with the account as one shell word, single-quoted unless it is plain. The word is the name with control characters removed and runs of whitespace collapsed, so for a name that has either the printed command names the cleaned name, which matches no account unless one is called exactly that, and fails. The answer is `{"systemMessage": "…"}`; with `sessionAdvice.ask` on, an `out-of-band` move is `{"decision": "block", "reason": "…"}` instead, asking Claude to offer the user the move or `--stay`. A dead pin is never a `block`, since the turn Claude would continue goes to the same account.
+
+The session id is stdin's `session_id`; when the proxy does not know it, `$CLAUDE_CODE_SESSION_ID` is tried. Whether either equals the `x-claude-code-session-id` header the proxy keys sessions by is not established. Once it has something to remember for a session, the Stop hook keeps a file for it, `<session_id>.json` holding `{"outOfBand", "pinnedAnnounced"}`, in `teamclaude-advice/` under the OS temp directory, created mode `0700`; on POSIX systems a directory with other permissions or another owner is not used. Files are left for the OS's temp cleanup. Both commands read with the proxy key, so they need the shared `proxy.apiKey` or a key-exempt loopback caller, not a client key.
+
+### Install the Claude Code surfaces
+
+The status line, the Stop hook and the `/switch` skill are assets of this repository and are not wired up by installing the package. They read the session advice, so the server must have `sessionAdvice` on.
+
+1. Make `teamclaude` run this code: `npm link` in the clone, or `node <clone>/src/index.js` wherever the examples below say `teamclaude`.
+2. Link the skill. `claude-code/` is not in the npm package (`package.json` `files` lists only `src/`), so link it from a clone:
+
+   ```bash
+   mkdir -p ~/.claude/skills
+   ln -s <clone>/claude-code/skills/switch ~/.claude/skills/switch
+   ```
+
+   The skill is `/switch`, or `/switch <account>` to move the session without being asked.
+3. Add the status line and the Stop hook to `~/.claude/settings.json`, merging with what is already there:
+
+   ```json
+   {
+     "statusLine": { "type": "command", "command": "teamclaude statusline" },
+     "hooks": {
+       "Stop": [
+         { "hooks": [{ "type": "command", "command": "teamclaude stop-hook" }] }
+       ]
+     }
+   }
+   ```
+
+4. Turn the advice on in the teamclaude config. A move recommendation also needs `expiryRouting`; the pinned-account-unavailable warning does not.
+
+   ```json
+   {
+     "sessionAdvice": { "enabled": true },
+     "expiryRouting": { "enabled": true }
+   }
+   ```
+
+   Add `"ask": true` to `sessionAdvice` to have the Stop hook ask Claude to offer the move. See [Session move advice](routing.md#session-move-advice).
+
+The skill's frontmatter, `$ARGUMENTS` substitution, inline `!` command and `allowed-tools` field, and the `statusLine` and `Stop` hook settings shapes, follow the Claude Code docs for [skills](https://code.claude.com/docs/en/skills), [status line](https://code.claude.com/docs/en/statusline) and [hooks](https://code.claude.com/docs/en/hooks). The skill pre-approves only `Bash(teamclaude switch --session *)`, and every command it runs starts that way, with the account last behind `--to`. `/switch <account>` takes everything after the command as one account name (Claude Code substitutes `$ARGUMENTS` as typed, and the skill single-quotes it), so a name with spaces needs no quotes, and an extra word makes a name that matches no account and fails. How Claude Code's permission matcher treats shell operators (`;`, `&&`, `|`, `#`, a substitution) inside a command that starts with that prefix is not verified here.
+
+Checked in a real Claude Code session: the status line shows the session's own account and each account's usage; `/switch` shows the advice and asks, and "stay" is recorded; `/switch <account>` moves the session without a permission prompt, and the status line then marks it as pinned. Not yet checked there: the Stop hook's one-line notice at the end of a turn, accepting a recommended move from `/switch`, and the permission rule's handling of a command with a shell operator in it. To keep the permission prompt on every command, remove `allowed-tools` from the skill.
 
 ### TUI keyboard shortcuts
 
@@ -290,7 +346,7 @@ Arguments after `--` go to `claude`:
 teamclaude run -- --model opus
 ```
 
-**Claude Code still needs a login of its own.** In both modes the client checks its local login (`~/.claude/.credentials.json`, or the Keychain on macOS) before it sends anything, and the proxy only sees a request once that check passes. The pool's accounts do not stand in for it: they are what the proxy uses upstream, and the two expire independently. So a `claude` that exits at once with `Failed to authenticate: OAuth session expired and could not be refreshed` is reporting its own login, not the pool — run `claude auth login` and launch again. `run` prints a hint to that effect when `claude` dies within seconds of launch and the local login is missing or past its expiry.
+**Claude Code still needs a login of its own.** In both modes the client checks its local login (`~/.claude/.credentials.json`, or the Keychain on macOS) before it sends anything, and the proxy only sees a request once that check passes. The pool's accounts do not stand in for it: they are what the proxy uses upstream, and the two expire independently. The exception is a pool account holding this same login, imported with `teamclaude import` or read through `importFrom`: the two then share it, and whichever renews first ends the other's copy (see [Import from Claude Code](accounts.md#import-from-claude-code)). So a `claude` that exits at once with `Failed to authenticate: OAuth session expired and could not be refreshed` is reporting its own login, not the pool — run `claude auth login` and launch again. `run` prints a hint to that effect when `claude` dies within seconds of launch and the local login is missing or past its expiry.
 
 ### Setting the environment yourself
 
@@ -340,6 +396,8 @@ teamclaude dashboard         # Open the web dashboard in the browser (needs serv
 teamclaude service install   # Run the proxy as a login service (uninstall/status/print)
 teamclaude switch [name]     # Prefer an account; no name lists them (needs server)
 teamclaude steer [name]      # Send NEW conversations to one account (--for 6h, --redeem, --clear)
+teamclaude statusline        # Claude Code status line: account, usage, move advice
+teamclaude stop-hook         # Claude Code Stop hook: notice when move advice applies
 teamclaude remove <name>     # Remove an account (by name or email)
 teamclaude disable <name>    # Temporarily exclude an account from rotation
 teamclaude enable <name>     # Re-enable it (also clears a stuck error state)
@@ -347,6 +405,7 @@ teamclaude cordon <name>      # Send it no new conversations; the ones on it sta
 teamclaude uncordon <name>    # Send it new conversations again
 teamclaude release <name>     # Unpin the conversations on it; each is placed again on its next request
 teamclaude priority <name> 1 # Set rotation priority (lower = preferred)
+teamclaude ends <name> 2026-12-01 # The account stops being usable then: spend it first (--clear to unset)
 teamclaude rename <name> <new> # Rename an account (and the routes that list it)
 teamclaude route list        # Manage per-model routes (add/rm)
 teamclaude threshold 90      # Utilization at which rotation leaves an account
@@ -507,9 +566,25 @@ The gates are the ones every other route passes, plus the MCP endpoint's rule fo
 
 Each request forwarded to an account becomes one row: when, which consumer, model and account, the input, cache-read, cache-write and output tokens, and the status. A request the pool could not serve is a row too, with status `429` and the account `(unknown)`. Calls that go straight to the client's own login (its identity and control-plane calls, token refreshes), plain forward-proxy traffic and WebSocket channels are not recorded, and neither are the telemetry batches the activity log hides (`eventLogging`). A `GET` that the [scope-denial retry](routing.md#token-scope-denials) passes on to the client's login is, under the account `(unknown)` with no tokens. A consumer is a `proxy.clientKeys` name, so give each of your machines and integrations its own key to tell them apart. Traffic without a named key is booked as `(shared)` (`proxy.apiKey`), `(local)` (a key-exempt caller on the proxy's own machine) or `(open)` (a proxy with no key at all). Accounts are booked by name. Nothing of a request's content is stored.
 
-`GET /teamclaude/usage?window=5h|7d|30d` answers with `totals` and the same measures per consumer (`callers`), per consumer and model (`callerModels`), per model (`models`) and per account (`accounts`): `requests`, `tokens`, `input`, `cacheRead`, `cacheWrite`, `output`, and `refusals` (requests answered `429`). `5h` is read from the raw rows; `7d` and `30d` from an hourly rollup, snapped to whole hours, with `since` and `until` saying what the window covers. Any other window is a 400. The route sits behind the same gates as `/teamclaude/status`.
+`GET /teamclaude/usage?window=5h|7d|30d` answers with `totals` and the same measures per consumer (`callers`), per consumer and model (`callerModels`), per model (`models`) and per account (`accounts`): `requests`, `tokens`, `input`, `cacheRead`, `cacheWrite`, `output`, `refusals` (requests answered `429`) and `capped` (requests refused by a [weekly key limit](#weekly-spending-limit-per-client-key)). `5h` is read from the raw rows; `7d` and `30d` from an hourly rollup, snapped to whole hours, with `since` and `until` saying what the window covers. Any other window is a 400. The route sits behind the same gates as `/teamclaude/status`.
 
 The file sits beside the config, named after it: `config.usage.db` for `config.json`, and like the config it is readable by its owner only. Raw rows are kept 90 days and the hourly rollup 400 days, pruned once a day. History never fails or delays a request. A row that cannot be written, a locked file included, is logged and skipped. A file that cannot be opened at start turns history off, says so in the log, and the route then answers `available: false`; a file found corrupt at start is moved aside and a new one started instead. History needs `node:sqlite`: Node 22.13 or later, or 22.5 to 22.12 started with `--experimental-sqlite`. On an older Node the route answers `available: false` the same way.
+
+## Weekly spending limit per client key
+
+A `proxy.clientKeys` entry can carry `weeklyUsd`, a limit on what that key may spend in a week. It is meant for one of your own agents that runs unattended: a loop that goes wrong stops at the figure instead of using up the week of every account.
+
+```json
+{ "proxy": { "clientKeys": [{ "name": "nightly-agent", "key": "tc-…", "scope": "inference", "weeklyUsd": 200 }] } }
+```
+
+The spend is an estimate at API list prices, from the usage block of each reply the pool serves the key, priced with the same table as the [prepaid-credit estimate](quota.md#prepaid-api-credit) at the model the account was sent (after its `modelMap`). A reply the table cannot price, such as an unknown model, Priority Tier or a Codex reply, is charged the highest rate the table has in each category, which can be many times its real list price, so such a key stops early; the log says so once per model and reason. A reply with no usage block costs nothing.
+
+The week starts Monday 00:00 UTC. Each request to the pool is checked before an account is chosen: a key at or over its figure gets `403` with a `permission_error` naming the limit, the spend and the reset time. (Not `429`, which Claude Code retries.) Requests already running when the key crosses the figure finish, so the spend can end above it by what they cost. Requests that do not go to the pool, such as the client's own login calls, and requests without a named key are not limited.
+
+`/teamclaude/status` lists each key with a limit under `clientLimits`, with `weeklyUsd`, `spentUsd`, `remainingUsd` and `resetsAt`, or `invalid: true` for a figure that cannot be read (also reported in the log when the config is loaded). With [usage history](#usage-history) on, the usage route counts refused requests under `capped`.
+
+The spend is kept in memory. With usage history on, a restart reads the current week back from the recorded rows. Rows written before this feature carry no cost, so the week of the upgrade starts low. Without usage history a restart starts the week from zero.
 
 ## Auto-update
 
@@ -547,6 +622,8 @@ Bodies are truncated past a size cap, and files older than the retention window 
 `--activity-log FILE` appends the TUI activity lines to a file instead, and works in headless mode too. The flag lasts one launch; set [`activityLog`](configuration.md#fields) in the config to keep it across restarts.
 
 A request line whose response reported token usage ends with its prompt-cache figures: `cache r180k w3k in1k` is tokens read from the cache, written to it, and sent uncached (`k` from 1000 up). By the share read from the cache, r / (r + w + in), the TUI paints it green at 0.90 or more (hit), yellow from 0.50 (partial) and red below (miss), and dims it when the request neither read nor wrote the cache. A miss also ends with ` MISS`, so it can be found with grep in a log file, which has no colour. After a failover or a retry the figures are the last attempt's.
+
+A request line whose response was a JSON error from the upstream names its type after the status: `(404 thread_not_found, 0.3s)`. The name is `error.details.error_code` when the body has one, else `error.type`, kept only if it is a plain identifier (letters, digits, `_`, `.`, `-`) and cut to 32 characters; nothing else from the body is shown. Errors the proxy answers itself, non-JSON errors and bodies over 64 KiB are shown with the status alone.
 
 Claude Code's telemetry (`/api/event_logging/*`) is high-volume activity-log noise and is hidden from the log by default; see [`eventLogging`](configuration.md#fields) to block or show it instead.
 

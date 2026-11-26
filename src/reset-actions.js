@@ -46,8 +46,10 @@ import { rememberResetReading, resetReading, RESET_CLAIM_TTL_MS, RESET_READ_FLOO
  * @property {string[]} [cleared]
  */
 
-/** @param {Record<string, any>} account */
-function oauthAccount(account) {
+/** Whether resets apply to the account at all: an OAuth Claude account
+ * (not a third-party backend) or a Codex account.
+ * @param {Record<string, any>} account */
+export function oauthAccount(account) {
   const provider = providerOf(account);
   return !!account && account.type === 'oauth'
     && (provider === 'codex' || (provider === DEFAULT_PROVIDER && !account.upstream));
@@ -57,8 +59,18 @@ function oauthAccount(account) {
 function accountBlock(account) {
   if (!oauthAccount(account)) return 'not an OAuth Claude or Codex account';
   if (account.disabled) return 'account is disabled';
+  if (inferenceOnly(account)) return 'a long-lived token serves inference only and cannot read or redeem resets';
   if (providerOf(account) === DEFAULT_PROVIDER && !account.orgUuid) return 'missing Claude organization id';
   return null;
+}
+
+/**
+ * A long-lived account (long-lived.js): the reset read and the claim both need
+ * a scope its token does not carry, so neither is sent.
+ * @param {Record<string, any>} account
+ */
+function inferenceOnly(account) {
+  return account?.longLived === true;
 }
 
 /**
@@ -115,7 +127,7 @@ export function createResetActions({ accountManager, claudeRedeemer, codexRedeem
       atLimit: null, exhausted: [], cooldownUntil: null, weeklyResetsAt: null,
       fleetHoldUntil, grants: [], seenAt, stale: false, retryAt: null,
     };
-    if (!oauthAccount(account)) return { ...details, error: accountBlock(account) };
+    if (!oauthAccount(account) || inferenceOnly(account)) return { ...details, error: accountBlock(account) };
     try {
       const blocked = accountBlock(account);
       const held = holdWarning(redeemer, fleetHoldUntil, at);
@@ -146,7 +158,7 @@ export function createResetActions({ accountManager, claudeRedeemer, codexRedeem
         details.weeklyResetsAt = status.weeklyResetsAt;
         details.grants = status.grants.map((/** @type {import('./claude-resets.js').ResetStatus['grants'][number]} */ grant) => {
           const warnings = [...held];
-          if (!status.atLimit && grant.useRequiresLimit !== false) warnings.push('not at a usage limit — upstream will probably decline; nothing is spent then');
+          if (!status.atLimit && grant.useRequiresLimit !== false) warnings.push('not at a usage limit — upstream may still accept, and the reset is then spent');
           if (!status.exhausted.some(limit => limit.startsWith('seven_day'))) warnings.push('no weekly limit is exhausted');
           const uncovered = status.exhausted.filter(limit => !grant.clears.includes(limit));
           if (uncovered.length) warnings.push(`does not clear ${safeLine(uncovered.join(', '), 120)}`);
@@ -195,18 +207,43 @@ export function createResetActions({ accountManager, claudeRedeemer, codexRedeem
    * @returns {Promise<ResetDetails>}
    */
   async function readFresh(account) {
-    if (!oauthAccount(account)) return detailsFor(account, null, null);
+    if (!oauthAccount(account) || inferenceOnly(account)) return detailsFor(account, null, null);
     const read = providerOf(account) === 'codex'
       ? await codexRedeemer.readDetails(account)
       : await claudeRedeemer.readStatus(account);
     return detailsFor(account, read, read?.error ? null : resetReading(account)?.seenAt ?? null);
   }
 
+  /** Removal renumbers the accounts after it, so a removed account's index
+   * names a neighbour: nothing here may act through the index of an account
+   * that is no longer listed.
+   * @param {Record<string, any>} account
+   */
+  const listed = account => accountManager.accounts.includes(account);
+
+  /** One upstream read per account at a time: a panel reopened while its first
+   * read is pending shares that read instead of sending another.
+   * @type {WeakMap<object, Promise<ResetDetails>>} */
+  const pendingReads = new WeakMap();
+
+  /** @param {Record<string, any>} account
+   * @returns {Promise<ResetDetails>}
+   */
+  function read(account) {
+    let pending = pendingReads.get(account);
+    if (!pending) {
+      pending = readOnce(account).finally(() => pendingReads.delete(account));
+      pendingReads.set(account, pending);
+    }
+    return pending;
+  }
+
   /** A panel read is fresh, but a failure retains the last successful grants.
    * @param {Record<string, any>} account
    * @returns {Promise<ResetDetails>}
    */
-  async function read(account) {
+  async function readOnce(account) {
+    if (!listed(account)) return { ...detailsFor(account, null, null), error: 'account is no longer listed', grants: [] };
     if (oauthAccount(account)) {
       try { await accountManager.ensureTokenFresh(account.index); } catch (/** @type {any} */ err) {
         rememberResetReading(account, providerOf(account) === 'codex' ? 'codex' : 'claude', {
@@ -222,14 +259,23 @@ export function createResetActions({ accountManager, claudeRedeemer, codexRedeem
   /**
    * @param {Record<string, any>} account
    * @param {string} grantId
+   * @param {{ refuseWhileHeld?: boolean }} [opts]  refuseWhileHeld: decline
+   *   while the fleet hold a recent claim armed is running. The panel shows
+   *   the hold as a warning to the person confirming; a caller with nobody
+   *   to read it (the control API) is refused instead, so that a request
+   *   retried after a lost answer does not spend a second reset.
    * @returns {Promise<ManualRedeemResult>}
    */
-  async function redeem(account, grantId) {
+  async function redeem(account, grantId, { refuseWhileHeld = false } = {}) {
     const name = safeLine(account?.name || 'unknown account', 64);
     /** @param {string} reason @returns {ManualRedeemResult} */
     const decline = reason => ({ redeemed: false, uncertain: false, message: `Manual reset on "${name}": ${safeLine(reason, 240)}` });
+    if (!listed(account)) return decline('account is no longer listed');
     const blocked = accountBlock(account);
     if (blocked) return decline(blocked);
+    if (refuseWhileHeld && holdUntilFor(account) != null) {
+      return decline('a reset was spent, or may have been, within the last hour; read again, and send "force": true to spend another');
+    }
     const redeemer = redeemerFor(account);
     if (manualInFlight || redeemer.manualInFlight) return decline('a manual reset is in progress');
     if (redeemer.inFlight) return decline('an automatic reset is in progress');
@@ -259,6 +305,9 @@ export function createResetActions({ accountManager, claudeRedeemer, codexRedeem
       if (!grant) return decline('chosen reset is no longer listed');
       const currentBlock = accountBlock(account) || grant.blocked;
       if (currentBlock) return decline(currentBlock);
+      // Asked again next to the claim: the refresh and the read above are where
+      // a removal (CLI, MCP, a reload) lands, and the claim cannot be undone.
+      if (!listed(account)) return decline('account is no longer listed');
       const result = await redeemer.redeemGrant(account, grantId, { manual: true });
       const verdict = 'result' in result ? result.result : 'code' in result ? result.code : null;
       return {

@@ -18,7 +18,40 @@ If the profile cannot be identified, login stops without adding a placeholder
 account. Retry after confirming the credential is valid, or pass
 `teamclaude login --name <name>` to add it without profile detection. A
 credential the upstream rejects with 401 (and that cannot be refreshed) is
-refused regardless of `--name` — log in again to get a fresh one.
+refused regardless of `--name` — log in again to get a fresh one. A login or
+import whose `--name` is an API-key account's, and no Claude OAuth account's, is
+refused before anything is opened, read or renewed. One that would still end up
+saved under such a name (a sign-in as another account than the OAuth one of that
+name, or a login or import without `--name` whose profile's email is that name)
+is refused when it is saved, and its token, or the one a renewal gave it, is
+dropped. Either way nothing is written: give it another `--name`, or remove or
+rename that account first.
+
+## Long-lived login
+
+```bash
+teamclaude login --long-lived --name work
+```
+
+Signs an account in with a token that lasts a year and is never refreshed. It makes the request `claude setup-token` makes: the usual sign-in flow, on the same client id and token endpoint, asking for the scope `user:inference` alone, with `expires_in` set to one year when the code is exchanged. The flow is the copy/paste one of `login --token`. The entry is saved with `"longLived": true` and no refresh token.
+
+Use it for an account that only has to serve completions through the proxy, where you would rather renew one login a year than depend on every refresh succeeding. For everything else, the ordinary `teamclaude login` is the better choice, because an inference-only token leaves out the following.
+
+- **`--name` is required.** The token cannot read the account's profile, so the proxy has no email, plan or organization to name it by, and the login stops before the sign-in link is shown when `--name` is missing. The account is known by that name, and by the account and organization the token endpoint's answer names, when it names both (an answer that names no organization counts as naming no account). Unless the answer names another account, giving the name of an existing account replaces that account's token and keeps what an earlier full login recorded about it (its ids, organization and plan). An answer that names an account decides which entry the token goes to, as the profile does for `teamclaude login`: an entry that already holds that account in that organization (or with no organization recorded) is the one renewed, under its own name, and it becomes long-lived (an ordinary one stops syncing on this install). Otherwise the name given decides: an entry of that name holding no account ids is renewed and takes the answer's, one holding another account is left as it was and the sign-in is added beside it under that name, and with no entry of that name the sign-in is added under it. The login prints the name it saved the token under.
+- **No usage reads.** The quota probe, the profile re-check and `teamclaude accounts` skip the account, because the usage and profile endpoints answer such a token with `403 oauth_scope_insufficient`. Its quota is what the responses to its own requests state in their headers. Until it has served a request, its bars are empty, and what only the usage read reports (extra-usage spend, banked resets) is not shown.
+- **No resets.** Automatic and manual reset redemption leave the account out.
+- **Re-login once a year.** Nothing renews the token. `teamclaude status` shows `Login    long-lived token expires in 200 days (2027-06-04)`. From 14 days out the row turns yellow and names the command, the TUI draws the same line under the account's row, and the server logs one line per account per day. After the date, the first request the token is refused for takes the account out of rotation as `error`, with `teamclaude login --long-lived` as the remedy. Renew it with the same `--name`. A renewal is saved onto the entry that already holds the account the token names; when that is not the entry given with `--name` (a long-lived entry saved before the account was known, next to a synced login of the same account), the command says so and the named entry is left to remove.
+- **Not synced.** With [callback.net sync](#syncing-accounts-across-machines-callbacknet), the token is never stored for your other installs, and a refreshing login stored by another install never replaces it. Removing the account still travels, and it removes the account, not only this token: when the entry carries an account's ids (those its sign-in named, or an earlier full login recorded), `teamclaude remove` writes the tombstone into the store's row for that account and organization, and every other install removes it too, an ordinary sign-in of it there included. The tombstone goes only into the row stored under exactly the account and organization the entry names (an entry that names no organization goes by the row stored without one). When the store has no such row, nothing is recorded, and the store's other accounts of that person that this one kept out are added here at the next pass, as refreshing accounts; removing one of those removes it on every install. The running proxy's log says so; `teamclaude remove` itself prints nothing about it.
+
+`teamclaude status` marks the account with a `Token` row saying so, and its `Probe` row reads `not applicable`. `GET /teamclaude/status` carries `accounts[].longLived: true` and `accounts[].expiresAt` (epoch ms) for such an account, and neither key for any other.
+
+The login fails, and saves nothing, when the token endpoint grants a lifetime more than a day short of the year. `--long-lived` cannot be combined with `--api`, `--codex` or `--oauth`.
+
+Claude Code's own identity and control-plane calls go out on its own login (see [MITM mode](proxy-modes.md#mitm-proxy-mode-default)), so they do not depend on this token. Any other `GET` that the token is refused for takes the [scope-denial retry](routing.md#token-scope-denials) on the client's login.
+
+An ordinary `login` or `import` of the same account removes the mark, and the account is refreshed again. A long-lived login onto an entry that names an `importFrom` file removes that delegation, since the file would be read over the saved token on every load. On an entry that still names `importFrom`, the mark is ignored: that file is a refreshing login.
+
+A token you already have from `claude setup-token` can be used without this command: add an entry by hand with `"type": "oauth"`, `"longLived": true` and the token as `"accessToken"` (see `config.example.json`). Without an `"expiresAt"` (epoch ms) on the entry, the proxy does not know when the token ends and cannot warn ahead of it.
 
 ## Import from Claude Code
 
@@ -41,7 +74,21 @@ placeholder account. Pass `--name <name>` to explicitly import without profile
 detection. An expired access token is refreshed on import when the file carries
 a refresh token; a credential the upstream rejects with 401 (and that cannot be
 refreshed) is refused regardless of `--name` — run `claude /login` and import
-again, or `teamclaude login`.
+again, or `teamclaude login`. For a credential with a refresh token, only the
+token endpoint's own refusal counts as "cannot be refreshed" (see
+[Why an account is in `error`](#why-an-account-is-in-error)): a refresh that
+fails otherwise, as on a page from a firewall in front of the endpoint, leaves
+the credential importable with `--name`.
+
+**An imported account shares one login with Claude Code.** `import` copies the
+tokens; it does not sign in again, and nothing writes a renewed token back to
+Claude Code's store. A refresh rotates the token family (see
+[syncing](#syncing-accounts-across-machines-callbacknet)), so whichever side
+renews first, the proxy or Claude Code, leaves the other holding a refresh
+token that no longer works: Claude Code asks for a new login, or the account
+goes into `error` here (`re-login` in the TUI). The first renewal can be the
+import itself, when the copied access token has already expired, so Claude Code
+may need a new login straight away.
 
 ## Delegating credentials to a file (`importFrom`)
 
@@ -51,7 +98,7 @@ Instead of storing an OAuth account's tokens in `teamclaude.json`, an account en
 { "name": "me@example.com", "type": "oauth", "importFrom": "~/.claude/.credentials.json" }
 ```
 
-The tokens (`accessToken`, `refreshToken`, `expiresAt`) are read from that file at startup and again on every config reload, so a login refreshed by Claude Code itself is picked up without re-running `teamclaude import`. Every other field on the entry (`priority`, `disabled`, `upstream`, `modelMap`, …) is kept as written. A file with no token skips the account with a message rather than sending an empty credential upstream. `teamclaude import` is the alternative: it copies the tokens into the config once.
+The tokens (`accessToken`, `refreshToken`, `expiresAt`) are read from that file at startup and again on every config reload, so a login refreshed by Claude Code itself is picked up without re-running `teamclaude import`. Until that reload the account still holds the old tokens, so the entry and Claude Code share one login, as an [import](#import-from-claude-code) does. A renewal the proxy makes is never written to the file, so it lasts only until the proxy restarts: at start the file's tokens replace the entry's again, and unless Claude Code was signed in again since, or callback.net sync holds the newer token, the refresh token among them is the one that renewal retired. Every other field on the entry (`priority`, `disabled`, `upstream`, `modelMap`, …) is kept as written. A file with no token skips the account with a message rather than sending an empty credential upstream. `teamclaude import` is the alternative: it copies the tokens into the config once.
 
 ## API key
 
@@ -102,7 +149,9 @@ teamclaude routing <name> none  # clear it
 teamclaude routing <name> --check  # test the proxy the account already has
 ```
 
-Rename while the server runs: an API-key account's saved quota readings are matched by name, so a rename made with the server stopped loses them on the next start. Sessions launched with `TC_ACCT=<old name>` pin by name and need relaunching with the new one.
+`teamclaude accounts` reads the profile, and first renews a token about to expire, only for Claude logins. Those are Anthropic's endpoints, so a Codex account's tokens and a [third-party backend](#third-party-backend-accounts)'s key are never sent there: those rows are listed as `Codex` and `third-party backend`. `teamclaude api <path>` likewise resolves a path against the account's own host: `https://chatgpt.com` for a Codex login, `upstream` for a backend. With no `--account` it uses the first Claude login, or the first Codex login for an absolute `https://chatgpt.com/…` URL; an absolute URL on a provider's own host is refused when no login of that provider is configured. Any other absolute URL is used as given, so name the account with `--account`.
+
+A rename keeps quota readings, and an account removed and added back as a new entry starts with none. The first start after upgrading can still match them by name. Sessions launched with `TC_ACCT=<old name>` pin by name and need relaunching with the new one.
 
 `login`, `import`, `enable`, `disable`, `priority`, `rename` and `routing` notify a running server to reload, so credential, priority, enable/disable, name and routing changes are picked up live; the same reload (POST `/teamclaude/reload`, or **R** in the TUI) also applies hand edits to an account's `upstream`/`modelMap`. Account **removals** made on disk (`teamclaude remove` from another shell, or a hand edit) are applied by the same reload: a running account whose entry is gone from the file is dropped from the fleet, and the reload reports how many it added and how many it removed. An account added in the TUI is safe during the moment between its addition and its save — a reload that reads the file first leaves it alone rather than treating the missing row as a removal. Removing one from the TUI or through the [MCP endpoint](usage.md#mcp-endpoint)'s `remove_account` takes effect at once.
 
@@ -125,10 +174,19 @@ While signed in, every **OAuth** account (Claude and Codex) is kept as one row o
 
 - **A pass** runs when the server starts, on every reload (`callback login`, `login`, `import` and `callback sync` all trigger one) and once a day. A row with no local account becomes one, so signing in on a new machine brings every account over. A row whose token is newer than the local one — the later `expiresAt`, which a renewal always pushes forward — replaces it. A local account newer than its row updates the row, and one with no row creates it — but only with a token this install just renewed (below).
 - **Only fresh tokens are stored.** A token is written to the store only when the token endpoint has just minted it: a renewal on this install, or a `login` or `import`. A token read from the config at start, or from disk on a reload, may have died while the proxy was down, and one that served a request may still have been revoked since, so neither is ever stored. An account holding one only reads (it adopts newer tokens and follows tombstones); its next renewal writes the row. That renewal is still made under a lock: with no row yet, it first creates one holding only the account's identity and no token, so that two installs started from the same config renew the account once, not twice.
-- **A token refresh** goes through the row's advisory lock, so one install renews and the rest adopt. A refresh rotates the token family, and two installs renewing one account at once would each invalidate the other's copy — which is exactly the "sign in again everywhere" this exists to end. With the lock taken, the row is read first (the lock answers with it): if it holds a token other than this install's, another install renewed or signed in since, and that token is adopted whatever its expiry; the provider is not called. The one exception is a row this install wrote itself with an older token than it holds now, a renewal of its own that never reached the store, which is renewed over rather than taken back. Refused, another install is renewing: a token that is still good (the refresh runs five minutes ahead of expiry) is simply kept, the renewal arrives through the store, and the next request asks again. A token that has already expired, or that upstream just rejected, waits instead, re-reading every 5 seconds for 30 seconds, adopts what the holder stores, and otherwise tries the lock again; a lock that nobody releases times out after 30 seconds. A store that cannot be reached never stops a refresh: the account is renewed without it and stored on the next pass.
-- **A sign-in** (`login`, `import`) is stored right away, over whatever the row held.
+- **A token refresh** goes through the row's advisory lock, so one install renews and the rest adopt. A refresh rotates the token family, and two installs renewing one account at once would each invalidate the other's copy — which is exactly the "sign in again everywhere" this exists to end. With the lock taken, the row is read first (the lock answers with it): if it holds a token other than this install's, another install renewed or signed in since, and that token is adopted whatever its expiry; the provider is not called. Two kinds of row are renewed over rather than taken back, as taking them would revive a refresh token this install already used: a row holding the very tokens the proxy's last renewal of the account started from, whoever wrote that row (the renewal was made while signed out of callback.net, or every write of it failed, or another install wrote those tokens back since), until the proxy restarts, which forgets them (a command-line renewal keeps no such note); and a row this install wrote itself with an older token than it holds now, a renewal of its own that never reached the store. Refused, another install is renewing: a token that is still good (the refresh runs five minutes ahead of expiry) is simply kept, the renewal arrives through the store, and the next request asks again. A token that has already expired, or that upstream just rejected, waits instead, re-reading every 5 seconds for 30 seconds, adopts what the holder stores, and otherwise tries the lock again, three rounds in all before that refresh fails; a lock that nobody releases times out after 30 seconds.
+- **An unreachable store stops renewals.** When callback.net cannot be reached, or refuses this install's session, a refresh does not wait: nothing renews a token the store holds without the lock, so a token that is still good is kept and the next request asks again, and one that has expired, or that upstream just rejected, fails that refresh at once. While the store is out of reach no OAuth account is renewed at all: each serves until its token expires, and then its refreshes fail until the store answers. `teamclaude callback logout` stops the sync, and the next refresh goes without the lock. While signed in, the only renewal made without the lock is when a read of the store finds neither a row for the account nor one holding its token, and the account is one the store cannot carry (no identity to key a row on) or one in error, which no other install can hold.
+- **A sign-in** (`login`, `import`) is stored right away, over whatever the row held (not a [long-lived login](#long-lived-login), which is never stored).
 - **An account in error never writes.** Once upstream has rejected an account's token (status `error`, "needs re-login"), what this install holds is dead, so it is never stored — not by a pass, not as a token change — however late its `expiresAt`. It only reads: the moment it goes into error, and at every pass after, a row holding a different token (another install renewed it, or you signed in there) is adopted whatever its expiry, and the account is back in rotation. If instead the row still holds the very refresh token that was rejected, the row is emptied: under its lock, and only if it is unchanged once locked, its refresh token becomes `""`. An empty refresh token means "needs a sign-in": no install adopts it or adds an account from it, and the first install with a working token for that account overwrites it, whatever the expiry.
-- **Removal travels.** `teamclaude remove` (or the TUI, or the MCP endpoint) writes a tombstone into the account's row — `{"_deleted": "<time>"}` — and every other install removes the account at its next pass. A token refresh on an install that has not yet seen the tombstone still goes through, but never writes over it; only an explicit sign-in (`login`, `import`) does, which is how a removed account comes back everywhere. A tombstone older than a week is deleted by whichever pass sees it.
+- **Removal travels.** `teamclaude remove` (or the TUI, or the MCP endpoint) writes a tombstone into the account's row — `{"_deleted": "<time>"}` — and every other install removes the account at its next pass.
+  - **Under the lock.** The tombstone is written under the row's lock, so a renewal another install has in progress stores its token first and the tombstone lands after it.
+  - **A sign-in brings it back.** An explicit sign-in (`login`, `import`) replaces the tombstone, which is how a removed account comes back everywhere. A [long-lived login](#long-lived-login) is never stored, so it does not: the account is back on that install only, and stays removed on the others until an ordinary sign-in. A long-lived login made on the install that removed the account, while that removal is still waiting to land (below), does not end it either: the tombstone lands as it would have at once.
+  - **A refresh does not.** A token refresh on an install that has not yet seen the tombstone still goes through and does not write over it, with two exceptions: a renewal whose write lands after its lock's lease ran out, and a token written without the lock (a pass pushing a renewal, or one stored after a renewal made outside the lock), in the moment between its read and its write.
+  - **No row, nothing recorded.** A removal of an account the store holds no row for records nothing, so an install that still holds it and stores it later brings it back.
+  - **A removal the store cannot take at once** (out of reach, or its lock held throughout) is tried again about 1, 6, 21 and 51 minutes after the removal (the last of these ends about 54 minutes in, waits for its lock included, when the store answers at once; a slow store stretches the waits, and a retry that comes round past the hour gives the removal up), then at each pass (at start, on reload, daily, and the one a renewal starts when it meets a tombstone), until it lands. Until then this install does not add the account back from its row, and a sign-in made on another install meanwhile is removed again when it lands.
+  - **For one hour at most.** A removal still not recorded more than an hour after it was made is given up on, so that it cannot land days later on a sign-in made elsewhere since. So is one this install finds itself signed out of callback.net for (a removal made while signed out records nothing at all), or signed in to it again since (`callback login`, as anyone): the new session may be another user's, and the tombstone must not land on their row for the same account. Nothing is written, and the log says the removal was not recorded for your other installs. The account then comes back here from its row, if the store holds one, at the next pass that reads it: enabled, in rotation, and without the priority, routing or disabled setting it had here. Remove it again then. A restart forgets a pending removal without a line, and the next start adds the account back from its row the same way.
+  - **From the command line.** `teamclaude remove` tries once, without waiting for the lock, and says so when that did not land (not for a long-lived account whose removal is given up for want of its own row, above, which only the running proxy's log mentions). A running proxy, which it then tells to reload, records the removal with those retries. With no proxy running the next start adds the account back, so remove it again then.
+  - **A tombstone lasts a week.** A tombstone older than a week is deleted by whichever pass sees it. An install that ran no pass in that week (switched off, or signed out of callback.net) never saw it. If it still holds the account and its refresh token still renews, it stores it again (at its first pass after signing back in, if it renewed the token while signed out, or at its next renewal) and the other installs add it back, so remove it there too.
 
 `teamclaude status --json` carries the sync's state under `callbackSync`: the last pass, its error if it failed, how many accounts the store holds, how many tombstones, and how many rows are emptied and waiting for a sign-in (`signInNeeded`).
 
@@ -210,9 +268,11 @@ Accounts can also be added, removed and reordered from the TUI settings screen: 
 
 ### Why an account is in `error`
 
-An account leaves rotation as `error` when upstream rejects its refresh token, or answers 401 to a token that has none to refresh with. `teamclaude status` names which, instead of pointing at the logs — `needs a re-login: upstream rejected its refresh token (400 invalid_grant: Refresh token expired); last good refresh 3d ago — run: teamclaude login`, with the token endpoint's own OAuth error and description when it sent them, and when the last refresh that worked happened if this process saw one — and `GET /teamclaude/status` carries the same under `accounts[].errorReason`: `code` (`refresh_rejected` or `credential_rejected`), `detail`, `since` (epoch ms), `remedy`, the login command that brings it back, and `link` (`null` here). It is `null` whenever the account is not in `error`. `accounts[].lastRefreshAt` (epoch ms, `null` until a refresh succeeds in this process) is the last refresh that worked: an expired token after days idle reads differently from one rotated away by a login elsewhere. The TUI names the reason in the status column (`re-login` for those two codes, `on hold` for `account_on_hold`, `refused` for upstream's other account refusals below, `error` for any other) and draws the same line under the account's row.
+An account leaves rotation as `error` when upstream rejects its refresh token, or answers 401 to a token that has none to refresh with. `teamclaude status` names which, instead of pointing at the logs — `needs a re-login: upstream rejected its refresh token (400 invalid_grant: Refresh token expired); last good refresh 3d ago — run: teamclaude login`, with the token endpoint's own OAuth error and description when it sent them, and when the last refresh that worked happened if this process saw one — and `GET /teamclaude/status` carries the same under `accounts[].errorReason`: `code` (`refresh_rejected` or `credential_rejected`), `detail`, `since` (epoch ms), `remedy`, the login command that brings it back, and `link` (`null` here). It is `null` whenever the account is not in `error`. `accounts[].lastRefreshAt` (epoch ms, `null` until a refresh succeeds in this process) is the last refresh that worked: an expired token after days idle reads differently from one rotated away by a login elsewhere. The TUI names the reason in the status column (`re-login` for those two codes, `on hold` for `account_on_hold`, `refused` for upstream's other account refusals below, `error` for any other) and draws the same line under the account's row. For a Claude account, upstream rejects the refresh token only with the token endpoint's own `invalid_grant`, or with a refusal for an account on hold (`account_on_hold`, below). Any other `400`, `401` or `403` to a refresh, such as a page from a firewall or proxy in front of the endpoint, or an OAuth error about the client or the request, leaves the account in rotation with its token, as a `5xx` does. Unlike a `5xx`, it also holds that refresh token for 30 seconds: no request or probe sends it again until then, while a different one that reaches the account (a sign-in, an import, a renewal another install stored on callback.net, once a sync pass takes it) is tried at once. An account has one such hold at a time: if that different token is answered the same way, its own hold replaces the first.
 
-It also leaves rotation when upstream refuses the account itself ([account refusals](routing.md#account-refusals)). Then `code` is upstream's error code, such as `verification_required` or `account_on_hold`, `detail` is upstream's message, and `link` is the address in that message when it is a plain https link on `claude.ai`, `anthropic.com` (or a subdomain of either) or `platform.claude.com`. Status reads `refused by upstream: <message> — once resolved, run: teamclaude login`: resolve it at the link, then sign in again to bring the account back. A refused account's refresh token failing afterwards does not replace the refusal, and a refusal replaces a dead-token error, since signing in again alone would not bring the account back.
+**Knowing ahead of time.** A refresh token can have a lifetime of its own, counted from the sign-in and not extended by the refreshes in between; once it lapses the account needs a new login whatever state it was in. TeamClaude takes that date from where it is stated: the token endpoint's response at login or refresh (`refresh_token_expires_in`, the field Claude Code reads; `refresh_token_expires_at` is read too), or the credential file an account was imported from (Claude Code's own store carries `refreshTokenExpiresAt`). For a Claude account, a `teamclaude login` whose response states no lifetime records 30 days from the sign-in, which is what Claude Code records in the same case, and matches the 28 to 30 days measured in [#674](https://github.com/KarpelesLab/teamclaude/issues/674). One whose response states a lifetime that cannot be believed (further out than ten years, zero, or more than a day past) records none. That date is an expectation, not a statement from the provider: if a refresh still succeeds after it, the date is dropped. Nothing else is assumed: a refresh that states no lifetime leaves the date as it was, a Codex login gets one only when its response states it, and an account signed in before this was recorded shows none until its next login, which says nothing about how long its token has left. Where the date is known, `teamclaude status` prints it under the account — `Login    refresh token expires in 6 days (2026-12-10)` — and `GET /teamclaude/status` / `status --json` carry it as `accounts[].refreshTokenExpiresAt` (epoch ms; the key is absent when unknown). From 5 days out the row turns yellow and names the login command, the TUI draws the same line under the account's row, and the running server logs one line per account per day: `Account "<name>": its refresh token expires in 3 days — run: teamclaude login`. Past the date it reads `expired` for as long as the account is still in rotation. A refresh keeps the earlier of the date held and the one newly stated; a new login or import replaces it, or clears it when it states none. With [callback.net sync](#syncing-accounts-across-machines-callbacknet), the date travels in the same row as the token it describes, between installs recent enough to write it; a token taken from an older install arrives without one.
+
+It also leaves rotation when upstream refuses the account itself ([account refusals](routing.md#account-refusals)). Then `code` is upstream's error code, such as `verification_required` or `account_on_hold`, `detail` is upstream's message, and `link` is the address in that message when it is a plain https link on `claude.ai`, `anthropic.com` (or a subdomain of either) or `platform.claude.com`. Status reads `refused by upstream: <message> — once resolved, run: teamclaude login`: resolve it at the link, then sign in again to bring the account back. A sign-in on another install signed in to [callback.net](#syncing-accounts-across-machines-callbacknet) puts it back in rotation here too, at this install's next pass. So does any other new token for the account, since this install cannot tell one from a sign-in: one another install renewed, at the next pass, or tokens changed on disk, at the next reload. That is a trade-off: if upstream still refuses the account, the first request sent to it is refused again and fails over, which takes the account out of rotation again, and until then status shows it active, without the refusal. A refused account's refresh token failing afterwards does not replace the refusal, and a refusal replaces a dead-token error, since signing in again alone would not bring the account back.
 
 An account Anthropic has put on hold gets its refresh refused with `error_description: "account_on_hold"`. A re-login does not lift that, so it is reported as a refusal like the ones above: `code` is `account_on_hold`, `detail` is Anthropic's own message with the appeal link (`Your account is on hold and can't use Claude Code. View details or appeal: https://claude.ai/restricted`), `link` is that appeal link, and status, the dashboard and `teamclaude switch` say upstream refused the account rather than that it needs a re-login. `remedy` is still `teamclaude login`: the refused token is not sent again, so once the hold is lifted a sign-in puts the account back.
 
@@ -245,7 +305,7 @@ On a local terminal a browser also opens on this machine, and the sign-in finish
 
 The server decides whether its terminal is remote from its own environment (`SSH_CONNECTION` or `SSH_TTY`; on Linux, no `DISPLAY` or `WAYLAND_DISPLAY`). A server that a service started inside tmux, and that you attach to over SSH later, still has the service's environment. It then opens a browser on the host as well, which nobody sees; the link and the paste work as usual. Start such a server with `TEAMCLAUDE_REMOTE=1` to say it is remote (`0` says local). Inside tmux, the clipboard and the link only reach your terminal with the tmux options in [Signing accounts in over SSH](#signing-accounts-in-over-ssh).
 
-The tokens go to the account the browser actually signed in as, matched by identity exactly as `teamclaude login` does — not to whichever row was highlighted. Sign in as a different account and that account is updated (or added) instead, the activity pane says so, and the row you picked still needs its login.
+The tokens go to the account the browser actually signed in as, matched by identity exactly as `teamclaude login` does — not to whichever row was highlighted. Sign in as a different account and that account is updated (or added) instead, the activity pane says so, and the row you picked still needs its login. A [long-lived](#long-lived-login) account is not signed in from here: this sign-in is the ordinary one, which would make it a refreshing account, so on its row the pane names `teamclaude login --long-lived --name <name>` to run instead.
 
 The sign-in runs in the server's process, so the key is not offered in `teamclaude attach`. You can also sign in on a machine that has a browser: if that install and the server are both signed in to [callback.net](#syncing-accounts-across-machines-callbacknet), run `teamclaude login` there, and the server takes the new token at its next pass (press **R** in its TUI, or run `teamclaude callback sync` on it, to start one now).
 
@@ -320,6 +380,14 @@ Add `--no-browser` to print the URL instead of opening one, and `--name` to
 label the account yourself (it defaults to the email on the login). Over SSH,
 or on Linux with no display, no browser is opened.
 
+A login updates the row of the ChatGPT account (workspace) and user it signs
+in as. One email in two workspaces, such as a Personal plan and a Business
+workspace, is two accounts: the second one added without `--name` is named
+`email (plan)`, for example `me@example.com (plus)`, or `email (2)` when the
+plan is unknown or that name is taken too. A row that has no account id yet,
+such as one that imports `~/.codex/auth.json` (below), is still matched by its
+name: give it a name other than the email, or sign in with `--name`.
+
 On a terminal you can finish the sign-in from another device. Open the URL
 there and sign in. The browser is then sent to
 `http://localhost:1455/auth/callback`, which does not load on that device:
@@ -374,7 +442,16 @@ Two boundaries worth knowing:
 
 - `chatgpt.com` is intercepted **only when a Codex account is configured**. An
   Anthropic-only fleet tunnels it untouched — intercepting a host nobody asked
-  the proxy to read is not a neutral default.
+  the proxy to read is not a neutral default. A Codex account added while the
+  proxy runs (by a login, a reload or credential sync) is pooled through MITM
+  at once only if the certificate the proxy presents already names
+  `chatgpt.com`, as one left by an earlier Codex account does. Otherwise that
+  starts with the proxy's next restart, and until then `chatgpt.com` is
+  tunnelled: the Codex CLI runs on its own ChatGPT login, nothing is pooled or
+  booked against the fleet, and a `CONNECT` pinned to a Codex account, or to
+  an API-key account with an `upstream` of its own, is refused with `503`.
+  `teamclaude env` and `teamclaude run` warn while that restart is due (see
+  [the trust model](proxy-modes.md#trust-model)).
 - `ab.chatgpt.com` is never intercepted. It is OpenAI's telemetry endpoint,
   carries no inference, and there is nothing there to rewrite.
 - On the intercepted `chatgpt.com`, only `/backend-api/codex/*` is pooled.
@@ -495,7 +572,8 @@ nothing is ever sent upstream. On a pool of two this is what almost every
 request gets. Only the accounts a reset would actually return to service are
 considered — an account you disabled or capped stays out whatever its windows
 say — and when several qualify, the one whose credit expires soonest is asked
-first.
+first (under [`autoRedeemMaxShare`](#the-spending-strategy), the most exhausted
+is).
 
 While it is on, a credit is spent only when **all** of this holds:
 
@@ -532,6 +610,96 @@ that the rest of the pool does not have to be dry. The holds above are kept in
 memory only, so a steer that was in the middle of spending a credit when the
 server stopped is not resumed after the restart: see
 [`--redeem`](routing.md#--redeem).
+The three keys of [the spending strategy](#the-spending-strategy) below do not
+stop a steer's credit, but it is recorded as an automatic redemption, so it
+counts towards its cohort's share and towards `autoRedeemMaxPerDay`.
+
+### The spending strategy
+
+A Codex reset does one more thing than it says: besides clearing the spent
+weekly window it **restarts the 7-day timer from the moment of redemption**
+(verified on a live account; an Anthropic reset leaves the timer where it was).
+That has two consequences the switch above knows nothing about.
+
+- A credit buys the days left to the natural reset, not a week. An account
+  whose reset was T days away gets T days of fresh window and then the reset it
+  would have had anyway: the credit was worth **T/7 of a week**. Spent the day
+  before the natural reset, it bought almost nothing.
+- Redeeming several accounts at once moves all their timers to the same
+  moment. A pool whose resets were spread across the week — what keeps one
+  account available while another is out — collapses into a **sawtooth**: a
+  full pool, then a dry fleet, together, every seven days.
+
+Three keys shape what the switch spends, all off unless set, so a fleet that
+never sets them behaves exactly as before. They narrow the automatic policy and
+never widen it: every condition above still has to hold. A key set to a value
+it cannot read, such as `50` for a half share or `"3d"` for three days, is off
+as well, and the server names it in the log at start and at each reload.
+
+- [`autoRedeemMinDaysToReset`](configuration.md) — never auto-redeem an
+  account whose natural reset is closer than this many days. The account is
+  skipped with a line in the log saying what the credit would have bought. An
+  account whose reset time is not known cannot be shown to clear the floor and
+  is skipped too. The floor also holds for a credit that is about to expire.
+- [`autoRedeemMaxShare`](configuration.md) — of the armed accounts whose
+  natural resets fall on the same UTC calendar day (a **cohort**), redeem at
+  most this share (rounded up), most-exhausted first, so the rest keep their
+  phase. A disabled or cordoned account, or one waiting for a sign-in, is
+  never offered a reset, so it does not count towards its cohort's size unless
+  it was redeemed this week; a capped one does. The cohort is sized as it was
+  before any of it was redeemed this week;
+  otherwise each redemption would shrink it and let the next one through. A
+  cohort is a calendar day, not a 24-hour span: two resets an hour apart on
+  either side of 00:00 UTC are in different cohorts. An account whose reset
+  time is not known is in no cohort, and this cap does not hold it.
+- [`autoRedeemMaxPerDay`](configuration.md) — at most this many automatic
+  redemptions per rolling 24 hours, across all Codex accounts. The six-hour
+  hold after each redemption this cap counts already keeps those to 4 in any
+  24 hours, so a value of 4 or more never stops one. A consume whose answer
+  was lost arms only a 30-minute hold and is not counted until a retry reads
+  its answer, so it does not use up any of this cap.
+
+A credit you spend by hand from the resets panel is not stopped by any of the
+three. It is still recorded: it counts towards its cohort's share, because it
+moved that account's timer like any other redemption, and it does not count
+towards `autoRedeemMaxPerDay`, which limits only what is spent automatically.
+
+The record of past redemptions covers one week and is kept in memory. A restart
+forgets it: the per-day count starts again at zero and a cohort is sized on the
+accounts it has at that moment. The three keys are read at each refusal, so a
+change applies on the next reload without a restart.
+
+All three concern Codex accounts only. A
+[Claude banked reset](#claude-banked-usage-limit-resets) leaves the weekly
+timer where it was, so none of them is applied to it.
+
+Each account the floor or the share cap passes over is logged with its
+reason. The per-day cap stops the whole fleet at once, so it is logged against
+the first account it stops. A reason is logged when it first applies to an
+account, and again at most every ten minutes while it stands:
+`[TeamClaude] Codex rate-limit reset on "<name>" skipped — <reason>`.
+The caps are asked before any account's credit rows are read, since a read
+costs a token refresh and a request, so a line for a cap can name an account
+that turns out to hold no credit. The share cap is asked again after the
+reads: a refresh token upstream rejects during them leaves its account
+waiting for a sign-in, and so out of the cohort the other accounts are
+counted in.
+
+While `autoRedeemResets` is on, `teamclaude status` prints a `Redeem` line
+under each Codex account — `armed` or `exempt — <reason>`, and what a credit
+spent now is worth (`credit worth 0.43 of a week (3.0d to reset)`). The JSON
+carries the same under `accounts[].autoRedeem`
+(`{ armed, exemptReason, creditValueWeeks, daysToReset }`, the credit's worth
+in weeks to the hundredth below and the days to the natural reset to the tenth
+below, as the floor's reason gives them; `null` on a non-Codex row, and on
+every row while the switch is off) and the fleet's
+`redeemPolicy`
+(`{ minDaysToReset, maxShare, maxPerDay, redeemedLast24h }`, where
+`redeemedLast24h` counts automatic redemptions). `armed` does not wait for the
+account to run out: an armed account whose weekly window is still healthy is
+armed and simply not exhausted. It does move with the clock, as the floor and
+the caps do: under a 2-day minimum an account reads `armed` 3.5 days before its
+reset and `exempt` the day before it.
 
 ## Claude banked usage-limit resets
 
@@ -559,7 +727,10 @@ the Fable weekly and leaves the shared weekly at 80%. It is worth the most on an
 account whose Fable weekly is spent. The usage payload's `weekly_scoped_shares`
 says how much of the weekly Fable has used. The surfaces count the two kinds
 apart: `FR3` on the TUI row (`RC1 FR2` for an account holding both), and
-"Fable resets" on the `Reset` line and the dashboard badge.
+"Fable resets" on the `Reset` line and the dashboard badge. The two kinds lapse
+on their own dates (the October resets in December, the Fable ones in March),
+so an account holding both shows each date beside its kind, and one kind past
+its date drops out while the other stays.
 
 A bucket the account cannot serve from right now is marked on its own bar:
 `⊘Wk` in place of `Wk`, `⊘F` in place of `F7`, `⊘S` in place of `S7`. Only a
@@ -619,7 +790,7 @@ Manual spending is your decision. It ignores `autoRedeemResets`, the account's
 weekly limit is exhausted, when the grant does not clear an exhausted limit,
 when upstream reports a cooldown, or when a reset recently landed or may have
 landed. If the grant requires a limit and the account is not at one, it warns
-that upstream will probably decline without spending anything. A disabled or
+that upstream may still accept the claim, in which case the reset is spent. A disabled or
 non-OAuth account, missing organization id, ineligible status, or an empty,
 paused, unusable or expired grant is a hard block.
 
@@ -644,6 +815,38 @@ request-id replay and set its fleet hold after success or an unread verdict.
 A failed claim may have spent the reset; the next attempt on that grant reuses
 the same request id. A refusal with a verdict spends nothing.
 
+### Reading and spending a reset over the control API
+
+A headless server has no panel, so the same reads and claims are routes on the
+control plane. They take the proxy key (or the loopback exemption), never a
+client key, and a POST from a web page on another origin is refused like every
+other control mutation.
+
+- `GET /teamclaude/resets` lists every OAuth Claude and Codex account with its
+  last in-memory reading in the panel's shape (`details`, `null` before the
+  first read) and `readableAt`, the time a fresh read is allowed again (`null`
+  when it is now). It sends no request upstream, so a page may poll it.
+- `POST /teamclaude/resets/read` with `{"account": "<name>"}` is the panel's
+  **r**: one fresh read, under the same two-minute floor and `Retry-After`.
+  Inside the floor it answers from the cache with `"read": false`.
+- `POST /teamclaude/resets/redeem` with `{"account": "<name>", "grantId": "<id>"}`
+  spends that grant exactly as **y** in the panel does: fresh token and read
+  first, one manual claim at a time, the same hard blocks. The warnings are
+  in `details` for the caller to show before it asks; the route does not ask.
+  A spend answers `200` with `resetsLeft` and `cleared`, a refusal `409` with
+  the reason, and a claim with no verdict `502` with `"uncertain": true` (it
+  may have been spent; read again to learn). Every outcome is logged.
+  For an hour after a claim that landed or may have landed (the hold the
+  panel shows as a warning), the route refuses another with `409`, so a
+  request retried after a lost answer does not spend twice; `"force": true`
+  in the body spends anyway.
+
+With no `proxy.apiKey` set, the three routes answer only requests from this
+machine that name it in `Host`, as the MCP endpoint does.
+
+The account is named as for `teamclaude switch`. Grant ids come from the list
+and stay in memory only, like the panel's.
+
 ### Spending a Claude reset automatically
 
 With [`autoRedeemResets`](configuration.md) on — the same switch, and the same
@@ -654,13 +857,53 @@ request before choosing anyone, the redeemer spends a reset, and the request is
 selected again against the account it cleared.
 
 - It spends on the account that would otherwise wait longest for its own
-  windows to reset, since that is where a reset buys the most.
-- Only on an account upstream itself reports **at** a limit, and only when a
-  **weekly** limit (the all-models week or a model family's) is among them — a
-  5-hour wall lifts on its own and is never worth a grant — and only when the
-  grant clears every limit the account is at, since a reset that would leave it
-  blocked buys the request nothing. While upstream reports a reset cooldown,
-  nothing is claimed.
+  windows to reset, since that is where a reset buys the most. Only the
+  windows that bar the refused request's model count (the 5-hour window, the
+  all-models weekly and that model's family weekly), each at the threshold
+  rotation holds that model to.
+- It fires when the pool is dry and the account is in one of two states:
+  upstream itself reports it **at** a limit, or the proxy is holding it out of
+  rotation because a **weekly** reading is at or past the
+  [`switchThreshold`](configuration.md) that applies to it (the fleet's, a
+  per-bucket one, or the account's own). The second state matters on a busy
+  fleet: rotation stops using an account at its threshold, so every account
+  parks a little short of upstream's limit and upstream never reports a wall.
+  The account's quota is re-read first, and the threshold is judged on that
+  reading. If that reading shows the account can serve the refused request
+  after all (the one the proxy held had gone stale), nothing is spent: the
+  pool was not dry, and the request is selected again.
+- **What the second state gives up:** the reset is spent while the account
+  still has the last part of its week below upstream's limit — 2% at the
+  default threshold of `0.98`, more with a lower one. That remainder goes with
+  the reset. Rotation was not going to use it either while the threshold stood.
+- Either way a **weekly** limit (the all-models week or a model family's) has
+  to be what bars the account — a 5-hour wall lifts on its own and is never
+  worth a grant, so an account parked only by its 5-hour window is passed over
+  — and the grant has to clear every limit the account is at, since a reset
+  that would leave it blocked buys the request nothing. For a parked account
+  those limits are the ones behind the readings that parked it for the
+  refused request's model: the all-models weekly (`seven_day`), the Fable
+  weekly (`seven_day_overage_included`), and the 5-hour window too if that is
+  over its threshold as well. They count beside upstream's own limits even when
+  upstream reports a weekly one: an account at its Fable limit that the proxy
+  also holds out on the all-models weekly needs a reset that clears both, not
+  the Fable reset alone. An account parked on a reading with no known
+  upstream limit name (the Sonnet weekly, a learned scoped bucket) is passed
+  over, as is one out for any other reason (disabled, cordoned, capped by
+  `maxUsage` or `maxSpend`, in error). A rate-limit hold, which the proxy sets
+  on the 429 that usually brings word of upstream's 5-hour wall, does not hide
+  the weekly reading behind it: the reset lifts the hold as well. While
+  upstream reports a reset cooldown, nothing is claimed.
+- An account that holds a usable reset and is passed over is named in the
+  log with the reason (`Account "x": banked reset not redeemed: …`), once per
+  account per cooldown (30 minutes) rather than once per refused request. A
+  reason that depends on the refused request's model (whether a weekly reading
+  parks the account for it) holds only for requests judged on the same
+  readings: those whose model the same weekly bucket governs (the Fable
+  weekly, the Sonnet weekly, or the all-models one, unless a route names
+  another), and, where some account has learned a scoped weekly bucket for
+  the model's family, those of that family. Passing an account over for an
+  Opus request does not pass it over for a Fable one.
 - Among usable, unpaused, unexpired grants that clear every exhausted limit,
   it spends the cheapest kind: **Fable**, then **session**, then **weekly**.
   Within the same kind it spends the soonest-expiring grant (no expiry comes
@@ -670,7 +913,8 @@ selected again against the account it cleared.
   none clears the whole wall. Manual selection still chooses any usable grant.
 - `accounts[].autoRedeemReset: false` exempts an account, as it does for Codex;
   so does being disabled, having no organization id, or last reading zero held
-  resets.
+  resets. An account the refused request's model route does not allow is never
+  offered.
 
 After a reset the Claude pool holds off for an hour, so one dry pool costs one
 reset. A claim whose answer never arrived may still have spent the grant: its

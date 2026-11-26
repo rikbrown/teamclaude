@@ -611,8 +611,8 @@ memory only, so a steer that was in the middle of spending a credit when the
 server stopped is not resumed after the restart: see
 [`--redeem`](routing.md#--redeem).
 The three keys of [the spending strategy](#the-spending-strategy) below do not
-stop a steer's credit, but it is recorded as an automatic redemption, so it
-counts towards its cohort's share and towards `autoRedeemMaxPerDay`.
+stop a steer's credit. The spend counts towards the cohort's share, but not
+against `autoRedeemMaxPerDay`, because you gave consent.
 
 ### The spending strategy
 

@@ -182,9 +182,9 @@ function resolveSlowRequestLogMs() {
 // account. Once per request, so a long pause does not repeat itself per attempt.
 const ADMIT_WAIT_LOG_MS = 5_000;
 
-// How long a throttle 429's error body may take to arrive before the diagnostic
-// read gives up on it. The body is evidence, not something the retry logic
-// needs, so a stalled one must not add to the wait the client is already in.
+// How long to wait for diagnostic evidence when a 429's headers already say
+// a quota window is spent. With no such verdict, the body can decide routing
+// and gets the normal body-idle deadline.
 const RATE_LIMIT_DIAG_BODY_TIMEOUT_MS = 2_000;
 
 /**
@@ -206,12 +206,13 @@ const RATE_LIMIT_DIAG_BODY_TIMEOUT_MS = 2_000;
  * @param {number} p.attempt  retryCount of the attempt that drew the 429
  * @param {boolean} p.requestScoped  no retry-after and no rate-limit headers
  * @param {boolean} [p.noRetry]  upstream explicitly declined a retry
+ * @param {boolean} [p.creditsRequired]  the body identified a credits refusal
  * @param {number} [p.retryAfterSeconds]  parsed delay from the retry branch
  * @param {{ get(name: string): string|null, entries(): Iterable<[string, string]> }} p.headers  upstream response headers
  * @param {Buffer|null} p.body  the error body, or null when it was not read
  * @returns {string}
  */
-export function formatRateLimitDiagnostic({ reqId, sessionId, account, model, attempt, requestScoped, noRetry = false, retryAfterSeconds, headers, body }) {
+export function formatRateLimitDiagnostic({ reqId, sessionId, account, model, attempt, requestScoped, noRetry = false, creditsRequired = false, retryAfterSeconds, headers, body }) {
   const header = (/** @type {string} */ name, max = 80) => {
     const v = headers.get(name);
     return v == null ? 'none' : safeLine(v, max);
@@ -219,7 +220,7 @@ export function formatRateLimitDiagnostic({ reqId, sessionId, account, model, at
   const retryAfterRaw = headers.get('retry-after');
   const rawSeconds = parseInt(retryAfterRaw ?? '', 10);
   const fallback = Number.isNaN(rawSeconds);
-  const parsed = noRetry ? null : (retryAfterSeconds ?? (fallback ? resolveRateLimitFallbackRetryAfterSeconds() : rawSeconds));
+  const parsed = noRetry || creditsRequired ? null : (retryAfterSeconds ?? (fallback ? resolveRateLimitFallbackRetryAfterSeconds() : rawSeconds));
   /** @type {Record<string, string>} */
   const limits = {};
   for (const [key, value] of headers.entries()) {
@@ -250,6 +251,7 @@ export function formatRateLimitDiagnostic({ reqId, sessionId, account, model, at
     + ` (model ${safeLine(model ?? 'unknown', 64)}, attempt ${attempt}, request-scoped ${requestScoped ? 'yes' : 'no'}):`
     + ` retry-after=${retryAfterRaw == null ? 'none' : safeLine(retryAfterRaw, 32)}`
     + (noRetry ? ' parsed=not applied (upstream says do not retry)'
+      : creditsRequired ? ' parsed=not applied (credits required)'
       : ` parsed=${parsed}s${fallback && !requestScoped ? ' (fallback used)' : ''}${requestScoped ? ' (not applied)' : ''}`)
     + ` request-id=${header('request-id')} cf-ray=${header('cf-ray')} x-should-retry=${header('x-should-retry', 16)}`
     + ` ratelimit=${safeLine(JSON.stringify(limits), 2000)} ${error}`;
@@ -5522,31 +5524,38 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
       && upstreamRes.headers.get('x-should-retry')?.trim().toLowerCase() === 'false';
     const retryAfterHeader = upstreamRes.headers.get('retry-after');
     const requestScoped = retryAfterHeader == null && Object.keys(rateLimitHeaders).length === 0;
-    if ([400, 402, 403, 429].includes(status) && upstreamBody && !res.headersSent
-        && isJsonContentType(upstreamRes.headers.get('content-type'))) {
-      // An ordinary throttle already has a response path that discards its
-      // body. Keep the fork's shorter diagnostic deadline on that path, but
-      // honor a body-idle deadline that would fire sooner.
-      const diagnosticOnly = status === 429 && !creditsRecheck && !nonRetryable429 && !requestScoped
+    /** @type {Buffer|null} */
+    let rateLimitBody = null;
+    /** @param {{ retryAfterSeconds?: number, creditsRequired?: boolean }} [details] */
+    const log429 = (details = {}) => {
+      try {
+        console.log(formatRateLimitDiagnostic({
+          reqId, sessionId: ctx.sessionId, account: account.name, model: ctx.model,
+          attempt: retryCount, requestScoped, noRetry: nonRetryable429, ...details,
+          headers: upstreamRes.headers, body: rateLimitBody,
+        }));
+      } catch { /* diagnostics only */ }
+    };
+    const inspectJson = [400, 402, 403, 429].includes(status) && !res.headersSent
+      && isJsonContentType(upstreamRes.headers.get('content-type'));
+    if (upstreamBody && (inspectJson || (status === 429 && !nonRetryable429))) {
+      const diagnosticOnly = status === 429 && quotaWindowRejected && !creditsRecheck
         && RATE_LIMIT_DIAG_BODY_TIMEOUT_MS <= resolveBodyIdleTimeout();
       const inspected = diagnosticOnly
         ? { buf: await readErrorBody(upstreamBody, ERROR_BODY_INSPECTION_LIMIT, RATE_LIMIT_DIAG_BODY_TIMEOUT_MS), body: null }
         : await holdBody(upstreamBody, ERROR_BODY_INSPECTION_LIMIT);
       const bytes = inspected.buf;
-      const credits = creditsRequiredRefusal(status, bytes);
-      // A 429 that reports a spent quota window is the account's verdict, and
-      // keeps the quota path below whatever its body says about credits: the
-      // window is recorded and the request rotates. These are the windows that
-      // path acts on (quotaWindowRejected). That holds for an option-specific
-      // refusal as well: relayed from here, it would leave the spent window
-      // unrecorded and the client with a 429 another account could serve.
-      const windowRejected = status === 429 && ['5h', '7d', '7d_oi'].some(w =>
-        rateLimitHeaders[`anthropic-ratelimit-unified-${w}-status`] === 'rejected');
+      if (status === 429) rateLimitBody = bytes;
+      // A spent quota window keeps the quota path, which records the spent
+      // window and rotates, even if the body also names a credits refusal.
+      const credits = inspectJson && !(status === 429 && quotaWindowRejected)
+        ? creditsRequiredRefusal(status, bytes) : null;
       // An option-specific refusal is relayed as it came, and a 403 is not
       // one to hand a client raw: Claude Code reads it as a dead login. It
       // takes the 403 path below, as it did before this check existed.
       const relayedForbidden = credits === 'request' && status === 403;
-      if (bytes && credits && !windowRejected && !relayedForbidden) {
+      if (bytes && credits && !relayedForbidden) {
+        if (status === 429) log429({ creditsRequired: true });
         const answer = { status, headers: relayableHeaders(upstreamRes.headers, ctx), body: bytes };
         if (credits !== 'request') {
           const model = credits.model ?? ctx.model;
@@ -5573,7 +5582,13 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
         if (clientGone(res)) { ctx.abandoned = true; return; }
         return forwardRequest(req, res, body, accountManager, upstream, retryCount + 1, hooks, reqId, ctx, logDir, sx, route);
       }
-      upstreamBody = bytes ? new ReadableStream({ start(c) { c.enqueue(bytes); c.close(); } }) : inspected.body;
+      if (status === 429 && !nonRetryable429) {
+        // The retry path uses the evidence already read, not the replay.
+        inspected.body?.cancel().catch(() => {});
+        upstreamBody = null;
+      } else {
+        upstreamBody = bytes ? new ReadableStream({ start(c) { c.enqueue(bytes); c.close(); } }) : inspected.body;
+      }
     }
     if (creditsRecheck && status !== 200) accountManager.deferFamilyRecheck(account, ctx.model, ctx.advisorModel);
     if (upstreamRes.status < 400 && isCompletionPath(classificationPath(req.url))) {
@@ -5597,19 +5612,9 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
     // _selectProbe) clear its own hold and return the fleet to service.
     if (upstreamRes.status !== 429) accountManager.clearRateLimited(account.index);
 
-    // An explicit no-retry refusal gets the same evidence line as any other
-    // 429, with its retry-after marked as not applied. Its body is left unread
-    // for the normal relay below: diagnostic buffering would consume the error
-    // the client needs to see.
-    if (nonRetryable429) {
-      try {
-        console.log(formatRateLimitDiagnostic({
-          reqId, sessionId: ctx.sessionId, account: account.name, model: ctx.model,
-          attempt: retryCount, requestScoped: upstreamRes.headers.get('retry-after') == null && Object.keys(rateLimitHeaders).length === 0, noRetry: true,
-          headers: upstreamRes.headers, body: null,
-        }));
-      } catch { /* diagnostics only */ }
-    }
+    // A no-retry refusal is relayed below, with retry-after marked as not
+    // applied in the evidence line.
+    if (nonRetryable429) log429();
 
     // Other 429s retain their established classification: quota rejection
     // rotates, while a transient throttle pauses and retries.
@@ -5629,24 +5634,10 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
       // and the inline wait then held that client for the same 60s per attempt;
       // together they turned one request's problem into a fleet-wide stall
       // (#288). A throttle, by contrast, always carries the headers.
-      // The body names the reason for a request-scoped refusal, and is evidence
-      // for every other 429: the line below is the only record of what upstream
-      // said, since the request log writes nothing for a 429. A throttle's body
-      // is read under a short time bound, because nothing below depends on it.
-      let raw = null;
-      if (requestScoped) {
-        raw = await readErrorBody(upstreamBody).catch(() => null);
-      } else if (upstreamBody) {
-        raw = await readErrorBody(upstreamBody, ERROR_BODY_INSPECTION_LIMIT, RATE_LIMIT_DIAG_BODY_TIMEOUT_MS).catch(() => null);
-        // readErrorBody consumes the body or cancels its reader on overflow/timeout.
-      }
-      try {
-        console.log(formatRateLimitDiagnostic({
-          reqId, sessionId: ctx.sessionId, account: account.name, model: ctx.model, attempt: retryCount, requestScoped,
-          retryAfterSeconds: retryAfter,
-          headers: upstreamRes.headers, body: raw,
-        }));
-      } catch { /* diagnostics only */ }
+      // The evidence line is the only record of what upstream said, since the
+      // request log writes nothing for a 429.
+      log429({ retryAfterSeconds: retryAfter });
+      const raw = rateLimitBody;
       let refusal = '';
       if (requestScoped) {
         try { refusal = raw ? String(JSON.parse(raw.toString('utf8'))?.error?.message || '') : ''; } catch { refusal = ''; }
@@ -6476,7 +6467,7 @@ function resolveBodyIdleTimeout() {
 /**
  * How long the forward path's held answer may stay silent: the longer of the
  * body-idle deadline and the head deadline the same request was given (the
- * operator's TEAMCLAUDE_UPSTREAM_HEADERS_TIMEOUT_MS, else the account
+ * account's override, else TEAMCLAUDE_UPSTREAM_HEADERS_TIMEOUT_MS or the
  * provider's default). A `stream:false` completion is silent for as long as
  * the model generates, and a backend may spend that silence after its head
  * instead of before it; the head deadline is what the operator already allows
@@ -6488,7 +6479,7 @@ function resolveBodyIdleTimeout() {
  * @returns {number}
  */
 export function resolveHeldAnswerIdleTimeout(account) {
-  const head = resolveHeadersTimeout(null, defaultHeadersTimeoutFor(account));
+  const head = resolveHeadersTimeout(account.headersTimeoutMs, defaultHeadersTimeoutFor(account));
   return Math.min(Math.max(resolveBodyIdleTimeout(), head), MAX_TIMER_MS);
 }
 

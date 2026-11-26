@@ -529,7 +529,12 @@ export class ClaudeResetRedeemer {
     const held = Math.max(state.cooldownUntil, state.declined.get(key) ?? 0);
     if (now < held) return later('cooling down after a recent attempt on it', held);
     const r = await this._redeem(account, now + this.timeoutMs, null, { why: 'its steer has spent its week (--redeem)', beforeSpend });
-    if (r.redeemed) { this.answeredFor.set(r, account); return { ...r, outcome: 'redeemed' }; }
+    if (r.redeemed) {
+      /** @type {ClaudeRedeemResult} */
+      const answer = { ...r, outcome: 'redeemed' };
+      this.answeredFor.set(answer, account);
+      return answer;
+    }
     if (r.uncertain) return { ...r, outcome: 'unknown' };
     if (r.outcome) return r;
     // Anything else spent nothing and can change (not at a wall yet, a pass on

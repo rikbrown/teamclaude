@@ -536,6 +536,23 @@ test('a manual redemption does not count against the per-day cap', async () => {
   assert.equal(redeemer.policyStatus().redeemedLast24h, 1);
 });
 
+test('a steer redemption uses a cohort share slot but not the daily automatic slot', async () => {
+  const { am, redeemer, calls, now } = harness({
+    days: [3, 3, 5], config: { autoRedeemResets: true, autoRedeemMaxPerDay: 1, autoRedeemMaxShare: 0.5 }, caughtUp: false,
+  });
+  const [a, b, c] = am.accounts;
+  sameUtcDay([a, b], 3, now);
+  assert.equal((await redeemer.redeemForSteer(a)).outcome, 'redeemed');
+  assert.equal(redeemer.policyStatus().redeemedLast24h, 0);
+  redeemer.now = () => now + 7 * 60 * 60 * 1000;
+  const sameCohort = await redeemer.maybeRedeemForPool([b]);
+  assert.equal(sameCohort.redeemed, false);
+  assert.match(sameCohort.reason, /cohort of 2 already had 1 redeemed, the 50% share cap allows 1/);
+  assert.equal((await redeemer.maybeRedeemForPool([c])).redeemed, true);
+  assert.deepEqual(calls.consume, ['a', 'c']);
+  assert.equal(redeemer.policyStatus().redeemedLast24h, 1);
+});
+
 test('a redemption whose answer was lost is charged to the cohort the account was in when it was sent', async () => {
   let answers = 0;
   const { am, redeemer } = harness({

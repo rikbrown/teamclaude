@@ -263,20 +263,31 @@ test('configured fallback is the parsed 429 delay, not a diagnostic-only default
   assert.match(diag[0], /retry-after=bogus parsed=120s \(fallback used\) request-id=/);
 });
 
-test('a stalled throttle body stops being read, without holding its response indefinitely', async () => {
+test('a spent quota window does not wait for a stalled diagnostic body', async () => {
   const log = captureLog();
+  const restoreIdle = withEnv('TEAMCLAUDE_UPSTREAM_BODY_TIMEOUT_MS', 5_000);
   try {
-    await withProxy(['a'], (req, res) => {
-      res.writeHead(429, { ...THROTTLE_HEADERS, 'retry-after': '120' });
-      res.write('{"error":'); // deliberately never ends; diagnostic body is optional
-    }, async ({ proxyPort }) => {
+    await withProxy(['a', 'b'], (req, res, hit) => {
+      if (hit === 1) {
+        res.writeHead(429, {
+          ...THROTTLE_HEADERS, 'retry-after': '120',
+          'anthropic-ratelimit-unified-5h-status': 'rejected',
+          'anthropic-ratelimit-unified-5h-utilization': '1',
+        });
+        res.write('{"error":'); // deliberately never ends; the headers decide routing
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{"ok":true}');
+    }, async ({ am, proxyPort, seen }) => {
       const start = performance.now();
       const result = await post(proxyPort);
-      assert.equal(result.status, 429);
-      assert.equal(result.retryAfter, '120');
-      assert.ok(performance.now() - start < 8_000, 'a stalled upstream body must not hold the client');
+      assert.equal(result.status, 200);
+      assert.deepEqual(seen, ['t-a', 't-b']);
+      assert.equal(am.unavailableReason(am.accounts[0], 'claude-test'), 'throttled');
+      assert.ok(performance.now() - start < 8_000, 'a stalled diagnostic read must not hold the client');
     });
-  } finally { log.restore(); }
+  } finally { log.restore(); restoreIdle(); }
   assert.match(log.lines.find(l => l.startsWith('[TeamClaude] 429 from upstream')) || '', /body unread$/);
 });
 

@@ -89,13 +89,14 @@ export class SteerError extends Error {}
  * Whether `account` is one a banked reset can be spent on at all: a Claude
  * subscription login, or a Codex one. An API key is metered capacity with no
  * plan windows to reset, and an Anthropic-shaped entry pointed at a third-party
- * backend (`upstream`) holds that backend's quota, not Anthropic's.
+ * backend (`upstream`) holds that backend's quota, not Anthropic's. A
+ * long-lived Claude token cannot read or spend banked resets.
  * @param {Record<string, any>|null|undefined} account
  */
 export function canRedeemOn(account) {
   if (account?.type !== 'oauth' || account.upstream) return false;
   const provider = providerOf(account);
-  return provider === DEFAULT_PROVIDER || provider === 'codex';
+  return (provider === DEFAULT_PROVIDER || provider === 'codex') && account.longLived !== true;
 }
 
 const UNIT_MS = { s: 1000, m: 60_000, h: 3600_000, d: 24 * 3600_000 };

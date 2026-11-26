@@ -133,6 +133,30 @@ for (const [label, headers] of [
   });
 }
 
+test('a slow credits 429 with Retry-After holds only the family and fails over', async (t) => {
+  // Shorten the 2 s diagnostic timer without changing the body-idle timer.
+  const setRealTimeout = setTimeout;
+  t.mock.method(globalThis, 'setTimeout', (fn, ms, ...args) => setRealTimeout(fn, ms === 2_000 ? 40 : ms, ...args));
+  const log = t.mock.method(console, 'log', () => {});
+  await withEnv({ TEAMCLAUDE_UPSTREAM_BODY_TIMEOUT_MS: 5_000 }, () => withProxy({
+    refuses: (token, model) => token === 'a' && model === FABLE ? res => {
+      res.writeHead(429, { 'content-type': 'application/json', 'retry-after': '120' });
+      res.flushHeaders();
+      const timer = setTimeout(() => res.end(refusal()), 250);
+      res.once('close', () => clearTimeout(timer));
+    } : null,
+  }, async ({ am, seen, post }) => {
+    const answer = await post(FABLE);
+    assert.equal(answer.status, 200);
+    assert.deepEqual(await answer.json(), { served: 'b' });
+    assert.deepEqual(seen, [`a:${FABLE}`, `b:${FABLE}`]);
+    assert.equal(am.familyRefusal(am.accounts[0], FABLE)?.reason, 'not-in-plan');
+    assert.equal(am.unavailableReason(am.accounts[0], OPUS), null);
+    const diagnostic = log.mock.calls.map(({ arguments: [line] }) => line).find(line => line.startsWith('[TeamClaude] 429 from upstream'));
+    assert.match(diagnostic ?? '', /retry-after=120 .*error\.type=rate_limit_error/);
+  }));
+});
+
 test('a 402 with credits_required beats billing and shared quota headers', async () => {
   await withProxy({ refuses: (token, model) => (token === 'a' && model === FABLE ? {
     status: 402, body: refusal({}, { type: 'billing_error' }),

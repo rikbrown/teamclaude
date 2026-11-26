@@ -1198,6 +1198,23 @@ test('a steer attempt and a dry-pool attempt never claim at once, and the fleet 
   assert.equal(calls.claim.length, 1);
 });
 
+test('a dry-pool attempt can use a concurrent steer reset on an offered account', async () => {
+  const { am, redeemer, calls } = harness({ accounts: [oauth('a'), oauth('b')] });
+  const [a, b] = am.accounts;
+  const steer = redeemer.redeemForSteer(a);
+  const [spent, offered, other] = await Promise.all([
+    steer,
+    redeemer.maybeRedeemForPool([a]),
+    redeemer.maybeRedeemForPool([b]),
+  ]);
+  assert.equal(spent.outcome, 'redeemed');
+  assert.equal(offered.redeemed, true);
+  assert.equal(offered.account, 'a');
+  assert.equal(other.redeemed, false);
+  assert.match(other.reason, /holding off/);
+  assert.deepEqual(calls.claim, ['a']);
+});
+
 test('a steer\'s claim that gets no verdict holds the fleet, as a dry-pool one does', async () => {
   const { am, redeemer, calls } = harness({ config: {}, accounts: [oauth('a'), oauth('b')], claim: () => ({ error: 'socket hang up' }) });
   const r = await redeemer.redeemForSteer(am.accounts[0]);

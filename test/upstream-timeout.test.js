@@ -404,6 +404,31 @@ test('a forwarded answer held whole waits out a head deadline longer than the bo
   });
 });
 
+test('a non-streaming answer can finish after the fleet idle deadline under its account override', async (t) => {
+  const upstream = http.createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.flushHeaders();
+      const timer = setTimeout(() => res.end('{"ok":true}'), 450);
+      res.once('close', () => clearTimeout(timer));
+    });
+  });
+  await withEnv({ TEAMCLAUDE_UPSTREAM_HEADERS_TIMEOUT_MS: 200, TEAMCLAUDE_UPSTREAM_BODY_TIMEOUT_MS: 200 }, async () => {
+    const { port } = await quietProxy(t, upstream, (upstreamPort) => ({
+      accounts: [{ name: 'backend', type: 'apikey', apiKey: 'k1', headersTimeoutMs: 5_000 }],
+      upstream: `http://127.0.0.1:${upstreamPort}`,
+    }));
+    const res = await fetch(`http://127.0.0.1:${port}/v1/messages`, {
+      method: 'POST',
+      headers: { 'x-api-key': 'k', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'm', messages: [], stream: false }),
+    });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { ok: true });
+  });
+});
+
 test('the token-refresh passthrough answers 502 when its upstream goes quiet', async (t) => {
   await withEnv({ TEAMCLAUDE_UPSTREAM_BODY_TIMEOUT_MS: 300 }, async () => {
     const { port, errors } = await quietProxy(t, quietUpstream(), (upstreamPort) => ({

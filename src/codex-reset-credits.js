@@ -813,7 +813,8 @@ export class ResetCreditRedeemer {
     }
     const deadline = now + this.timeoutMs;
     const state = this._stateFor(account);
-    const pre = redeemPreconditions({ account, now, consented: true });
+    const consented = true;
+    const pre = redeemPreconditions({ account, now, consented });
     if (!pre.ok) return later(pre.reason);
     if (now < state.cooldownUntil) return later('cooling down after a recent attempt', state.cooldownUntil);
     // The holdings count as a negative gate, as in _precheck.
@@ -825,7 +826,7 @@ export class ResetCreditRedeemer {
     // had room, when no credit had anything to reset.
     const credit = redeemableCredit(ready.credits);
     if (!credit) return none('holds no redeemable credit');
-    const result = await this._consume(account, state, { redeem: true, reason: 'its steer has spent its week (--redeem)', creditId: credit.id }, now, deadline, beforeSpend);
+    const result = await this._consume(account, state, { redeem: true, reason: 'its steer has spent its week (--redeem)', creditId: credit.id }, now, deadline, { beforeSpend, consented });
     // Upstream has nothing of this account's to reset: the weekly reading that
     // sent the steer here is stale. Re-read it, inside what is left of the
     // budget, so the account can take traffic again and reach the real wall.
@@ -1019,10 +1020,10 @@ export class ResetCreditRedeemer {
    * @param {{redeem: boolean, reason: string, creditId: string|null}} verdict
    * @param {number} now
    * @param {number} deadline
-   * @param {((claim: { requestId: string }) => Promise<boolean>)|null} [beforeSpend]  a steer's (see redeemForSteer)
+   * @param {{ consented?: boolean, beforeSpend?: ((claim: { requestId: string }) => Promise<boolean>)|null }} [opts]  a steer's consent and hook (see redeemForSteer)
    * @returns {Promise<RedeemResult>}
    */
-  async _consume(account, state, verdict, now, deadline, beforeSpend = null) {
+  async _consume(account, state, verdict, now, deadline, { beforeSpend = null, consented = false } = {}) {
     const name = safeLine(account.name, 64);
     // Raced against the deadline, not merely measured after the fact: the
     // budget exists to bound what the waiting client is held for, and a check
@@ -1043,7 +1044,7 @@ export class ResetCreditRedeemer {
     // Removed while the attempt read it: a credit spent there serves nothing.
     if (!this.am.accounts?.includes(account)) return { redeemed: false, reason: 'account is no longer listed' };
 
-    return this.redeemGrant(account, verdict.creditId, { deadline, reason: verdict.reason, beforeSpend });
+    return this.redeemGrant(account, verdict.creditId, { deadline, reason: verdict.reason, beforeSpend, consented });
   }
 
   /**
@@ -1053,10 +1054,10 @@ export class ResetCreditRedeemer {
    *
    * @param {Record<string, any>} account
    * @param {string|null} creditId
-   * @param {{ manual?: boolean, deadline?: number, reason?: string, beforeSpend?: ((claim: { requestId: string }) => Promise<boolean>)|null }} [opts]
+   * @param {{ manual?: boolean, consented?: boolean, deadline?: number, reason?: string, beforeSpend?: ((claim: { requestId: string }) => Promise<boolean>)|null }} [opts]
    * @returns {Promise<RedeemResult>}
    */
-  async redeemGrant(account, creditId, { manual = false, deadline = this.now() + this.timeoutMs, reason = 'manual redeem', beforeSpend = null } = {}) {
+  async redeemGrant(account, creditId, { manual = false, consented = false, deadline = this.now() + this.timeoutMs, reason = 'manual redeem', beforeSpend = null } = {}) {
     if (manual && this.inFlight) return { redeemed: false, reason: 'an automatic reset is in progress' };
     const name = safeLine(account.name, 64);
     const state = this._stateFor(account);
@@ -1109,10 +1110,10 @@ export class ResetCreditRedeemer {
       state.cooldownUntil = now + SUCCESS_COOLDOWN_MS;
       this._holdFleet(now + SUCCESS_COOLDOWN_MS);
       // Pruned as it is appended, so the list is bounded by what a week can
-      // hold rather than by the uptime of the process. A manual redemption is
-      // recorded too: it moved an account out of its cohort like any other, so
-      // the share cap counts it. The per-day cap does not (see dailyCapVerdict).
-      this.ledger = [...recentRedemptions(this.ledger, now), { account, name, cohort, at: now, manual }];
+      // hold rather than by the uptime of the process. Panel and steer spends
+      // move an account out of its cohort too, so the share cap counts them.
+      // The per-day cap counts only spends without operator consent.
+      this.ledger = [...recentRedemptions(this.ledger, now), { account, name, cohort, at: now, manual: manual || consented }];
       const windows = result.windowsReset || 0;
       this.log(`[TeamClaude] ${manual ? 'Manually redeemed' : 'Redeemed'} a free Codex rate-limit reset on "${name}" — ${windows} window(s) reset (${result.code})`);
       try { await this._refresh(account, name, deadline); } catch {

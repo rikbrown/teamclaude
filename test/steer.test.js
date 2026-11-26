@@ -261,6 +261,15 @@ test('a steer is refused a --redeem it cannot use, and a target already at its w
   assert.deepEqual(am.steerList().map(s => s.target), ['t']);
 });
 
+test('a long-lived Claude login accepts a plain steer but not --redeem', () => {
+  const am = fleet([oauth('a'), oauth('long-lived', { longLived: true, refreshToken: undefined })]);
+  const target = indexOf(am, 'long-lived');
+  assert.throws(() => am.setSteer(target, { redeem: true }), /holds no banked reset/);
+  const { steer } = am.setSteer(target);
+  assert.equal(steer.target, 'long-lived');
+  assert.equal(steer.redeem, false);
+});
+
 // ── persistence ─────────────────────────────────────────────────────────────
 
 test('a steer survives a restart by identity, following a rename; an ended or orphaned one is dropped', () => {

@@ -19,6 +19,9 @@ const ANSWERS = {
   401: { headers: {}, type: 'authentication_error' },
   403: { headers: {}, type: 'permission_error' },
   400: { headers: {}, type: 'invalid_request_error' },
+  // A 429 with no retry-after and no rate-limit headers is about the request,
+  // not the account (#288): the proxy's pinned 429 always has retry-after.
+  '429-bare': { status: 429, headers: {}, type: 'rate_limit_error' },
 };
 
 /** Fleet of two pinned accounts plus a Codex login (which makes a loopback
@@ -32,7 +35,7 @@ async function withPinnedPair(status, fn) {
     hits.push(email);
     if (email === 'a@gmail.com') {
       const answer = ANSWERS[status];
-      res.writeHead(status, { 'content-type': 'application/json', ...answer.headers });
+      res.writeHead(answer.status ?? status, { 'content-type': 'application/json', ...answer.headers });
       res.end(JSON.stringify({ type: 'error', error: { type: answer.type, message: `pinned account ${status}` } }));
       return;
     }
@@ -84,6 +87,15 @@ test('a 429 from a pinned Google account holds that account until retry-after an
     // The next request does not ask the held account again.
     assert.equal(await send(), 200);
     assert.deepEqual(hits.slice(2), ['b@gmail.com']);
+  });
+});
+
+test('a 429 with no retry-after from a pinned Google account does not hold the account', async () => {
+  await withPinnedPair('429-bare', async ({ send, hits, am }) => {
+    const status = await send();
+    const a = am.accounts[0];
+    assert.notEqual(a.status, 'throttled', `not held (got ${status}, hits ${hits.join(',')})`);
+    assert.ok(!(a.rateLimitedUntil > Date.now() + 5_000), 'no account-level hold');
   });
 });
 

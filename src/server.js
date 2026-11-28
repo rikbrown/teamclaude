@@ -5676,8 +5676,10 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
       // is rate-limited or out of quota: it never waits or switches account
       // for a pinned request. So this 429 is the account's verdict, held until
       // its retry-after, and the request moves to another account in the route
-      // (the next Google account), like a rejected quota window.
-      const pinnedGoogleSpent = !!account.antigravityAccount && !generalRejected;
+      // (the next Google account), like a rejected quota window. A 429 with no
+      // retry-after and no rate-limit headers is about the request (see
+      // requestScoped above), so it never holds the account.
+      const pinnedGoogleSpent = !!account.antigravityAccount && !generalRejected && !requestScoped;
       const fableRejected = rl['anthropic-ratelimit-unified-7d_oi-status'] === 'rejected' && !generalRejected;
       const codexFamilyRejected = spentCodexWindows.length > 0 && !generalRejected;
       if ((generalRejected || fableRejected || codexFamilyRejected || pinnedGoogleSpent) && (creditsRecheck || retryCount < maxRetries)) {

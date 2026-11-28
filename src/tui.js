@@ -28,7 +28,7 @@ import { refreshTokenExpiryWarning, knownRefreshTokenExpiry, setRefreshTokenExpi
 // all read them from there, so they cannot drift apart (#426).
 import { MAX_PROBE_SECONDS, ROUTE_COLORS } from './config-ops.js';
 import { isLocalUpstream, isQuotaConduit, providerForPath } from './provider.js';
-import { isUsableAntigravityAccount } from './backend-quota.js';
+import { antigravityGoogleAccounts, isUsableAntigravityAccount } from './backend-quota.js';
 import { canRedeemOn, formatSteerLeft } from './steer.js';
 import { ThroughputMeter, requestRate, formatRate } from './throughput.js';
 import { formatSpend } from './pricing.js';
@@ -4099,17 +4099,11 @@ export class TUI {
     return left.complete && right.complete ? { leftW, rightW, left, right } : null;
   }
 
-  /** Google accounts reported by any antigravity local proxy with a reading.
+  /** Google accounts reported by any antigravity local proxy with a reading,
+   *  each once: accounts pinned to one proxy all carry its full list.
    *  Empty before the first reading or when no account sets quotaProvider. */
   _geminiAccounts() {
-    /** @type {Array<any>} */
-    const list = [];
-    for (const a of this.am.accounts) {
-      if (a?.quotaProvider !== 'antigravity' || a.disabled) continue;
-      const accts = a.quota?.backend?.accounts;
-      if (Array.isArray(accts) && accts.length > 0) list.push(...accts);
-    }
-    return list;
+    return antigravityGoogleAccounts(this.am.accounts);
   }
 
   /** Column budget and growth stages [floor, ideal] for the Gemini panel.

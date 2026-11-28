@@ -227,6 +227,13 @@ export function applyAuthHeaders(headers, account) {
   } else {
     headers['x-api-key'] = account.credential;
   }
+  // An antigravity proxy serves a request that names one of its Google
+  // accounts from that account only (accounts[].antigravityAccount). The
+  // inbound copy is dropped before this (server.js forwardRequest), so only
+  // the account's own setting can choose the Google account.
+  if (typeof account.antigravityAccount === 'string' && account.antigravityAccount) {
+    headers['x-antigravity-account'] = account.antigravityAccount;
+  }
 }
 
 /**

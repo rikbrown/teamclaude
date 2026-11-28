@@ -5,6 +5,7 @@ import {
   hasBackendQuota,
   fetchBackendQuota,
   accountQuotaProvider,
+  accountAntigravityAccount,
   bestAntigravityAccount,
 } from '../src/backend-quota.js';
 import { AccountManager } from '../src/account-manager.js';
@@ -135,6 +136,92 @@ for (const [field, value] of [['upstream', 'http://127.0.0.1:18081'], ['quotaPro
     assert.equal(prober.getStatus().accounts[0].status, field === 'upstream' ? 'never' : 'not-applicable');
   });
 }
+
+test('accountAntigravityAccount takes a trimmed email only on an antigravity account, and says why otherwise', () => {
+  const acct = (over = {}) => ({ name: 'g', upstream: UPSTREAM, quotaProvider: 'antigravity', ...over });
+  assert.equal(accountAntigravityAccount(acct(), 'antigravity'), null);
+  assert.equal(accountAntigravityAccount(acct({ antigravityAccount: '' }), 'antigravity'), null);
+  assert.equal(accountAntigravityAccount(acct({ antigravityAccount: ' a@gmail.com ' }), 'antigravity'), 'a@gmail.com');
+
+  for (const [value, why] of [
+    [42, /ignoring antigravityAccount.*must be a string/],
+    ['a@gmail.com\r\nx-evil: 1', /ignoring antigravityAccount.*no spaces or control characters/],
+    ['a b@gmail.com', /ignoring antigravityAccount.*no spaces or control characters/],
+  ]) {
+    const r = captureLogs(() => accountAntigravityAccount(acct({ antigravityAccount: value }), 'antigravity'));
+    assert.equal(r.result, null, String(value));
+    assert.equal(r.logs.length, 1);
+    assert.match(r.logs[0], why);
+  }
+  const noProvider = captureLogs(() => accountAntigravityAccount(acct({ quotaProvider: undefined, antigravityAccount: 'a@gmail.com' }), null));
+  assert.equal(noProvider.result, null);
+  assert.equal(noProvider.logs.length, 1);
+  assert.match(noProvider.logs[0], /ignoring antigravityAccount.*requires `quotaProvider: "antigravity"`/);
+});
+
+test('AccountManager and syncAccountsFromDisk load and live-sync antigravityAccount, and a new pin drops the old reading', async () => {
+  const base = { name: 'gemini:a', type: 'oauth', accessToken: 'k', upstream: UPSTREAM, quotaProvider: 'antigravity' };
+  const mem = { accounts: [{ ...base, antigravityAccount: 'a@gmail.com' }] };
+  const { result: am, logs } = captureLogs(() => new AccountManager([{ ...base, antigravityAccount: 'a@gmail.com' }, { ...base, name: 'no-provider', quotaProvider: undefined, antigravityAccount: 'b@gmail.com' }]));
+  assert.equal(am.accounts[0].antigravityAccount, 'a@gmail.com');
+  assert.equal(am.accounts[1].antigravityAccount, null);
+  assert.equal(logs.filter(l => l.includes('antigravityAccount')).length, 1);
+
+  const reading = { ...parse([googleAccount('a@gmail.com', { weekly: remaining(0.8) })]), at: now };
+  am.applyBackendQuota(0, reading);
+  await syncAccountsFromDisk({ accounts: [{ ...base, antigravityAccount: 'a@gmail.com' }] }, mem, am);
+  assert.equal(am.accounts[0].quota.backend, reading, 'an unchanged pin keeps the reading');
+
+  await syncAccountsFromDisk({ accounts: [{ ...base, antigravityAccount: 'b@gmail.com' }] }, mem, am);
+  assert.equal(am.accounts[0].antigravityAccount, 'b@gmail.com');
+  assert.equal(mem.accounts[0].antigravityAccount, 'b@gmail.com');
+  assert.equal(am.accounts[0].quota.backend, null, 'a reading for another Google account is dropped');
+
+  await syncAccountsFromDisk({ accounts: [{ ...base }] }, mem, am);
+  assert.equal(am.accounts[0].antigravityAccount, null);
+  assert.equal('antigravityAccount' in mem.accounts[0], false);
+});
+
+test('a pinned account takes its own Google account\'s windows, matched without case', async () => {
+  const body = {
+    fetchedAt: iso(now),
+    accounts: [
+      googleAccount('best@gmail.com', { fiveHour: remaining(1, SES_RESET), weekly: remaining(1, WK_RESET) }),
+      googleAccount('Pinned@Gmail.com', { fiveHour: remaining(0.3, SES_RESET), weekly: remaining(0.6, WK_RESET) }),
+    ],
+  };
+  const r = await fetchBackendQuota(
+    { upstream: UPSTREAM, quotaProvider: 'antigravity', antigravityAccount: 'pinned@gmail.com', credential: 'k' },
+    { fetchImpl: okFetch(body) },
+  );
+  assert.equal(r.windows.fiveHour.utilization, 0.7);
+  assert.equal(r.windows.weekly.utilization, 0.4);
+  assert.equal(r.utilization, 0.7);
+  assert.equal(r.accounts.length, 2, 'the panel still gets every Google account');
+
+  // Without the pin, the best usable account wins as before.
+  const unpinned = await fetchBackendQuota(
+    { upstream: UPSTREAM, quotaProvider: 'antigravity', credential: 'k' },
+    { fetchImpl: okFetch(body) },
+  );
+  assert.equal(unpinned.utilization, 0);
+});
+
+test('a pinned account whose Google account is missing, in error or disabled reads as not usable', () => {
+  const healthy = googleAccount('other@gmail.com', { weekly: remaining(0.9) });
+  const pinned = (rows) => providerFor(UPSTREAM, 'antigravity').parse({ accounts: rows }, { antigravityAccount: 'p@gmail.com' });
+  for (const [rows, text] of [
+    [[healthy], 'pinned account not in proxy'],
+    [[healthy, googleAccount('p@gmail.com', { weekly: remaining(0.9) }, { status: 'invalid' })], 'pinned account invalid'],
+    [[healthy, googleAccount('p@gmail.com', { weekly: remaining(0.9) }, { enabled: false })], 'pinned account disabled'],
+  ]) {
+    const r = pinned(rows);
+    assert.equal(r.utilization, null, text);
+    assert.equal(r.windows, undefined, text);
+    assert.equal(r.text, text);
+    assert.equal(r.accounts.length, rows.length);
+  }
+});
 
 test('endpoint is called at {upstream}/v1/account-quotas with Bearer credential', async () => {
   let seen = null;

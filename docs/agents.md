@@ -96,7 +96,9 @@ a sidecar that knows it, or the dispatch reaches a model id nothing answers. See
 The `gemini-*` agents need a route that sends `gemini-*` to a translating proxy for a Google AI
 subscription. The trial uses [antigravity-claude-proxy](https://github.com/badrisnarayanan/antigravity-claude-proxy)
 as a backend account (`upstream` set to the proxy, `accessToken` set to the proxy's `API_KEY`). That proxy
-holds the Google sign-in and picks the account itself, so TeamClaude does not see the Google quota yet.
+holds the Google sign-in. With one account it picks the Google account itself. To let TeamClaude pick, add one
+account for each Google account with `antigravityAccount` set to its email (see
+[Third-party backend quota](quota.md#third-party-backend-quota)).
 
 A Gemini model takes its effort only from its model id, so each `gemini-*` agent pins the full id, such as
 `gemini-4-neon-high`. The `effort` of the agent file and the `--effort` flag of a child session do not change it.

@@ -332,3 +332,34 @@ test('attach mode carries quotaProvider and scrubs quota.backend.accounts off th
   assert.match(panel, /Gemini/);
   assert.match(panel, /a@gmail\.com/);
 });
+
+test('two accounts pinned to one proxy draw and count each Google account once', () => {
+  const now = Date.now();
+  const reset = now + HOUR;
+  const am = new AccountManager([
+    geminiAccount({ name: 'gemini:a', antigravityAccount: 'a@gmail.com' }),
+    geminiAccount({ name: 'gemini:b', antigravityAccount: 'b@gmail.com' }),
+  ]);
+  const routes = [makeRoute('gemini', ['gemini:a', 'gemini:b'])];
+  const rows = (aUse) => [
+    googleAccount('a@gmail.com', { fiveHour: wireWindow(aUse, reset), weekly: wireWindow(0.1) }),
+    googleAccount('b@gmail.com', { fiveHour: wireWindow(0.05), weekly: wireWindow(0.25) }),
+    googleAccount('c@gmail.com', null, { status: 'error', error: 'HTTP 503' }),
+  ];
+  // The same proxy, read twice; the newer reading's row is the one shown.
+  am.applyBackendQuota(0, parseReading(now - 60_000, rows(0.5)));
+  am.applyBackendQuota(1, parseReading(now, rows(0.8)));
+
+  const tui = tuiFor(am, routes);
+  tui.config.quotaBarPercent = true;
+  const lines = tui._accountLines(120).map(strip);
+  for (const email of ['a@gmail.com', 'b@gmail.com', 'c@gmail.com']) {
+    assert.equal(lines.filter(l => l.includes(email)).length, 1, `${email} drawn once`);
+  }
+  assert.match(lines.join('\n'), /a@gmail\.com\s+ultra\s+Ses\s+80%/);
+
+  const [route] = routeHeadroom(am.accounts, routes, { now });
+  assert.equal(route.counted, 2);
+  assert.equal(route.total, 3);
+  assert.equal(route.value.utilization, 0.8);
+});

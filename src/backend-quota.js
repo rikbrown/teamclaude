@@ -247,7 +247,9 @@ const KIMI = {
 // Claude+GPT (`id: "3p"`) pools with `remainingFraction` (0-1) and ISO
 // `resetTime`. TeamClaude's top-level windows reflect the best usable Google
 // account that can serve, since the proxy fails over across them; every
-// account is kept in `accounts` for the TUI Gemini panel.
+// account is kept in `accounts` for the TUI Gemini panel. An account pinned to
+// one Google account (`accounts[].antigravityAccount`) takes that account's
+// windows instead: the proxy does not fail over for a pinned request.
 
 const cleanFraction = (/** @type {number} */ n) =>
   Math.min(1, Math.max(0, Math.round(n * 1e12) / 1e12));
@@ -284,6 +286,50 @@ export function isUsableAntigravityAccount(account) {
 }
 
 /**
+ * The Gemini windows of one Google account that have not reset yet, or null
+ * when none are left.
+ * @param {BackendQuotaAccount} account
+ * @param {number} now
+ * @returns {BackendQuotaWindows|null}
+ */
+function liveGeminiWindows(account, now) {
+  /** @type {BackendQuotaWindows} */
+  const windows = {};
+  for (const key of /** @type {const} */ (['weekly', 'fiveHour'])) {
+    const w = account.pools.gemini?.[key];
+    if (w && (w.resetAt == null || w.resetAt > now)) windows[key] = w;
+  }
+  return windows.weekly || windows.fiveHour ? windows : null;
+}
+
+/**
+ * The Google accounts that the antigravity proxies among `members` report,
+ * each email once. Two TeamClaude accounts on one proxy (one per pinned Google
+ * account) carry the same list, so a plain concatenation would show and count
+ * every Google account twice. The row from the newest reading wins; the order
+ * is the order of first appearance.
+ * @param {Iterable<any>} members  TeamClaude accounts
+ * @returns {BackendQuotaAccount[]}
+ */
+export function antigravityGoogleAccounts(members) {
+  /** @type {Map<string, { row: BackendQuotaAccount, at: number }>} */
+  const byEmail = new Map();
+  for (const a of members) {
+    if (!a || a.disabled || a.quotaProvider !== 'antigravity') continue;
+    const reading = a.quota?.backend;
+    if (!Array.isArray(reading?.accounts)) continue;
+    const at = Number.isFinite(reading.at) ? reading.at : 0;
+    for (const row of reading.accounts) {
+      if (!row || typeof row.email !== 'string') continue;
+      const key = row.email.toLowerCase();
+      const seen = byEmail.get(key);
+      if (!seen || at > seen.at) byEmail.set(key, { row, at });
+    }
+  }
+  return [...byEmail.values()].map(v => v.row);
+}
+
+/**
  * Choose one usable seat with live Gemini quota. A seat with headroom beats
  * one that cannot serve; within those groups, prefer the lower weekly reading,
  * then the lower 5-hour reading. Keep the first account on a tie.
@@ -296,13 +342,8 @@ export function bestAntigravityAccount(accounts, now) {
   let best = null;
   for (const account of accounts) {
     if (!isUsableAntigravityAccount(account)) continue;
-    /** @type {BackendQuotaWindows} */
-    const windows = {};
-    for (const key of /** @type {const} */ (['weekly', 'fiveHour'])) {
-      const w = account.pools.gemini?.[key];
-      if (w && (w.resetAt == null || w.resetAt > now)) windows[key] = w;
-    }
-    if (!windows.weekly && !windows.fiveHour) continue;
+    const windows = liveGeminiWindows(account, now);
+    if (!windows) continue;
     const week = windows.weekly?.utilization ?? windows.fiveHour?.utilization ?? 1;
     const session = windows.fiveHour?.utilization ?? week;
     const canServe = week < 1 && session < 1;
@@ -319,7 +360,7 @@ export function bestAntigravityAccount(accounts, now) {
 const ANTIGRAVITY = {
   id: 'antigravity',
   path: '/v1/account-quotas',
-  parse(/** @type {any} */ body) {
+  parse(/** @type {any} */ body, /** @type {Record<string, any>|null|undefined} */ account = null) {
     if (!body || typeof body !== 'object' || Array.isArray(body) || !Array.isArray(body.accounts)) return null;
     if (body.accounts.length === 0 && typeof body.fetchedAt !== 'string') return null;
     /** @type {BackendQuotaAccount[]} */
@@ -357,14 +398,29 @@ const ANTIGRAVITY = {
     if (body.accounts.length > 0 && accounts.length === 0) return null;
 
     const now = Date.now();
-    const best = bestAntigravityAccount(accounts, now);
-    if (!best) {
-      const text = accounts.length === 0 ? 'no accounts'
-        : !accounts.some(isUsableAntigravityAccount) ? 'no usable accounts'
-        : 'no quota yet';
-      return { label: 'Plan', text, utilization: null, accounts };
+    const pin = typeof account?.antigravityAccount === 'string' ? account.antigravityAccount.toLowerCase() : '';
+    /** @type {BackendQuotaWindows|null} */
+    let windows;
+    if (pin) {
+      // A pinned request is served by this Google account or refused, so only
+      // its row speaks for the TeamClaude account.
+      const row = accounts.find(a => a.email.toLowerCase() === pin);
+      if (!row || !isUsableAntigravityAccount(row)) {
+        const text = !row ? 'pinned account not in proxy' : `pinned account ${row.enabled ? row.status : 'disabled'}`;
+        return { label: 'Plan', text, utilization: null, accounts };
+      }
+      windows = liveGeminiWindows(row, now);
+      if (!windows) return { label: 'Plan', text: 'no quota yet', utilization: null, accounts };
+    } else {
+      const best = bestAntigravityAccount(accounts, now);
+      if (!best) {
+        const text = accounts.length === 0 ? 'no accounts'
+          : !accounts.some(isUsableAntigravityAccount) ? 'no usable accounts'
+          : 'no quota yet';
+        return { label: 'Plan', text, utilization: null, accounts };
+      }
+      windows = best.windows;
     }
-    const { windows } = best;
     const parts = [];
     for (const [key, name] of /** @type {const} */ ([['fiveHour', '5h'], ['weekly', 'week']])) {
       const w = windows[key];
@@ -383,7 +439,7 @@ const ANTIGRAVITY = {
  * @property {string} [host]  the upstream host this entry answers for (exact or subdomain match)
  * @property {string} path  the quota endpoint, resolved against the upstream origin
  * @property {(credential: string) => Record<string, string>} [headers]  the auth header shape, when it is not `Authorization: Bearer`
- * @property {(body: any) => ({ label: string, text: string, utilization: number|null, windows?: BackendQuotaWindows, accounts?: BackendQuotaAccount[] } | null)} parse  the normalized reading, or null for a reply it does not recognize
+ * @property {(body: any, account?: Record<string, any>|null) => ({ label: string, text: string, utilization: number|null, windows?: BackendQuotaWindows, accounts?: BackendQuotaAccount[] } | null)} parse  the normalized reading, or null for a reply it does not recognize
  * @property {{ url: (upstream: string) => string, parse: (body: any) => ({ amount: number, text: string } | null) }} [balance]  a pay-as-you-go balance endpoint, fetched best-effort after the quota one
  */
 
@@ -517,6 +573,33 @@ export function accountQuotaProvider(acct) {
 }
 
 /**
+ * The account's `antigravityAccount` setting (the Google account email that
+ * every request from this account is pinned to), trimmed, or null. It needs
+ * `quotaProvider: "antigravity"`; pass the value accountQuotaProvider gave, so
+ * a bad quotaProvider is reported once, not twice. A value that cannot be used
+ * is dropped with one line saying why.
+ *
+ * @param {Record<string, any>|null|undefined} acct
+ * @param {string|null} quotaProvider  the normalized quotaProvider
+ * @returns {string|null}
+ */
+export function accountAntigravityAccount(acct, quotaProvider) {
+  const raw = acct?.antigravityAccount;
+  if (raw == null || raw === '') return null;
+  const say = (/** @type {string} */ why) => {
+    console.log(`[TeamClaude] Account "${safeLine(acct?.name, 64)}": ignoring antigravityAccount — ${why}`);
+    return null;
+  };
+  if (typeof raw !== 'string') return say('it must be a string (a Google account email)');
+  // It travels as a request header value, so no spaces or control characters.
+  const email = raw.trim();
+  if (!email) return null;
+  if (!/^[^\s\x00-\x1f\x7f]+$/.test(email)) return say('it must be one email address, with no spaces or control characters');
+  if (quotaProvider !== 'antigravity') return say('it requires `quotaProvider: "antigravity"` on the account');
+  return email;
+}
+
+/**
  * The provider entry for an upstream URL (and optional explicit `quotaProvider`),
  * or null when we know of none. An explicit `quotaProvider` selects by id
  * regardless of host; otherwise the upstream host is matched against PROVIDERS.
@@ -579,7 +662,7 @@ export async function fetchBackendQuota(account, { fetchImpl = proxyFetch, timeo
     if (!res.ok) return { error: `HTTP ${res.status}` };
     const body = await readJsonBounded(res, RESPONSE_LIMIT);
     if (body === undefined) return { error: 'response too large' };
-    let reading = provider.parse(body);
+    let reading = provider.parse(body, account);
     if (provider.balance) {
       // Best-effort: a failing balance service must not discard the quota
       // reading, and its own short deadline bounds the delay it adds. Only a

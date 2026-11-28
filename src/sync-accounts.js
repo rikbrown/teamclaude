@@ -6,7 +6,7 @@ import { ensureAccountIds } from './account-id.js';
 import { accountSwitchThreshold, accountAllowsExtraUsage, accountRouting, accountEndsAt, isLongLived, normalizeHeadersTimeoutMs } from './account-manager.js';
 import { localListener } from './upstream-proxy.js';
 import { accountCredit } from './api-credit.js';
-import { accountQuotaProvider } from './backend-quota.js';
+import { accountAntigravityAccount, accountQuotaProvider } from './backend-quota.js';
 
 // A long-lived login sets `longLived` and drops `importFrom` on disk; a config
 // row still holding the old pair would write it back on the next save. Only
@@ -28,6 +28,7 @@ function mirrorCredentialSource(cfgAcct, diskAcct) {
 function mirrorRowOntoEntry(cfgAcct, diskAcct) {
   if (diskAcct.upstream) cfgAcct.upstream = diskAcct.upstream; else delete cfgAcct.upstream;
   if (diskAcct.quotaProvider != null) cfgAcct.quotaProvider = diskAcct.quotaProvider; else delete cfgAcct.quotaProvider;
+  if (diskAcct.antigravityAccount != null) cfgAcct.antigravityAccount = diskAcct.antigravityAccount; else delete cfgAcct.antigravityAccount;
   if (diskAcct.modelMap) cfgAcct.modelMap = diskAcct.modelMap; else delete cfgAcct.modelMap;
   if (diskAcct.stripRequestFields) cfgAcct.stripRequestFields = diskAcct.stripRequestFields; else delete cfgAcct.stripRequestFields;
   if (diskAcct.messageThreads === true) cfgAcct.messageThreads = true; else delete cfgAcct.messageThreads;
@@ -260,11 +261,17 @@ export async function syncAccountsFromDisk(diskConfig, memConfig, accountManager
     // below, which are what it compares against.
     const upstream = diskAcct.upstream || null;
     const quotaProvider = accountQuotaProvider(diskAcct);
+    const antigravityAccount = accountAntigravityAccount(diskAcct, quotaProvider);
     if (mgr.upstream !== upstream
       || mgr.messageThreads !== (diskAcct.messageThreads === true)) mgr.threadRefusalReported = false;
-    if (mgr.upstream !== upstream || mgr.quotaProvider !== quotaProvider) mgr.quota.backend = null;
+    // A reading taken for another binding, or for another pinned Google
+    // account, describes a different seat.
+    if (mgr.upstream !== upstream || mgr.quotaProvider !== quotaProvider
+      || mgr.antigravityAccount !== antigravityAccount) mgr.quota.backend = null;
     mgr.upstream = upstream;
     mgr.quotaProvider = quotaProvider;
+    // Read per request (applyAuthHeaders), like upstream.
+    mgr.antigravityAccount = antigravityAccount;
     mgr.modelMap = diskAcct.modelMap || null;
     // Read per request like the two above (server.js rewriteRequestBody), and
     // missing from this sync until #374: an edit waited for a restart.

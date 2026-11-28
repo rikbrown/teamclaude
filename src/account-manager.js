@@ -27,7 +27,7 @@ import { parseRoutingUrl, describeRouting, routingToUrl, isRoutingFailure } from
 import { isSelfProxy } from './upstream-proxy.js';
 import { envVar } from './brand.js';
 import { accountCredit, emptyCreditState, recordCreditUsage, rollCreditCycle, creditView, exportCreditState, restoreCreditState } from './api-credit.js';
-import { accountQuotaProvider } from './backend-quota.js';
+import { accountAntigravityAccount, accountQuotaProvider } from './backend-quota.js';
 import { STEER_MAX_MS, STEER_REDEEM_RETRY_MS, SteerError, canRedeemOn, formatSteerLeft } from './steer.js';
 /** @typedef {import('./session-tracker.js').Observation} Observation */
 /** @typedef {import('./steer.js').Steer} Steer */
@@ -712,6 +712,7 @@ function makeAccount(acct, index, listener = null) {
   if (acct.preferExtraUsage === true && !accountAllowsExtraUsage(acct)) {
     console.warn(`[TeamClaude] Account "${safeLine(acct.name, 64)}": preferExtraUsage is ignored: set allowExtraUsage: true on an Anthropic OAuth account`);
   }
+  const quotaProvider = accountQuotaProvider(acct);
   return {
     index,
     // The entry this account was built from. `index` is a position in this list
@@ -796,7 +797,11 @@ function makeAccount(acct, index, listener = null) {
     // Explicit backend quota provider id (e.g. "antigravity" for a local
     // antigravity-claude-proxy whose loopback host cannot match by domain).
     // Validated here and on reload; see backend-quota.js.
-    quotaProvider: accountQuotaProvider(acct),
+    quotaProvider,
+    // The Google account (email) an antigravity proxy must serve this account's
+    // requests from: sent as X-Antigravity-Account on every request (see
+    // provider.js applyAuthHeaders). Validated here and on reload.
+    antigravityAccount: accountAntigravityAccount(acct, quotaProvider),
     modelMap: acct.modelMap || null,
     // Fields to drop from request bodies for this account (third-party upstreams
     // that reject e.g. `context_management`). See server.js stripBodyFields.
@@ -8652,7 +8657,11 @@ export class AccountManager {
   markCredentialRejected(accountIndex, why) {
     const account = this.accounts[accountIndex];
     if (!account || account.status === 'error') return;
-    if (account.type !== 'oauth') {
+    // An account pinned to a Google account behind an antigravity proxy is
+    // held the same way: the proxy answers 401/403 while that Google account
+    // needs a re-login or is disabled THERE, which is fixed on the proxy, not
+    // by a TeamClaude login, and the next request after the hold sees it.
+    if (account.type !== 'oauth' || account.antigravityAccount) {
       // Requests already in flight when the first 401 landed come back with
       // their own. They are the same news, not further rejections, and counting
       // them would run one bad minute straight up to the longest cooldown.
@@ -8662,7 +8671,8 @@ export class AccountManager {
       account.credentialRejections = (account.credentialRejections || 0) + 1;
       account.credentialRejectedUntil = Date.now() + seconds * 1000;
       const nth = account.credentialRejections > 1 ? `, ${account.credentialRejections} in a row` : '';
-      console.error(`[TeamClaude] Account "${safeLine(account.name, 64)}" held out of rotation for ${seconds}s: ${why}${nth} — it will be retried after that; if it keeps failing, check the key in the config`);
+      const check = account.antigravityAccount ? 'that Google account on the antigravity proxy' : 'the key in the config';
+      console.error(`[TeamClaude] Account "${safeLine(account.name, 64)}" held out of rotation for ${seconds}s: ${why}${nth} — it will be retried after that; if it keeps failing, check ${check}`);
       return;
     }
     const { remedy } = this._needsLogin(account, 'credential_rejected', why);

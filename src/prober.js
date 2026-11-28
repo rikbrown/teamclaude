@@ -272,12 +272,13 @@ export class Prober {
 
   /** Read one backend account's own quota through the provider module. */
   async _probeBackend(account, startedAt) {
-    const { upstream, quotaProvider, name } = account;
+    const { upstream, quotaProvider, antigravityAccount, name } = account;
     const status = this.accountStatus.get(name);
     const reading = await this.backendFn({ ...account }, { timeoutMs: this.timeoutMs })
       .catch(err => ({ error: err?.message || String(err) }));
     const current = this.am.accounts[account.index];
-    if (current !== account || current.upstream !== upstream || current.quotaProvider !== quotaProvider) {
+    if (current !== account || current.upstream !== upstream || current.quotaProvider !== quotaProvider
+      || current.antigravityAccount !== antigravityAccount) {
       // Reload can replace the binding while the probe is awaiting a response.
       // Drop its running status too, but not the status of a newer probe.
       if (this.accountStatus.get(name) === status) this.accountStatus.delete(name);

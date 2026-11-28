@@ -1,6 +1,6 @@
 import { creditView } from './api-credit.js';
 import { providerOf, isQuotaConduit } from './provider.js';
-import { bestAntigravityAccount, isUsableAntigravityAccount } from './backend-quota.js';
+import { antigravityGoogleAccounts, bestAntigravityAccount, isUsableAntigravityAccount } from './backend-quota.js';
 import { resolveMaxUsage, spendCapReached } from './model.js';
 
 /** Resolve a subscription's quota capacity relative to a Claude Pro account. */
@@ -579,7 +579,7 @@ export function fleetAggregate(accounts, { thresholdFor = null, now = Date.now()
 
 /**
  * Headroom for a route backed by one or more antigravity proxies. Count the
- * usable Google accounts across the proxies, then choose one seat from their
+ * usable Google accounts across the proxies (each email once), then choose one seat from their
  * live Gemini windows. The best seat from a probe can change as windows expire.
  *
  * Returns null when the route has no such proxy with a reading yet, leaving
@@ -592,8 +592,8 @@ export function fleetAggregate(accounts, { thresholdFor = null, now = Date.now()
 function backendProxyRouteHeadroom(members, now) {
   const proxies = members.filter(a => a && !a.disabled && a.quotaProvider === 'antigravity' && Array.isArray(a.quota?.backend?.accounts));
   if (!proxies.length) return null;
-  /** @type {import('./backend-quota.js').BackendQuotaAccount[]} */
-  const accounts = proxies.flatMap(a => a.quota.backend.accounts);
+  // Each Google account once: two members pinned to one proxy share its list.
+  const accounts = antigravityGoogleAccounts(proxies);
   const usable = accounts.filter(isUsableAntigravityAccount);
   const counted = usable.length;
   const total = accounts.length;

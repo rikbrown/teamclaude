@@ -430,6 +430,18 @@ Provider support lives entirely in `src/backend-quota.js`, matched by the host o
 - **Moonshot Open Platform** (`api.moonshot.ai`, `api.moonshot.cn`) — the pay-as-you-go balance, as money in the region's currency.
 - **Antigravity** (`accounts[].quotaProvider: "antigravity"`) — a local `antigravity-claude-proxy` pooling one or more Google accounts behind a loopback `upstream`. Reads `GET {upstream}/v1/account-quotas` with bearer auth. Top-level `windows` carry the Gemini group (`id: "gemini"`) of the best usable Google account (`status: "ok"` and `enabled: true` — lowest weekly utilization, then lowest 5-hour), which feeds the `Routes` panel with the usable Google account count. Every Google account (including any disabled/error entries) is shown in the TUI's `Gemini` panel once the first reading arrives, with a session bar and a weekly bar for its Gemini pool. The reading also carries the `3p` Claude+GPT pool, which the panel does not draw.
 
+  To let TeamClaude route between the Google accounts, add one account for each Google account, with `accounts[].antigravityAccount` set to its email, and list them all in the route. The proxy then serves each request from that Google account only. The account's `windows` come from that email's row. If the row is missing, or its `status` is not `"ok"`, or it is disabled, the reading has no windows. Accounts on the same proxy show each Google account once in the `Gemini` panel and count it once in `Routes`.
+
+  ```json
+  "accounts": [
+    { "name": "gemini:r85686318@gmail.com", "type": "oauth", "upstream": "http://127.0.0.1:18080", "quotaProvider": "antigravity", "antigravityAccount": "r85686318@gmail.com", "headersTimeoutMs": 600000 },
+    { "name": "gemini:richard20250314@gmail.com", "type": "oauth", "upstream": "http://127.0.0.1:18080", "quotaProvider": "antigravity", "antigravityAccount": "richard20250314@gmail.com", "headersTimeoutMs": 600000 }
+  ],
+  "routes": [
+    { "name": "gemini", "match": ["gemini-*"], "accounts": ["gemini:r85686318@gmail.com", "gemini:richard20250314@gmail.com"] }
+  ]
+  ```
+
 ## Prepaid API credit
 
 The `Tok` and `Req` bars on an [API-key account](accounts.md#api-key) are per-minute **rate-limit** headroom, read from the `anthropic-ratelimit-tokens-*` and `-requests-*` headers and cleared when the minute resets. They are not money. A key that draws on **prepaid credit** has a second question: how much of the credit is left before it renews. The usual case is the monthly API credit a Claude Max ($100) or Ultra ($200) plan grants a linked Claude Console organization: it is spent first, expires at the end of each billing cycle with no rollover, and covers the Claude API and the Agent SDK (`claude -p`) but not interactive Claude Code. Such a key is typically kept as a **disabled** account that only pinned, scheduled `claude -p` jobs reach, so its Tok/Req bars read `-` nearly always.

@@ -72,6 +72,7 @@ import { getUpstreamProxy, describeProxy, describeSelfProxy, localListener, isSe
 import { parseRoutingUrl, routingToUrl, describeRouting, checkRouting } from './account-routing.js';
 import { proxyFetch } from './upstream-fetch.js';
 import { upstreamFor, applyAuthHeaders, providerForHost } from './provider.js';
+import { accountAntigravityAccount, accountQuotaProvider } from './backend-quota.js';
 import { startEventLoopMonitor } from './event-loop-monitor.js';
 import { envVar } from './brand.js';
 import { loginCallback, loadCallbackToken, saveCallbackToken, callbackWhoami, logoutCallback, callbackClientId, getCallbackAuthPath } from './callback-auth.js';
@@ -3006,7 +3007,10 @@ async function apiCommand() {
 
   /** @type {Record<string, string>} */
   const headers = {};
-  applyAuthHeaders(headers, { ...account, credential });
+  // The pin, validated as the server does, so `api` reaches the same Google
+  // account the account's requests do.
+  const antigravityAccount = accountAntigravityAccount(account, accountQuotaProvider(account));
+  applyAuthHeaders(headers, { ...account, credential, antigravityAccount });
 
   const fetchOpts = { method, headers };
   if (data) {

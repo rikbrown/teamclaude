@@ -5277,6 +5277,10 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
     // `Authorization: Bearer <its Anthropic OAuth token>` would otherwise ride
     // along untouched — to whatever host that account's `upstream` names.
     if (lk === 'x-api-key' || lk === 'authorization') continue;
+    // Chooses the Google account behind an antigravity proxy. Only the
+    // account's own antigravityAccount may set it (applyAuthHeaders); from a
+    // client it would pick a Google account the routing never chose.
+    if (lk === 'x-antigravity-account') continue;
     // Strip accept-encoding: Node fetch auto-decompresses, which would
     // mismatch the Content-Encoding header we forward to the client
     if (lk === 'accept-encoding') continue;
@@ -5667,14 +5671,25 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
       const generalRejected = rl['anthropic-ratelimit-unified-5h-status'] === 'rejected'
         || rl['anthropic-ratelimit-unified-7d-status'] === 'rejected'
         || codexAccountSpent;
+      // An antigravity proxy answers a request pinned to one Google account
+      // (accounts[].antigravityAccount) with 429 only when that Google account
+      // is rate-limited or out of quota: it never waits or switches account
+      // for a pinned request. So this 429 is the account's verdict, held until
+      // its retry-after, and the request moves to another account in the route
+      // (the next Google account), like a rejected quota window.
+      const pinnedGoogleSpent = !!account.antigravityAccount && !generalRejected;
       const fableRejected = rl['anthropic-ratelimit-unified-7d_oi-status'] === 'rejected' && !generalRejected;
       const codexFamilyRejected = spentCodexWindows.length > 0 && !generalRejected;
-      if ((generalRejected || fableRejected || codexFamilyRejected) && (creditsRecheck || retryCount < maxRetries)) {
+      if ((generalRejected || fableRejected || codexFamilyRejected || pinnedGoogleSpent) && (creditsRecheck || retryCount < maxRetries)) {
         // A Fable-only rejection leaves the account fine for other models, so we
         // do NOT throttle it globally — the recorded Fable utilization makes
         // selection skip it for Fable requests only. A general rejection spends a
         // shared bucket, so hold the whole account for its reset window.
-        if (fableRejected) {
+        if (pinnedGoogleSpent) {
+          const hold = Math.min(Math.max(retryAfter, 1), 3600);
+          console.log(`[TeamClaude] 429 on "${safeLine(account.name, 64)}" — its Google account is rate-limited or out of quota; throttling ${hold}s and switching account`);
+          accountManager.markRateLimited(account.index, hold);
+        } else if (fableRejected) {
           console.log(`[TeamClaude] Fable weekly exhausted on "${account.name}" — switching account for this Fable request`);
         } else if (codexFamilyRejected) {
           // The same shape as the Fable case: this request moves to another
@@ -6059,6 +6074,11 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
         ? oauthVerificationHold(responseBody)
         : null;
       if (verification) (ctx.verificationHold ??= new Map()).set(account, verification.url);
+      // A pinned Google account the proxy refuses (disabled there) refuses
+      // every request: hold it rather than pay a refusal per request.
+      if (account.antigravityAccount) {
+        accountManager.markCredentialRejected(account.index, 'the antigravity proxy refused its Google account (403)');
+      }
       recordRefusal(ctx, account, 403);
       if (entitlementDenied) (ctx.entitlementDeniedAccounts ??= new Set()).add(account);
       ctx.tried.add(account);
@@ -6116,9 +6136,11 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
     if (upstreamRes.status === 401 && !res.headersSent) {
       await upstreamBody?.cancel();
       if (account.type !== 'oauth' || !account.refreshToken) {
-        accountManager.markCredentialRejected(account.index, account.type !== 'oauth'
-          ? 'upstream rejected its API key (401)'
-          : 'upstream rejected its token (401) and it has no refresh token');
+        accountManager.markCredentialRejected(account.index, account.antigravityAccount
+          ? 'the antigravity proxy says its Google account needs a re-login (401)'
+          : account.type !== 'oauth'
+            ? 'upstream rejected its API key (401)'
+            : 'upstream rejected its token (401) and it has no refresh token');
       }
       recordRefusal(ctx, account, 401);
       ctx.tried.add(account);

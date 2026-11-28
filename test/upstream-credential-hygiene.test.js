@@ -271,3 +271,33 @@ test('relayRaw forwards its three headers as sent when none is a dimension', asy
     assert.equal(seen[0].headers['user-agent'], 'label-c');
   }, DIMENSIONS);
 });
+
+// X-Antigravity-Account chooses the Google account behind an antigravity
+// proxy. Only the account's own `antigravityAccount` may set it.
+test('a pinned antigravity account sends its Google account; a client cannot choose one', async () => {
+  const { server: upstream, seen } = recordingUpstream();
+  const upstreamPort = await listen(upstream);
+  const pinned = (name, email) => ({
+    name, type: 'oauth', accessToken: 'proxy-key', upstream: `http://127.0.0.1:${upstreamPort}`,
+    quotaProvider: 'antigravity', antigravityAccount: email,
+  });
+  const am = new AccountManager([pinned('gemini:a', 'a@gmail.com'), { name: 'plain', type: 'apikey', apiKey: 'sk-account-key' }], 0.98);
+  const proxy = createProxyServer(am, { proxy: { apiKey: 'tc-proxy-key' }, upstream: `http://127.0.0.1:${upstreamPort}` });
+  const port = await listen(proxy);
+  const send = (account) => fetch(`http://127.0.0.1:${port}/tc-acct/${encodeURIComponent(account)}/v1/messages`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-api-key': 'tc-proxy-key', 'x-antigravity-account': 'client-choice@gmail.com' },
+    body: JSON.stringify({ model: 'gemini-3-pro', messages: [] }),
+  });
+  try {
+    assert.equal((await send('gemini:a')).status, 200);
+    assert.equal((await send('plain')).status, 200);
+    assert.equal(seen.length, 2);
+    assert.equal(seen[0].headers['x-antigravity-account'], 'a@gmail.com');
+    assert.equal(seen[0].headers.authorization, 'Bearer proxy-key');
+    assert.equal(seen[1].headers['x-antigravity-account'], undefined, 'the client header must not reach an unpinned account');
+  } finally {
+    proxy.close();
+    upstream.close();
+  }
+});
